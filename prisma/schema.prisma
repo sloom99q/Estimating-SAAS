@@ -1,0 +1,702 @@
+// ============================================================================
+// Estimator — reference data model (Phase 1 deliverable: "Database structure")
+// ----------------------------------------------------------------------------
+// This schema is the FOUNDATION, authored now so future phases slot in without
+// migration pain. Only Organization / User / Membership are exercised by the
+// Phase 1 UI (via the mock service); everything else is modeled but not yet
+// wired to a UI. No backend runs in Phase 1 — this is the contract the Phase 2
+// API/Prisma layer will implement.
+//
+// Conventions (apply to every tenant-scoped model):
+//   - PK: cuid() string id (sortable, non-sequential — does not leak row counts
+//     across tenants).
+//   - Tenancy: `organizationId` on every tenant-scoped row (shared DB, shared
+//     schema). Cross-tenant references are blocked structurally via composite
+//     FKs `references: [organizationId, id]` (see EstimateLineItem). Pair with
+//     Postgres RLS — see docs/database.md.
+//   - Money/quantity: ALWAYS Decimal (never Float / Postgres money). Prisma
+//     returns Decimal as a Decimal.js instance — the frontend format layer must
+//     not coerce via Number() for math.
+//   - Time: every timestamp is @db.Timestamptz(6) (UTC).
+//   - Soft delete + audit: createdAt/updatedAt/deletedAt + createdById/updatedById.
+//     Uniqueness that must coexist with soft delete uses Postgres PARTIAL unique
+//     indexes (WHERE deleted_at IS NULL) added as raw SQL — see docs/database.md.
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum MembershipRole {
+  owner
+  admin
+  estimator
+  viewer
+}
+
+enum MembershipStatus {
+  invited
+  active
+  disabled
+}
+
+enum UomDimension {
+  length
+  area
+  volume
+  weight
+  count
+  time
+}
+
+enum DocumentKind {
+  datasheet
+  image
+  certificate
+  drawing
+  other
+}
+
+enum ExtractionStatus {
+  none
+  queued
+  running
+  succeeded
+  failed
+}
+
+enum ProjectStatus {
+  lead
+  active
+  on_hold
+  completed
+  cancelled
+}
+
+enum EstimateStatus {
+  draft
+  issued
+  revised
+  won
+  lost
+  expired
+}
+
+enum LineItemType {
+  material
+  labor
+  subcontract
+  equipment
+  markup
+  note
+}
+
+enum QuotationStatus {
+  draft
+  sent
+  accepted
+  rejected
+  expired
+}
+
+enum AuditAction {
+  create
+  update
+  delete
+  restore
+}
+
+// Phase 5 — future-module contract (NOT yet exercised by the app)
+
+enum InvoiceStatus {
+  draft
+  issued
+  partially_paid
+  paid
+  overdue
+  void
+}
+
+enum TaskStatus {
+  todo
+  in_progress
+  blocked
+  done
+  cancelled
+}
+
+enum CalendarEventKind {
+  site_visit
+  client_meeting
+  payment_due
+  invoice_due
+  quotation_followup
+  task
+  other
+}
+
+/// Polymorphic anchor — what a CalendarEvent / Task hangs off. Mirrors the
+/// "entityType + entityId" pattern already used by Document/AuditLog.
+enum LinkableEntity {
+  project
+  estimate
+  quotation
+  invoice
+  task
+}
+
+/// External calendar providers that a future "Sync" feature will integrate
+/// with. Enum exists so the DB type-checks today; the integration runtime
+/// lands in a later phase.
+enum CalendarProvider {
+  google
+  apple_icloud
+  microsoft_365
+}
+
+enum CalendarSyncStatus {
+  disabled
+  pending
+  active
+  error
+}
+
+// ---------------------------------------------------------------------------
+// Identity & tenancy
+// ---------------------------------------------------------------------------
+
+model Organization {
+  id              String   @id @default(cuid())
+  name            String
+  slug            String   @unique
+  // Default document currency for the tenant (ISO 4217). Currency is per-org,
+  // not per-locale — an Arabic user may still estimate in USD/SAR/AED.
+  defaultCurrency String   @default("AED") @db.Char(3)
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime @updatedAt @db.Timestamptz(6)
+  deletedAt       DateTime? @db.Timestamptz(6)
+
+  memberships     Membership[]
+  suppliers       Supplier[]
+  materialCategories MaterialCategory[]
+  materials       Material[]
+  unitsOfMeasure  UnitOfMeasure[]
+  laborProfiles   LaborProfile[]
+  projects        Project[]
+  estimates       Estimate[]
+  documents       Document[]
+  auditLogs       AuditLog[]
+  // Phase 5 future-module relations — contract only, not exercised yet.
+  invoices            Invoice[]
+  tasks               Task[]
+  calendarEvents      CalendarEvent[]
+  externalCalendarSyncs ExternalCalendarSync[]
+
+  @@map("organizations")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  // Login is by email, so email is GLOBALLY unique (a person, not a tenant row).
+  email        String   @unique
+  fullName     String
+  avatarUrl    String?
+  // True for Estimator platform staff (support). Distinct from org roles.
+  isSuperAdmin Boolean  @default(false)
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(6)
+  deletedAt    DateTime? @db.Timestamptz(6)
+
+  memberships  Membership[]
+
+  @@map("users")
+}
+
+/// A user's membership in an organization, carrying the org-scoped role.
+/// (A scalar users.role could never express multi-org membership.)
+model Membership {
+  id             String           @id @default(cuid())
+  organizationId String
+  userId         String
+  role           MembershipRole   @default(estimator)
+  status         MembershipStatus @default(invited)
+  invitedAt      DateTime         @default(now()) @db.Timestamptz(6)
+  joinedAt       DateTime?        @db.Timestamptz(6)
+
+  organization   Organization     @relation(fields: [organizationId], references: [id])
+  user           User             @relation(fields: [userId], references: [id])
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+  @@map("memberships")
+}
+
+// ---------------------------------------------------------------------------
+// Catalog: suppliers, materials, units, pricing, documents
+// ---------------------------------------------------------------------------
+
+model Supplier {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  code           String
+  currency       String   @default("AED") @db.Char(3)
+  email          String?
+  phone          String?
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime? @db.Timestamptz(6)
+
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  supplierMaterials SupplierMaterial[]
+
+  // Composite unique enables same-tenant composite FKs from child rows.
+  @@unique([organizationId, id])
+  // `code` unique per tenant — enforced as a PARTIAL index (deletedAt IS NULL)
+  // via raw SQL so a soft-deleted code can be reused. See docs/database.md.
+  @@index([organizationId, code])
+  @@map("suppliers")
+}
+
+model MaterialCategory {
+  id             String   @id @default(cuid())
+  // Nullable organizationId = a SYSTEM/global category seeded for all tenants.
+  organizationId String?
+  name           String
+  parentId       String?
+
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  parent         MaterialCategory?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children       MaterialCategory[] @relation("CategoryTree")
+  materials      Material[]
+
+  @@index([organizationId])
+  @@map("material_categories")
+}
+
+model UnitOfMeasure {
+  id             String       @id @default(cuid())
+  organizationId String
+  code           String
+  name           String
+  dimension      UomDimension
+
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  conversionsFrom UnitConversion[] @relation("FromUom")
+  conversionsTo   UnitConversion[] @relation("ToUom")
+
+  @@unique([organizationId, id])
+  @@unique([organizationId, code])
+  @@map("units_of_measure")
+}
+
+/// Converts between purchase and consumption units (e.g. tiles per box → m²).
+model UnitConversion {
+  id        String @id @default(cuid())
+  fromUomId String
+  toUomId   String
+  factor    Decimal @db.Decimal(18, 8)
+
+  fromUom   UnitOfMeasure @relation("FromUom", fields: [fromUomId], references: [id])
+  toUom     UnitOfMeasure @relation("ToUom", fields: [toUomId], references: [id])
+
+  @@unique([fromUomId, toUomId])
+  @@map("unit_conversions")
+}
+
+model Material {
+  id                String   @id @default(cuid())
+  organizationId    String
+  categoryId        String?
+  name              String
+  sku               String?
+  // Separate purchase vs consumption units; conversions drive takeoff math.
+  purchaseUomId     String?
+  consumptionUomId  String?
+  // Catalog cloning: system rows (organizationId null) can be cloned per tenant.
+  isSystem          Boolean  @default(false)
+  sourceMaterialId  String?
+  createdAt         DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt         DateTime @updatedAt @db.Timestamptz(6)
+  deletedAt         DateTime? @db.Timestamptz(6)
+
+  organization      Organization      @relation(fields: [organizationId], references: [id])
+  category          MaterialCategory? @relation(fields: [categoryId], references: [id])
+  supplierMaterials SupplierMaterial[]
+
+  @@unique([organizationId, id])
+  @@index([organizationId, categoryId])
+  @@index([organizationId, name])
+  @@map("materials")
+}
+
+/// A material offered by a supplier, with pack conversion to consumption units.
+model SupplierMaterial {
+  id             String   @id @default(cuid())
+  organizationId String
+  supplierId     String
+  materialId     String
+  unitsPerPack   Decimal  @default(1) @db.Decimal(18, 6)
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+
+  // Same-tenant composite FKs: a supplier-material can NEVER point at another
+  // tenant's supplier or material, enforced by the database itself.
+  supplier       Supplier @relation(fields: [organizationId, supplierId], references: [organizationId, id])
+  material       Material @relation(fields: [organizationId, materialId], references: [organizationId, id])
+  priceListItems PriceListItem[]
+
+  @@unique([organizationId, id])
+  @@index([organizationId, materialId])
+  @@map("supplier_materials")
+}
+
+/// Effective-dated price history → "cost intelligence". The live price is the
+/// latest active row whose [validFrom, validTo] contains today.
+model PriceListItem {
+  id                 String   @id @default(cuid())
+  organizationId     String
+  supplierMaterialId String
+  unitPrice          Decimal  @db.Decimal(14, 4)
+  currency           String   @db.Char(3)
+  validFrom          DateTime @db.Timestamptz(6)
+  validTo            DateTime? @db.Timestamptz(6)
+  isActive           Boolean  @default(true)
+  createdAt          DateTime @default(now()) @db.Timestamptz(6)
+
+  supplierMaterial   SupplierMaterial @relation(fields: [supplierMaterialId], references: [id])
+
+  @@index([organizationId, supplierMaterialId, validFrom])
+  @@map("price_list_items")
+}
+
+/// Generic attachment table (datasheets, drawings, images). The extractedData /
+/// extractionStatus columns are the AI-extraction seam (see features/ai).
+model Document {
+  id               String           @id @default(cuid())
+  organizationId   String
+  entityType       String
+  entityId         String
+  kind             DocumentKind     @default(other)
+  storageKey       String
+  mimeType         String?
+  extractedData    Json?
+  extractionStatus ExtractionStatus @default(none)
+  createdAt        DateTime         @default(now()) @db.Timestamptz(6)
+  deletedAt        DateTime?        @db.Timestamptz(6)
+
+  organization     Organization     @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId, entityType, entityId])
+  @@map("documents")
+}
+
+// ---------------------------------------------------------------------------
+// Labor
+// ---------------------------------------------------------------------------
+
+model LaborProfile {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  hourlyRate     Decimal  @db.Decimal(14, 4)
+  currency       String   @db.Char(3)
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime? @db.Timestamptz(6)
+
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@unique([organizationId, id])
+  @@map("labor_profiles")
+}
+
+// ---------------------------------------------------------------------------
+// Projects, estimates, quotations
+// ---------------------------------------------------------------------------
+
+model Project {
+  id             String        @id @default(cuid())
+  organizationId String
+  name           String
+  clientName     String?
+  status         ProjectStatus @default(lead)
+  createdAt      DateTime      @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime      @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime?     @db.Timestamptz(6)
+
+  organization   Organization  @relation(fields: [organizationId], references: [id])
+  estimates      Estimate[]
+
+  @@unique([organizationId, id])
+  @@index([organizationId, status])
+  @@map("projects")
+}
+
+model Estimate {
+  id             String         @id @default(cuid())
+  organizationId String
+  projectId      String
+  reference      String
+  // Version + status machine support re-quoting; an issued estimate is frozen.
+  version        Int            @default(1)
+  status         EstimateStatus @default(draft)
+  // Document currency for this estimate (may differ from supplier currencies).
+  currency       String         @db.Char(3)
+  createdAt      DateTime       @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime       @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime?      @db.Timestamptz(6)
+
+  organization   Organization   @relation(fields: [organizationId], references: [id])
+  project        Project        @relation(fields: [organizationId, projectId], references: [organizationId, id])
+  lineItems      EstimateLineItem[]
+  quotations     Quotation[]
+
+  @@unique([organizationId, id])
+  @@unique([organizationId, reference, version])
+  @@index([organizationId, status])
+  @@map("estimates")
+}
+
+/// The takeoff line. Polymorphic by `type`; type-specific columns are nullable.
+/// CRITICAL: prices/quantities are FROZEN as *_snapshot columns at estimate time
+/// — editing a material/supplier price later must never rewrite history. The
+/// source_* FKs exist for traceability only and are never read for math.
+model EstimateLineItem {
+  id                  String       @id @default(cuid())
+  organizationId      String
+  estimateId          String
+  parentLineItemId    String?
+  type                LineItemType
+  sortOrder           Int          @default(0)
+  description         String
+
+  // Quantity & waste
+  quantity            Decimal      @db.Decimal(14, 4)
+  wastePct            Decimal      @default(0) @db.Decimal(7, 4)
+  effectiveQuantity   Decimal      @db.Decimal(14, 4)
+  uomCodeSnapshot     String?
+
+  // Frozen pricing snapshots (the line's own truth)
+  unitPriceSnapshot   Decimal      @db.Decimal(14, 4)
+  laborRateSnapshot   Decimal?     @db.Decimal(14, 4)
+  currencySnapshot    String       @db.Char(3)
+  fxRateSnapshot      Decimal?     @db.Decimal(18, 8)
+  materialNameSnapshot String?
+  supplierNameSnapshot String?
+  lineTotalSnapshot   Decimal      @db.Decimal(16, 2)
+  capturedAt          DateTime     @default(now()) @db.Timestamptz(6)
+
+  // Traceability only (ON DELETE SET NULL in raw migration) — never read for math
+  sourceMaterialId       String?
+  sourceSupplierMaterialId String?
+  sourceLaborProfileId   String?
+
+  estimate            Estimate     @relation(fields: [organizationId, estimateId], references: [organizationId, id])
+  parent              EstimateLineItem?  @relation("LineItemTree", fields: [parentLineItemId], references: [id])
+  children            EstimateLineItem[] @relation("LineItemTree")
+
+  @@index([organizationId, estimateId, sortOrder])
+  @@map("estimate_line_items")
+}
+
+/// A point-in-time quotation document generated from an estimate.
+model Quotation {
+  id             String          @id @default(cuid())
+  organizationId String
+  estimateId     String
+  reference      String
+  status         QuotationStatus @default(draft)
+  totalAmount    Decimal         @db.Decimal(16, 2)
+  currency       String          @db.Char(3)
+  issuedAt       DateTime?       @db.Timestamptz(6)
+  validUntil     DateTime?       @db.Timestamptz(6)
+  createdAt      DateTime        @default(now()) @db.Timestamptz(6)
+
+  estimate       Estimate        @relation(fields: [organizationId, estimateId], references: [organizationId, id])
+
+  @@unique([organizationId, reference])
+  @@index([organizationId, status])
+  @@map("quotations")
+}
+
+// ---------------------------------------------------------------------------
+// Audit
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id             String      @id @default(cuid())
+  organizationId String
+  actorUserId    String?
+  entityType     String
+  entityId       String
+  action         AuditAction
+  diff           Json?
+  changedAt      DateTime    @default(now()) @db.Timestamptz(6)
+
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId, entityType, entityId])
+  @@index([organizationId, changedAt])
+  @@map("audit_logs")
+}
+
+// ===========================================================================
+// Phase 5 — future modules (Invoices, Tasks, Calendar)
+// ---------------------------------------------------------------------------
+// These models are part of the long-term contract. The UI does NOT consume
+// them yet — they exist now so that follow-on phases (calendar integration,
+// invoicing, external calendar sync) can land without a fresh migration
+// against rows that already shipped to production. Every model carries the
+// same tenancy + soft-delete + audit columns as the rest of the schema; the
+// architecture rules in CLAUDE.md still apply.
+// ===========================================================================
+
+/// Invoice generated from a Quotation (or directly from a Project). The line
+/// item table mirrors the EstimateLineItem pattern — pricing is FROZEN at
+/// the time the invoice is issued.
+model Invoice {
+  id             String        @id @default(cuid())
+  organizationId String
+  projectId      String?
+  quotationId    String?
+  reference      String
+  status         InvoiceStatus @default(draft)
+  currency       String        @db.Char(3)
+  subtotal       Decimal       @db.Decimal(16, 2)
+  taxAmount      Decimal       @default(0) @db.Decimal(16, 2)
+  totalAmount    Decimal       @db.Decimal(16, 2)
+  // The customer-facing dates: when we issued it, when payment is due.
+  issuedAt       DateTime?     @db.Timestamptz(6)
+  dueAt          DateTime?     @db.Timestamptz(6)
+  paidAt         DateTime?     @db.Timestamptz(6)
+  createdAt      DateTime      @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime      @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime?     @db.Timestamptz(6)
+
+  organization   Organization     @relation(fields: [organizationId], references: [id])
+  lineItems      InvoiceLineItem[]
+  calendarEvents CalendarEvent[]
+
+  @@unique([organizationId, id])
+  @@unique([organizationId, reference])
+  @@index([organizationId, status])
+  @@index([organizationId, dueAt])
+  @@map("invoices")
+}
+
+model InvoiceLineItem {
+  id                 String   @id @default(cuid())
+  organizationId     String
+  invoiceId          String
+  sortOrder          Int      @default(0)
+  description        String
+  quantity           Decimal  @db.Decimal(14, 4)
+  unitPriceSnapshot  Decimal  @db.Decimal(14, 4)
+  lineTotalSnapshot  Decimal  @db.Decimal(16, 2)
+  capturedAt         DateTime @default(now()) @db.Timestamptz(6)
+
+  invoice            Invoice  @relation(fields: [organizationId, invoiceId], references: [organizationId, id])
+
+  @@index([organizationId, invoiceId, sortOrder])
+  @@map("invoice_line_items")
+}
+
+/// A unit of follow-up work — site visit prep, follow-up call, internal
+/// checklist item. Tasks anchor calendar events through CalendarEventLink.
+model Task {
+  id             String     @id @default(cuid())
+  organizationId String
+  // Polymorphic anchor. e.g. (project, abc123). Same shape as Document.
+  entityType     LinkableEntity
+  entityId       String
+  title          String
+  description    String?
+  status         TaskStatus @default(todo)
+  assigneeUserId String?
+  dueAt          DateTime?  @db.Timestamptz(6)
+  completedAt    DateTime?  @db.Timestamptz(6)
+  createdAt      DateTime   @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime   @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime?  @db.Timestamptz(6)
+
+  organization   Organization     @relation(fields: [organizationId], references: [id])
+  calendarEvents CalendarEvent[]
+
+  @@unique([organizationId, id])
+  @@index([organizationId, entityType, entityId])
+  @@index([organizationId, dueAt])
+  @@map("tasks")
+}
+
+/// First-class calendar entry. The polymorphic `entityType`/`entityId` pair
+/// lets a single event link to whatever it actually is — a payment due date
+/// on an invoice, a site visit on a project, a quotation follow-up. Direct
+/// FKs (invoiceId, projectId, taskId) cover the common-case JOINs; the
+/// polymorphic columns are the source of truth.
+model CalendarEvent {
+  id             String            @id @default(cuid())
+  organizationId String
+  kind           CalendarEventKind
+  entityType     LinkableEntity
+  entityId       String
+  title          String
+  description    String?
+  startsAt       DateTime          @db.Timestamptz(6)
+  endsAt         DateTime?         @db.Timestamptz(6)
+  allDay         Boolean           @default(false)
+  location       String?
+  // Convenience FKs for the most common joins.
+  projectId      String?
+  invoiceId      String?
+  taskId         String?
+  // External sync state — populated by the future Sync feature.
+  externalSyncId String?
+  externalRef    String?
+  createdAt      DateTime          @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime          @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime?         @db.Timestamptz(6)
+
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  invoice        Invoice?     @relation(fields: [organizationId, invoiceId], references: [organizationId, id])
+  task           Task?        @relation(fields: [organizationId, taskId], references: [organizationId, id])
+  externalSync   ExternalCalendarSync? @relation(fields: [externalSyncId], references: [id])
+
+  @@index([organizationId, startsAt])
+  @@index([organizationId, entityType, entityId])
+  @@index([organizationId, kind])
+  @@map("calendar_events")
+}
+
+/// Per-user connection to an external calendar provider. One row per
+/// (organization, user, provider). The `externalRefreshToken` is encrypted
+/// at rest by the application layer — Prisma sees the ciphertext.
+model ExternalCalendarSync {
+  id                   String              @id @default(cuid())
+  organizationId       String
+  userId               String
+  provider             CalendarProvider
+  status               CalendarSyncStatus  @default(disabled)
+  externalCalendarId   String?
+  externalRefreshToken String?
+  lastSyncedAt         DateTime?           @db.Timestamptz(6)
+  lastError            String?
+  createdAt            DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt            DateTime            @updatedAt @db.Timestamptz(6)
+  deletedAt            DateTime?           @db.Timestamptz(6)
+
+  organization         Organization        @relation(fields: [organizationId], references: [id])
+  events               CalendarEvent[]
+
+  @@unique([organizationId, userId, provider])
+  @@index([organizationId, status])
+  @@map("external_calendar_syncs")
+}

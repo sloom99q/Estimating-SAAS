@@ -1,0 +1,15 @@
+{
+  "greeting": "Welcome back, {{name}}",
+  "subtitle": "Here’s what’s happening across your estimates today.",
+  "stats": {
+    "activeProjects": "Active projects",
+    "openEstimates": "Open estimates",
+    "pipelineValue": "Pipeline value",
+    "winRate": "Win rate"
+  },
+  "sections": {
+    "pipeline": "Estimating pipeline",
+    "activity": "Recent activity"
+  },
+  "placeholder": "Charts and activity feeds arrive in a later phase. This shell reserves their layout."
+}

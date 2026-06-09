@@ -1,0 +1,25 @@
+{
+  "page": {
+    "title": "Quotation",
+    "description": "Client-ready quotation for {{name}}.",
+    "back": "Back to project",
+    "print": "Print / Save as PDF"
+  },
+  "document": {
+    "title": "Quotation",
+    "issued": "Issued {{date}}",
+    "validUntil": "Valid until {{date}}",
+    "preparedFor": "Prepared for",
+    "project": "Project",
+    "spacesBreakdown": "Spaces breakdown",
+    "materialsBreakdown": "Materials breakdown",
+    "subtotal": "Subtotal",
+    "tax": "Tax ({{rate}}%)",
+    "grandTotal": "Total due",
+    "terms": "Pricing is indicative; subject to site verification and material availability.",
+    "unassignedNote": "Note: {{area}} m² is priced against default placeholder rates."
+  },
+  "notReady": {
+    "description": "This project has no spaces yet. Add a space first."
+  }
+}

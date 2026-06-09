@@ -1,0 +1,81 @@
+{
+  "title": "المشاريع",
+  "description": "أعمال التقدير ضمن مؤسستك.",
+  "newProject": "مشروع جديد",
+  "editProject": "تعديل المشروع",
+  "deleteProject": "حذف المشروع",
+  "columns": {
+    "name": "المشروع",
+    "client": "العميل",
+    "location": "الموقع",
+    "type": "النوع",
+    "status": "الحالة",
+    "spaces": "المساحات",
+    "floorArea": "مساحة الأرضية",
+    "estimatedCost": "التقدير"
+  },
+  "fields": {
+    "name": "اسم المشروع",
+    "clientName": "اسم العميل",
+    "location": "الموقع",
+    "type": "نوع المشروع",
+    "status": "الحالة"
+  },
+  "placeholders": {
+    "name": "تشطيب بنتهاوس ريفييرا",
+    "clientName": "أورورا هولدنغز",
+    "location": "مرسى دبي"
+  },
+  "types": {
+    "residential": "سكني",
+    "commercial": "تجاري",
+    "luxury": "فاخر"
+  },
+  "status": {
+    "lead": "فرصة",
+    "active": "نشط",
+    "on_hold": "معلّق",
+    "completed": "مكتمل",
+    "cancelled": "ملغى"
+  },
+  "validation": {
+    "nameRequired": "اسم المشروع مطلوب.",
+    "nameMax": "يجب ألا يتجاوز الاسم 80 حرفًا.",
+    "clientRequired": "اسم العميل مطلوب.",
+    "locationRequired": "الموقع مطلوب."
+  },
+  "actions": {
+    "create": "إنشاء المشروع",
+    "save": "حفظ التغييرات",
+    "cancel": "إلغاء",
+    "open": "فتح"
+  },
+  "delete": {
+    "title": "هل تريد حذف هذا المشروع؟",
+    "body": "سيتم حذف {{name}} وجميع مساحاته نهائيًا. لا يمكن التراجع عن هذا الإجراء.",
+    "confirm": "حذف المشروع"
+  },
+  "empty": {
+    "title": "لا توجد مشاريع بعد",
+    "description": "أنشئ مشروعك الأول لبدء قياس المساحات وإعداد التقديرات.",
+    "cta": "إنشاء مشروع"
+  },
+  "error": "تعذّر تحميل المشاريع.",
+  "workspace": {
+    "back": "كل المشاريع",
+    "summary": "ملخص المشروع",
+    "createdOn": "أُنشئ في {{date}}"
+  },
+  "flow": {
+    "project": "المشروع",
+    "spaces": "المساحات",
+    "materials": "المواد",
+    "quotation": "عرض السعر",
+    "hint": {
+      "project": "البيانات والعميل",
+      "spaces": "تحديد الغرف",
+      "materials": "إسناد لكل سطح",
+      "quotation": "إنشاء المستند"
+    }
+  }
+}

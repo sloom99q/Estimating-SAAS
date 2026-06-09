@@ -1,0 +1,117 @@
+{
+  "title": "Spaces",
+  "description": "Rooms and areas that drive the estimate.",
+  "addSpace": "Add space",
+  "editSpace": "Edit space",
+  "fields": {
+    "name": "Space name",
+    "length": "Length",
+    "width": "Width",
+    "height": "Height"
+  },
+  "placeholders": {
+    "name": "Living room"
+  },
+  "units": {
+    "m": "m",
+    "m2": "m²"
+  },
+  "preview": {
+    "title": "Live measurements",
+    "floor": "Floor area",
+    "walls": "Wall area",
+    "ceiling": "Ceiling area",
+    "perimeter": "Perimeter",
+    "floorCost": "Floor cost (placeholder)",
+    "wallCost": "Wall cost (placeholder)",
+    "ratesNote": "Costs use default placeholder rates. Materials and supplier pricing arrive in a later phase."
+  },
+  "validation": {
+    "nameRequired": "Space name is required.",
+    "lengthPositive": "Length must be greater than 0.",
+    "widthPositive": "Width must be greater than 0.",
+    "heightPositive": "Height must be greater than 0.",
+    "lengthMax": "Length must be 200 m or less.",
+    "widthMax": "Width must be 200 m or less.",
+    "heightMax": "Height must be 20 m or less."
+  },
+  "actions": {
+    "create": "Add space",
+    "save": "Save changes",
+    "cancel": "Cancel"
+  },
+  "delete": {
+    "title": "Delete this space?",
+    "body": "{{name}} will be removed from the project totals.",
+    "confirm": "Delete space"
+  },
+  "summary": {
+    "spaces": "Spaces",
+    "floorArea": "Total floor",
+    "wallArea": "Total walls",
+    "ceilingArea": "Total ceiling",
+    "estimatedCost": "Estimated total",
+    "noSpaces": "—"
+  },
+  "empty": {
+    "title": "No spaces in this project",
+    "description": "Add a room with its length, width, and height — the estimate updates as you measure.",
+    "cta": "Add first space"
+  },
+  "columns": {
+    "name": "Space",
+    "dimensions": "L × W × H (m)",
+    "floor": "Floor",
+    "walls": "Walls",
+    "ceiling": "Ceiling",
+    "cost": "Estimated"
+  },
+  "view": {
+    "cards": "Cards",
+    "table": "Table"
+  },
+  "templates": {
+    "title": "Start from a template",
+    "subtitle": "Pick a typical room to pre-fill the dimensions. Refine before saving.",
+    "customLabel": "Or measure manually",
+    "bedroom-small": {
+      "name": "Bedroom · Compact",
+      "subtitle": "3.2 × 2.8 m"
+    },
+    "bedroom-medium": {
+      "name": "Bedroom · Standard",
+      "subtitle": "4 × 3.6 m"
+    },
+    "bedroom-luxury": {
+      "name": "Bedroom · Luxury",
+      "subtitle": "5.5 × 4.5 m"
+    },
+    "living-room": {
+      "name": "Living room",
+      "subtitle": "6 × 4.5 m"
+    },
+    "bathroom": {
+      "name": "Bathroom",
+      "subtitle": "2.5 × 1.8 m"
+    },
+    "office": {
+      "name": "Office",
+      "subtitle": "4.2 × 3.5 m"
+    },
+    "retail": {
+      "name": "Retail floor",
+      "subtitle": "8 × 6 m"
+    }
+  },
+  "plan": {
+    "title": "Plan view",
+    "subtitle": "Top-down. Walls highlight the perimeter; ceiling material appears as a tag.",
+    "length": "L",
+    "width": "W",
+    "height": "H",
+    "floorLegend": "Floor",
+    "wallLegend": "Walls",
+    "ceilingLegend": "Ceiling",
+    "unassigned": "Default rate"
+  }
+}

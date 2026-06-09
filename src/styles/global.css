@@ -1,0 +1,86 @@
+/*
+ * Global app styles.
+ *
+ * Layer order: declare `app-base`/`app-components` AFTER `mantine` so our rules
+ * win over Mantine's regardless of import order. (Mantine's layer CSS defines
+ * `@layer mantine`.) This is the override seam for the design system.
+ */
+@layer mantine, app-base, app-components;
+
+@layer app-base {
+  :root {
+    color-scheme: light;
+  }
+  html[data-mantine-color-scheme='dark'] {
+    color-scheme: dark;
+  }
+
+  html,
+  body {
+    margin: 0;
+    padding: 0;
+  }
+
+  body {
+    /* The bone/charcoal canvas behind all surfaces (see cssVariablesResolver). */
+    background-color: var(--app-canvas);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  #root {
+    min-height: 100dvh;
+  }
+
+  /*
+   * Numeric content (currency, quantities, IDs). Monospace + tabular figures so
+   * columns align. Forced LTR with `unicode-bidi: plaintext` so numbers keep
+   * their natural direction even inside an RTL (Arabic) layout.
+   */
+  .app-numeric {
+    font-family: var(--app-font-mono);
+    font-variant-numeric: tabular-nums slashed-zero;
+    font-feature-settings: 'tnum' 1, 'zero' 1;
+    direction: ltr;
+    unicode-bidi: plaintext;
+  }
+}
+
+/*
+ * Print rules — used by the quotation page. Hides the entire app shell
+ * (header, sidebar, action buttons, breadcrumbs) so only the `.quotation-sheet`
+ * surface remains on the printed page. Margins, backgrounds and borders are
+ * neutralised so the sheet flows on plain A4.
+ */
+@media print {
+  @page {
+    margin: 18mm;
+  }
+
+  body {
+    background: white !important;
+  }
+
+  /* Hide dashboard chrome and any explicit action affordances we marked. */
+  .mantine-AppShell-header,
+  .mantine-AppShell-navbar,
+  .quotation-actions {
+    display: none !important;
+  }
+
+  .mantine-AppShell-main {
+    padding: 0 !important;
+  }
+
+  .quotation-sheet {
+    border: none !important;
+    border-radius: 0 !important;
+    padding: 0 !important;
+    box-shadow: none !important;
+    background: white !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    page-break-inside: avoid;
+  }
+}

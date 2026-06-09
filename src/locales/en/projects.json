@@ -1,0 +1,81 @@
+{
+  "title": "Projects",
+  "description": "Estimating jobs across your organization.",
+  "newProject": "New project",
+  "editProject": "Edit project",
+  "deleteProject": "Delete project",
+  "columns": {
+    "name": "Project",
+    "client": "Client",
+    "location": "Location",
+    "type": "Type",
+    "status": "Status",
+    "spaces": "Spaces",
+    "floorArea": "Floor area",
+    "estimatedCost": "Estimated"
+  },
+  "fields": {
+    "name": "Project name",
+    "clientName": "Client name",
+    "location": "Location",
+    "type": "Project type",
+    "status": "Status"
+  },
+  "placeholders": {
+    "name": "Riviera Penthouse Fit-out",
+    "clientName": "Aurora Holdings",
+    "location": "Dubai Marina"
+  },
+  "types": {
+    "residential": "Residential",
+    "commercial": "Commercial",
+    "luxury": "Luxury"
+  },
+  "status": {
+    "lead": "Lead",
+    "active": "Active",
+    "on_hold": "On hold",
+    "completed": "Completed",
+    "cancelled": "Cancelled"
+  },
+  "validation": {
+    "nameRequired": "Project name is required.",
+    "nameMax": "Name must be 80 characters or fewer.",
+    "clientRequired": "Client name is required.",
+    "locationRequired": "Location is required."
+  },
+  "actions": {
+    "create": "Create project",
+    "save": "Save changes",
+    "cancel": "Cancel",
+    "open": "Open"
+  },
+  "delete": {
+    "title": "Delete this project?",
+    "body": "{{name}} and all of its spaces will be permanently removed. This action cannot be undone.",
+    "confirm": "Delete project"
+  },
+  "empty": {
+    "title": "No projects yet",
+    "description": "Create your first project to start measuring spaces and producing estimates.",
+    "cta": "Create project"
+  },
+  "error": "Couldn’t load projects.",
+  "workspace": {
+    "back": "All projects",
+    "summary": "Project summary",
+    "createdOn": "Created {{date}}"
+  },
+  "flow": {
+    "project": "Project",
+    "spaces": "Spaces",
+    "materials": "Materials",
+    "quotation": "Quotation",
+    "hint": {
+      "project": "Brief & client",
+      "spaces": "Define rooms",
+      "materials": "Assign per surface",
+      "quotation": "Generate document"
+    }
+  }
+}

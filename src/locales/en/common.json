@@ -1,0 +1,34 @@
+{
+  "app": {
+    "name": "Estimator",
+    "tagline": "Estimating & cost intelligence for interior fit-out"
+  },
+  "nav": {
+    "dashboard": "Dashboard",
+    "projects": "Projects",
+    "materials": "Materials",
+    "users": "Users"
+  },
+  "actions": {
+    "toggleTheme": "Toggle color scheme",
+    "changeLanguage": "Change language",
+    "toggleNav": "Toggle navigation",
+    "logout": "Sign out",
+    "retry": "Try again"
+  },
+  "roles": {
+    "owner": "Owner",
+    "admin": "Admin",
+    "estimator": "Estimator",
+    "viewer": "Viewer"
+  },
+  "notFound": {
+    "title": "Page not found",
+    "description": "The page you’re looking for doesn’t exist or has moved.",
+    "back": "Back to dashboard"
+  },
+  "errors": {
+    "generic": "Something went wrong.",
+    "loading": "We couldn’t load this. Please try again."
+  }
+}

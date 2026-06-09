@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Estimator</title>
+    <!--
+      Pre-paint bootstrap. Runs before React/Mantine/i18next mount so the very
+      first frame already has the correct text direction and color scheme.
+      Without this, an Arabic user (or a dark-mode user) sees a visible flip on
+      every reload. Keys must match: i18next-browser-languagedetector ->
+      'i18nextLng', Mantine localStorageColorSchemeManager -> 'estimator-color-scheme'.
+    -->
+    <script>
+      (function () {
+        try {
+          var lng = localStorage.getItem('i18nextLng') || (navigator.language || 'en').slice(0, 2)
+          if (lng !== 'ar' && lng !== 'en') lng = 'en'
+          var root = document.documentElement
+          root.setAttribute('lang', lng)
+          root.setAttribute('dir', lng === 'ar' ? 'rtl' : 'ltr')
+
+          var scheme = localStorage.getItem('estimator-color-scheme') || 'light'
+          if (scheme === 'auto') {
+            scheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+          }
+          root.setAttribute('data-mantine-color-scheme', scheme)
+        } catch (e) {
+          /* localStorage unavailable (private mode) — fall back to HTML defaults. */
+        }
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

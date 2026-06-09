@@ -1,0 +1,178 @@
+{
+  "title": "Materials",
+  "description": "Your material library — names, units, prices, coverage, and waste.",
+  "newMaterial": "New material",
+  "editMaterial": "Edit material",
+  "deleteMaterial": "Delete material",
+  "columns": {
+    "name": "Material",
+    "category": "Category",
+    "unit": "Unit",
+    "unitPrice": "Unit price",
+    "coverage": "Coverage",
+    "waste": "Waste",
+    "supplier": "Supplier",
+    "status": "Status"
+  },
+  "fields": {
+    "name": "Material name",
+    "category": "Category",
+    "unit": "Unit of measure",
+    "unitPrice": "Unit price",
+    "coverage": "Coverage per unit",
+    "wastePct": "Waste %",
+    "supplier": "Supplier",
+    "notes": "Notes",
+    "active": "Active",
+    "imageUrl": "Image URL"
+  },
+  "placeholders": {
+    "name": "Carrara marble — polished",
+    "supplier": "Aurora Stone & Tile",
+    "notes": "Sealing recommended; check lead time.",
+    "imageUrl": "https://example.com/marble.jpg"
+  },
+  "hints": {
+    "coverage": "How much surface (in m²) one unit covers.",
+    "waste": "Extra material added to the order to account for offcuts and breakage.",
+    "active": "Inactive materials stay in the library but cannot be assigned to spaces.",
+    "imageUrl": "Optional product photo. We fall back to a category swatch when blank."
+  },
+  "view": {
+    "gallery": "Gallery",
+    "table": "Table"
+  },
+  "filter": {
+    "all": "All",
+    "category": "Category",
+    "usage": "Usage",
+    "priceRange": "Price range",
+    "usageTarget": {
+      "floor": "Floor",
+      "wall": "Wall",
+      "ceiling": "Ceiling"
+    }
+  },
+  "discovery": {
+    "searchPlaceholder": "Search materials, suppliers, notes…",
+    "clear": "Clear filters"
+  },
+  "complete": {
+    "title": "Estimate complete",
+    "body": "All surfaces are assigned. Your quotation is ready at {{total}}.",
+    "cta": "Open quotation"
+  },
+  "hero": {
+    "completion": "Materials assigned",
+    "surfacesShort": "surfaces",
+    "materialsUsed": "Materials used",
+    "composition": "Cost composition",
+    "compositionCount": "{{count}} category",
+    "compositionCount_plural": "{{count}} categories"
+  },
+  "preview": {
+    "openTitle": "Material preview",
+    "edit": "Edit",
+    "delete": "Delete",
+    "specs": "Specs",
+    "no_image": "No image",
+    "imageAlt": "{{name}} photo"
+  },
+  "categories": {
+    "tiles": "Tiles",
+    "marble": "Marble",
+    "paint": "Paint",
+    "gypsum": "Gypsum",
+    "glue": "Adhesive",
+    "grout": "Grout",
+    "cladding": "Cladding",
+    "other": "Other"
+  },
+  "units": {
+    "m2": "m²",
+    "m2_long": "per square metre",
+    "kg": "kg",
+    "kg_long": "per kilogram",
+    "bag": "bag",
+    "bag_long": "per bag",
+    "piece": "piece",
+    "piece_long": "per piece"
+  },
+  "status": {
+    "active": "Active",
+    "inactive": "Inactive"
+  },
+  "validation": {
+    "nameRequired": "Material name is required.",
+    "nameMax": "Name must be 80 characters or fewer.",
+    "unitPricePositive": "Unit price must be greater than 0.",
+    "coveragePositive": "Coverage must be greater than 0.",
+    "wasteRange": "Waste must be between 0% and 100%.",
+    "imageUrlInvalid": "Image URL must be a valid http(s) URL."
+  },
+  "actions": {
+    "create": "Add material",
+    "save": "Save changes",
+    "cancel": "Cancel"
+  },
+  "delete": {
+    "title": "Delete this material?",
+    "body": "{{name}} will be removed from your library. Spaces that reference it will fall back to default rates.",
+    "confirm": "Delete material"
+  },
+  "empty": {
+    "title": "No materials yet",
+    "description": "Add tiles, paint, gypsum, adhesives — anything that goes into your estimates.",
+    "cta": "Add first material"
+  },
+  "error": "Couldn’t load materials.",
+  "assign": {
+    "title": "Assign materials",
+    "subtitle": "Pick the material applied to each surface of {{name}}.",
+    "floor": "Floor material",
+    "walls": "Wall material",
+    "ceiling": "Ceiling material",
+    "none": "No material — use default rate",
+    "previewTitle": "Live quantity & cost",
+    "areaLabel": "Area",
+    "quantityLabel": "Quantity needed",
+    "totalLabel": "Surface cost",
+    "submit": "Save assignments",
+    "noActive": "There are no active materials. Add one in the Materials library first."
+  },
+  "breakdown": {
+    "title": "Cost breakdown",
+    "surface": "Surface",
+    "material": "Material",
+    "quantity": "Quantity",
+    "amount": "Cost",
+    "floor": "Floor",
+    "walls": "Walls",
+    "ceiling": "Ceiling",
+    "default": "Default rate",
+    "total": "Space total"
+  },
+  "boq": {
+    "title": "Bill of quantities",
+    "description": "Aggregate materials needed across every space in this project.",
+    "columns": {
+      "material": "Material",
+      "category": "Category",
+      "totalArea": "Area",
+      "quantity": "Quantity",
+      "unitPrice": "Unit price",
+      "totalCost": "Total"
+    },
+    "categoryCount": "{{count}} material",
+    "categoryCount_plural": "{{count}} materials",
+    "lineLabels": {
+      "area": "Area",
+      "qty": "Quantity",
+      "unit": "Unit price"
+    },
+    "categoryTotals": "Totals by category",
+    "grandTotal": "Project total",
+    "unassignedNote": "{{area}} m² of surface area has no material assigned and is costed using default placeholder rates.",
+    "empty": "Assign materials to spaces to see the bill of quantities."
+  }
+}

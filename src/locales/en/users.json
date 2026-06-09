@@ -1,0 +1,21 @@
+{
+  "title": "Users",
+  "description": "People with access to your organization’s workspace.",
+  "columns": {
+    "name": "Name",
+    "role": "Role",
+    "status": "Status",
+    "lastActive": "Last active"
+  },
+  "status": {
+    "active": "Active",
+    "invited": "Invited",
+    "disabled": "Disabled"
+  },
+  "never": "Never",
+  "error": "Couldn’t load users.",
+  "empty": {
+    "title": "No users yet",
+    "description": "Invite teammates to collaborate on estimates and quotations."
+  }
+}
