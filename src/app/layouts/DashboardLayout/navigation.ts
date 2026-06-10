@@ -1,4 +1,4 @@
-import { Cube, FolderOpen, House, Users } from '@phosphor-icons/react'
+import { Buildings, Cube, FolderOpen, House, Users } from '@phosphor-icons/react'
 import type { IconProps } from '@phosphor-icons/react'
 import type { ComponentType } from 'react'
 import { paths } from '@/app/router/paths'
@@ -26,6 +26,12 @@ export const navItems: NavItem[] = [
     to: paths.materials,
     labelKey: 'nav.materials',
     icon: Cube,
+    permission: 'materials:read',
+  },
+  {
+    to: paths.suppliers,
+    labelKey: 'nav.suppliers',
+    icon: Buildings,
     permission: 'materials:read',
   },
   { to: paths.users, labelKey: 'nav.users', icon: Users, permission: 'users:read' },

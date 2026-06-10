@@ -1,0 +1,253 @@
+// Phase 8A — Production-shaped Prisma schema for the API.
+//
+// SQLite for now; migrating to PostgreSQL is a `provider = "postgresql"` change
+// + re-running `prisma migrate dev`. We avoid every SQLite-incompatible attribute
+// (no @db.Timestamptz, no @db.Decimal, no @db.Char), so swap-time is minimal.
+//
+// CRITICAL invariants:
+//   - Every tenant-scoped row carries `organizationId`.
+//   - Every row carries `createdAt / updatedAt / deletedAt` (soft delete).
+//   - String-typed enums (status / role) match the union types in src/.
+//   - Composite uniqueness `[organizationId, id]` lets future child tables use
+//     `references: [organizationId, id]` for structural tenant FKs.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Identity & tenancy
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  fullName     String
+  passwordHash String
+  avatarUrl    String?
+  isSuperAdmin Boolean   @default(false)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+
+  memberships Membership[]
+
+  @@map("users")
+}
+
+model Organization {
+  id              String    @id @default(cuid())
+  name            String
+  slug            String    @unique
+  defaultCurrency String    @default("AED")
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deletedAt       DateTime?
+
+  memberships Membership[]
+  projects    Project[]
+  spaces      Space[]
+  materials   Material[]
+  // Phase 8B — supplier intelligence
+  suppliers              Supplier[]
+  materialSupplierPrices MaterialSupplierPrice[]
+  priceSnapshots         PriceSnapshot[]
+
+  @@map("organizations")
+}
+
+/// A user's membership in an organization, carrying the org-scoped role.
+/// role is one of: owner | admin | estimator | viewer
+/// status is one of: invited | active | disabled
+model Membership {
+  id             String    @id @default(cuid())
+  organizationId String
+  userId         String
+  role           String    @default("estimator")
+  status         String    @default("active")
+  invitedAt      DateTime  @default(now())
+  joinedAt       DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  user         User         @relation(fields: [userId], references: [id])
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+  @@map("memberships")
+}
+
+// ---------------------------------------------------------------------------
+// Estimation domain
+// ---------------------------------------------------------------------------
+
+/// status: lead | active | on_hold | completed | cancelled
+/// type:   residential | commercial | luxury
+model Project {
+  id             String    @id @default(cuid())
+  organizationId String
+  name           String
+  clientName     String
+  location       String
+  type           String
+  status         String    @default("lead")
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  spaces       Space[]
+
+  @@index([organizationId, status])
+  @@index([organizationId, createdAt])
+  @@map("projects")
+}
+
+model Space {
+  id                String    @id @default(cuid())
+  organizationId    String
+  projectId         String
+  name              String
+  length            Float
+  width             Float
+  height            Float
+  floorMaterialId   String?
+  wallMaterialId    String?
+  ceilingMaterialId String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  deletedAt         DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  project      Project      @relation(fields: [projectId], references: [id])
+
+  @@index([projectId])
+  @@index([organizationId])
+  @@map("spaces")
+}
+
+/// category: tiles | marble | paint | gypsum | glue | grout | cladding | other
+/// unit:     m2 | kg | bag | piece
+model Material {
+  id             String    @id @default(cuid())
+  organizationId String
+  name           String
+  category       String
+  unit           String
+  unitPrice      Float
+  coverage       Float
+  wastePct       Float
+  currency       String    @default("AED")
+  supplier       String?
+  notes          String?
+  imageUrl       String?
+  active         Boolean   @default(true)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  // Phase 8B — supplier intelligence relations
+  supplierPrices MaterialSupplierPrice[]
+  priceSnapshots PriceSnapshot[]
+
+  @@index([organizationId, name])
+  @@index([organizationId, category])
+  @@map("materials")
+}
+
+// ===========================================================================
+// Phase 8B — Supplier intelligence
+// ===========================================================================
+
+/// Org-scoped procurement directory. `preferred` flags an org-wide
+/// preference — the directory's default; a per-material preferred supplier is
+/// tracked on `MaterialSupplierPrice.isPreferred`.
+model Supplier {
+  id             String    @id @default(cuid())
+  organizationId String
+  name           String
+  country        String?
+  contactName    String?
+  email          String?
+  phone          String?
+  website        String?
+  paymentTerms   String?
+  /// Average lead time in days for orders from this supplier (org default).
+  leadTimeDays   Int?
+  /// Quality rating in [0, 5]. Nullable while the org is still ranking suppliers.
+  rating         Float?
+  preferred      Boolean   @default(false)
+  notes          String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  organization   Organization            @relation(fields: [organizationId], references: [id])
+  materialPrices MaterialSupplierPrice[]
+  priceSnapshots PriceSnapshot[]
+
+  @@index([organizationId])
+  @@index([organizationId, name])
+  @@index([organizationId, preferred])
+  @@map("suppliers")
+}
+
+/// The CURRENT price for a (material, supplier) pair. Exactly one live row
+/// per pair (enforced by the composite unique index). `isPreferred` marks the
+/// org's chosen supplier for THIS material — different from `Supplier.preferred`.
+///
+/// Updating the price never overwrites history: the route writes a new
+/// `PriceSnapshot` and updates this row's `unitPrice` + `effectiveDate`.
+model MaterialSupplierPrice {
+  id                   String    @id @default(cuid())
+  organizationId       String
+  materialId           String
+  supplierId           String
+  unitPrice            Float
+  currency             String
+  minimumOrderQuantity Float?
+  leadTimeDays         Int?
+  effectiveDate        DateTime
+  isPreferred          Boolean   @default(false)
+  notes                String?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  deletedAt            DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  material     Material     @relation(fields: [materialId], references: [id])
+  supplier     Supplier     @relation(fields: [supplierId], references: [id])
+
+  @@unique([organizationId, materialId, supplierId])
+  @@index([organizationId, materialId])
+  @@index([organizationId, supplierId])
+  @@map("material_supplier_prices")
+}
+
+/// Immutable price history. Written on every `MaterialSupplierPrice` create
+/// AND on every price change. Never updated, never deleted. Drives the
+/// timeline chart + trend detection (`up | down | stable`) on the material
+/// detail page.
+model PriceSnapshot {
+  id             String   @id @default(cuid())
+  organizationId String
+  materialId     String
+  supplierId     String
+  price          Float
+  currency       String
+  effectiveDate  DateTime
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  material     Material     @relation(fields: [materialId], references: [id])
+  supplier     Supplier     @relation(fields: [supplierId], references: [id])
+
+  @@index([organizationId, materialId, supplierId, effectiveDate])
+  @@index([organizationId, materialId, effectiveDate])
+  @@map("price_snapshots")
+}

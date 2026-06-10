@@ -1,6 +1,7 @@
 {
   "title": "Materials",
   "description": "Your material library — names, units, prices, coverage, and waste.",
+  "back": "All materials",
   "newMaterial": "New material",
   "editMaterial": "Edit material",
   "deleteMaterial": "Delete material",

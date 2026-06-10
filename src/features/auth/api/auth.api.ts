@@ -1,7 +1,14 @@
+import { env } from '@/shared/config/env'
+import { HttpError, httpRequest } from '@/shared/lib/http/client'
 import type { Session } from '@/shared/types'
 import type { LoginCredentials } from '../domain/auth.types'
 
-const MOCK_PASSWORD = 'estimator'
+/**
+ * Phase-8A transport. When `VITE_API_URL` is set we POST to the real Bun +
+ * Prisma + SQLite API; otherwise we keep the Phase-1 mock so offline dev /
+ * tests still produce a working session. The return shape (`Session`) is
+ * identical in both branches, so the React layer never branches on driver.
+ */
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -19,19 +26,13 @@ function deriveName(email: string): string {
   return name || 'User'
 }
 
-/**
- * Mock auth transport (Phase 1). Returns the exact `Promise<Session>` shape the
- * real backend will, so swapping in a real implementation built on
- * shared/lib/http/client.ts is a one-file change. No React here — pure transport.
- */
-export async function login(credentials: LoginCredentials): Promise<Session> {
-  await delay(450)
+const MOCK_PASSWORD = 'estimator'
 
+async function mockLogin(credentials: LoginCredentials): Promise<Session> {
+  await delay(400)
   if (credentials.password !== MOCK_PASSWORD) {
-    // The message is an i18n key; the form resolves it for display.
     throw new Error('auth:errors.invalidCredentials')
   }
-
   return {
     user: {
       id: 'usr_demo_owner',
@@ -45,4 +46,30 @@ export async function login(credentials: LoginCredentials): Promise<Session> {
     token: 'mock.jwt.token',
     issuedAt: new Date().toISOString(),
   }
+}
+
+/**
+ * Production login path — hits `/api/auth/login` on the Bun API and yields
+ * the same `Session` shape the rest of the SPA already consumes.
+ *
+ * A `401` from the server is translated to the SAME i18n key the mock has
+ * always used (`auth:errors.invalidCredentials`) so the login form's existing
+ * Alert wiring keeps working unchanged.
+ */
+async function httpLogin(credentials: LoginCredentials): Promise<Session> {
+  try {
+    return await httpRequest<Session>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify(credentials),
+    })
+  } catch (error) {
+    if (error instanceof HttpError && error.status === 401) {
+      throw new Error('auth:errors.invalidCredentials', { cause: error })
+    }
+    throw error
+  }
+}
+
+export async function login(credentials: LoginCredentials): Promise<Session> {
+  return env.apiUrl ? httpLogin(credentials) : mockLogin(credentials)
 }

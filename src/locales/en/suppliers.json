@@ -1,0 +1,129 @@
+{
+  "title": "Suppliers",
+  "description": "Your procurement directory.",
+  "newSupplier": "New supplier",
+  "editSupplier": "Edit supplier",
+  "unknownSupplier": "Unknown supplier",
+  "fields": {
+    "name": "Supplier name",
+    "country": "Country",
+    "contactName": "Contact name",
+    "email": "Email",
+    "phone": "Phone",
+    "website": "Website",
+    "paymentTerms": "Payment terms",
+    "leadTimeDays": "Lead time",
+    "rating": "Rating",
+    "preferred": "Preferred supplier",
+    "notes": "Notes"
+  },
+  "placeholders": {
+    "name": "Aurora Stone & Tile",
+    "country": "United Arab Emirates",
+    "contactName": "Rami Saleh",
+    "paymentTerms": "Net 30",
+    "notes": "Optional internal notes",
+    "priceNotes": "e.g. valid until end of quarter, bulk-only pricing"
+  },
+  "hints": {
+    "leadTimeDays": "Typical days from order to delivery.",
+    "rating": "Internal quality score from 0 to 5.",
+    "preferred": "Marks this supplier as your org-wide default. A per-material preference lives on each price.",
+    "preferredMaterial": "Flag this as your preferred supplier for this material specifically.",
+    "moq": "Smallest order this supplier accepts."
+  },
+  "units": {
+    "leadDays": "days",
+    "materials_one": "material",
+    "materials_other": "materials",
+    "materials": "materials"
+  },
+  "badges": {
+    "preferred": "Preferred",
+    "cheapest": "Cheapest"
+  },
+  "validation": {
+    "nameRequired": "Supplier name is required.",
+    "nameMax": "Name must be 120 characters or fewer.",
+    "emailInvalid": "Enter a valid email address.",
+    "websiteInvalid": "Website must be an http(s) URL.",
+    "leadTimeRange": "Lead time must be a positive number of days.",
+    "ratingRange": "Rating must be between 0 and 5."
+  },
+  "actions": {
+    "create": "Add supplier",
+    "save": "Save changes",
+    "cancel": "Cancel",
+    "edit": "Edit supplier",
+    "unlink": "Remove"
+  },
+  "delete": {
+    "title": "Delete this supplier?",
+    "body": "{{name}} will be removed from your directory. Active price links will be hidden but historical snapshots are preserved.",
+    "confirm": "Delete supplier",
+    "priceTitle": "Remove this supplier from this material?",
+    "priceBody": "{{supplier}}'s active price for {{material}} will be removed. Historical snapshots stay so the timeline keeps its memory.",
+    "priceConfirm": "Remove price"
+  },
+  "empty": {
+    "title": "No suppliers yet",
+    "description": "Add your first supplier to start tracking real procurement prices and lead times.",
+    "cta": "Add first supplier"
+  },
+  "error": {
+    "list": "Couldn’t load suppliers.",
+    "delete": "Couldn’t remove this supplier."
+  },
+  "list": {
+    "searchPlaceholder": "Search suppliers, contacts, countries…",
+    "allChip": "All ({{count}})",
+    "preferredChip": "Preferred ({{count}})"
+  },
+  "hero": {
+    "originalSupplier": "Originally tagged: {{name}}"
+  },
+  "procurement": {
+    "title": "Procurement intelligence",
+    "subtitle": "Live supplier prices, savings opportunities and price history for this material.",
+    "addPrice": "Add price",
+    "cheapest": "Cheapest",
+    "preferred": "Preferred",
+    "savings": "Potential savings",
+    "savingsPct": "{{pct}}% cheaper than preferred",
+    "savingsNone": "Preferred is already the cheapest",
+    "noPrices": "No suppliers linked yet",
+    "noPreferred": "No preferred set",
+    "trend": "Trend (6 mo)",
+    "loading": "Loading supplier prices…",
+    "emptyBody": "No supplier prices yet. Add one to start comparing.",
+    "editPriceFor": "Update price · {{supplier}}"
+  },
+  "addPrice": {
+    "title": "Add supplier price",
+    "editTitle": "Update supplier price",
+    "subtitle": "Add a price for {{name}}. Saving creates a snapshot — old prices are preserved in the timeline.",
+    "supplier": "Supplier",
+    "unitPrice": "Unit price",
+    "moq": "Minimum order quantity",
+    "leadTimeDays": "Lead time",
+    "preferred": "Preferred for this material",
+    "submit": "Save price",
+    "save": "Save price",
+    "noSuppliers": "There are no suppliers to choose from. Add one in the Suppliers directory first."
+  },
+  "timeline": {
+    "title": "Price history",
+    "subtitle": "One line per supplier · last 6 months",
+    "ariaLabel": "Supplier price history chart"
+  },
+  "trend": {
+    "up": "Up",
+    "down": "Down",
+    "stable": "Stable",
+    "detail": "{{from}} → {{to}}",
+    "noData": "Need at least two snapshots"
+  },
+  "bars": {
+    "moq": "MOQ {{value}}"
+  }
+}

@@ -37,4 +37,19 @@ export const queryKeys = {
     detail: (orgId: ID, materialId: ID) =>
       ['org', orgId, 'materials', 'detail', materialId] as const,
   },
+  suppliers: {
+    all: (orgId: ID) => ['org', orgId, 'suppliers'] as const,
+    list: (orgId: ID, params: Record<string, unknown> = {}) =>
+      ['org', orgId, 'suppliers', 'list', params] as const,
+    detail: (orgId: ID, supplierId: ID) =>
+      ['org', orgId, 'suppliers', 'detail', supplierId] as const,
+  },
+  prices: {
+    forMaterial: (orgId: ID, materialId: ID) =>
+      ['org', orgId, 'materials', 'detail', materialId, 'prices'] as const,
+  },
+  priceHistory: {
+    forMaterial: (orgId: ID, materialId: ID, params: Record<string, unknown> = {}) =>
+      ['org', orgId, 'materials', 'detail', materialId, 'price-history', params] as const,
+  },
 } as const

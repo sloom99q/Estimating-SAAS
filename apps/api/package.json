@@ -1,0 +1,31 @@
+{
+  "name": "@estimator/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Estimator — Bun + Prisma + SQLite + JWT API (Phase 8A).",
+  "engines": {
+    "bun": ">=1.2.0"
+  },
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev --name init",
+    "prisma:reset": "prisma migrate reset --force",
+    "seed": "bun src/seed.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "bcryptjs": "^2.4.3",
+    "jose": "^5.9.6",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/bun": "^1.1.13",
+    "prisma": "^5.22.0",
+    "typescript": "^6.0.3"
+  }
+}

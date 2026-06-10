@@ -13,7 +13,13 @@
     "preview": "vite preview",
     "typecheck": "tsc -b --noEmit",
     "lint": "eslint .",
-    "lint:fix": "eslint . --fix"
+    "lint:fix": "eslint . --fix",
+    "api:install": "cd apps/api && bun install",
+    "api:migrate": "cd apps/api && bunx prisma migrate dev",
+    "api:generate": "cd apps/api && bunx prisma generate",
+    "api:seed": "cd apps/api && bun src/seed.ts",
+    "api:dev": "cd apps/api && bun --watch src/index.ts",
+    "api:typecheck": "cd apps/api && bun tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.2.9",

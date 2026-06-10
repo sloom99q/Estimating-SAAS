@@ -11,6 +11,7 @@ import { notifications } from '@mantine/notifications'
 import { Cube, GridFour, ListBullets, Plus } from '@phosphor-icons/react'
 import { useMemo, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
+import { useNavigate } from 'react-router'
 import { useMaterialsView, useUiStore } from '@/shared/store/uiStore'
 import { DataCard, PageHeader } from '@/shared/ui'
 import { useCreateMaterial } from '../api/useCreateMaterial'
@@ -19,7 +20,6 @@ import { useMaterials } from '../api/useMaterials'
 import { useUpdateMaterial } from '../api/useUpdateMaterial'
 import { MaterialFormModal } from '../components/MaterialFormModal'
 import { MaterialGallery } from '../components/MaterialGallery'
-import { MaterialPreviewModal } from '../components/MaterialPreviewModal'
 import { MaterialsTable } from '../components/MaterialsTable'
 import { MaterialFinder } from '../components/MaterialFinder'
 import {
@@ -32,6 +32,7 @@ import type { Material } from '../domain/material.types'
 
 export function MaterialsListPage() {
   const { t } = useTranslation(['materials'])
+  const navigate = useNavigate()
   const view = useMaterialsView()
   const setMaterialsView = useUiStore((state) => state.setMaterialsView)
 
@@ -41,9 +42,7 @@ export function MaterialsListPage() {
   const deleteMutation = useDeleteMaterial()
 
   const [formOpened, formModal] = useDisclosure(false)
-  const [previewOpened, previewModal] = useDisclosure(false)
   const [editing, setEditing] = useState<Material | undefined>(undefined)
-  const [previewing, setPreviewing] = useState<Material | null>(null)
   const [filters, setFilters] = useState<MaterialFilterState>(emptyFilterState)
 
   const visibleMaterials = useMemo(() => {
@@ -56,13 +55,15 @@ export function MaterialsListPage() {
     formModal.open()
   }
   const openEdit = (material: Material) => {
-    previewModal.close()
     setEditing(material)
     formModal.open()
   }
-  const openPreview = (material: Material) => {
-    setPreviewing(material)
-    previewModal.open()
+  /**
+   * Card / row click navigates to the material's procurement workspace
+   * (Phase 8B). Kebab actions still open the edit form modal in place.
+   */
+  const openDetail = (material: Material) => {
+    void navigate(`/materials/${material.id}`)
   }
 
   const handleSubmit = async (values: Parameters<typeof createMutation.mutate>[0]) => {
@@ -92,7 +93,7 @@ export function MaterialsListPage() {
         deleteMutation.mutate(material.id, {
           onError: () =>
             notifications.show({ color: 'red', message: t('materials:error') }),
-          onSuccess: () => previewModal.close(),
+          onSuccess: () => formModal.close(),
         })
       },
     })
@@ -145,7 +146,7 @@ export function MaterialsListPage() {
       ) : null}
 
       {view === 'gallery' && visibleMaterials && visibleMaterials.length > 0 ? (
-        <MaterialGallery materials={visibleMaterials} onOpen={openPreview} />
+        <MaterialGallery materials={visibleMaterials} onOpen={openDetail} />
       ) : (
         <DataCard
           isLoading={isLoading}
@@ -168,7 +169,7 @@ export function MaterialsListPage() {
           {visibleMaterials ? (
             <MaterialsTable
               materials={visibleMaterials}
-              onOpen={openPreview}
+              onOpen={openDetail}
               onEdit={openEdit}
               onDelete={handleDelete}
             />
@@ -183,14 +184,6 @@ export function MaterialsListPage() {
         onSubmit={handleSubmit}
         isSubmitting={createMutation.isPending || updateMutation.isPending}
         errorMessage={errorMessage}
-      />
-
-      <MaterialPreviewModal
-        opened={previewOpened}
-        onClose={previewModal.close}
-        material={previewing}
-        onEdit={openEdit}
-        onDelete={handleDelete}
       />
     </Stack>
   )

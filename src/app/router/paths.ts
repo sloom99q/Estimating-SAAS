@@ -9,6 +9,9 @@ export const paths = {
   /** Quotation document route — opens a printable view of the project. */
   projectQuotation: '/projects/:projectId/quotation',
   materials: '/materials',
+  /** Material detail / procurement view route pattern. */
+  materialDetail: '/materials/:materialId',
+  suppliers: '/suppliers',
   users: '/users',
 } as const
 
@@ -22,4 +25,9 @@ export function projectPath(projectId: string): string {
 /** Build the quotation URL for a project. */
 export function projectQuotationPath(projectId: string): string {
   return `/projects/${projectId}/quotation`
+}
+
+/** Build the URL for a specific material's procurement workspace. */
+export function materialPath(materialId: string): string {
+  return `/materials/${materialId}`
 }

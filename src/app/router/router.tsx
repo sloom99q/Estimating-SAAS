@@ -81,6 +81,24 @@ export const router = createBrowserRouter([
             },
           },
           {
+            path: paths.materialDetail,
+            lazy: async () => {
+              const { MaterialDetailPage } = await import(
+                '@/app/pages/materials/MaterialDetailPage'
+              )
+              return { Component: MaterialDetailPage }
+            },
+          },
+          {
+            path: paths.suppliers,
+            lazy: async () => {
+              const { SuppliersListPage } = await import(
+                '@/features/suppliers/pages/SuppliersListPage'
+              )
+              return { Component: SuppliersListPage }
+            },
+          },
+          {
             path: paths.users,
             lazy: async () => {
               const { UsersPage } = await import('@/features/users/pages/UsersPage')

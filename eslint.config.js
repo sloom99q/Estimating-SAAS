@@ -34,7 +34,17 @@ const DOMAIN_FRAMEWORK_FREE = {
 
 export default tseslint.config(
   {
-    ignores: ['dist', 'node_modules', 'coverage', '**/*.config.js', '**/*.config.cjs', '**/*.config.ts'],
+    ignores: [
+      'dist',
+      'node_modules',
+      'coverage',
+      // apps/api ships its own runtime + tsconfig (Bun, not Vite). Linted via
+      // `bun run api:typecheck` instead so its globals (Bun.serve, etc.) are in scope.
+      'apps/api/**',
+      '**/*.config.js',
+      '**/*.config.cjs',
+      '**/*.config.ts',
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

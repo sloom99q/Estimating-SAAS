@@ -1,3 +1,6 @@
+import { env } from '@/shared/config/env'
+import { httpRequest } from '@/shared/lib/http/client'
+import { useSessionStore } from '@/shared/store/sessionStore'
 import type { OrgUser } from '../domain/user.types'
 
 function delay(ms: number): Promise<void> {
@@ -63,8 +66,19 @@ const MOCK_USERS: OrgUser[] = [
   },
 ]
 
-/** Mock users transport. Real backend slots in here against the http client. */
+/**
+ * Users transport. Same shape on both branches:
+ *   - HTTP mode  → `GET /api/users` with the JWT (org-scoped server-side).
+ *   - mock mode  → returns the canned roster (Phase-1 demo data).
+ */
 export async function fetchUsers(_organizationId: string): Promise<OrgUser[]> {
+  if (env.apiUrl) {
+    const token = useSessionStore.getState().session?.token
+    return httpRequest<OrgUser[]>('/api/users', {
+      method: 'GET',
+      ...(token ? { token } : {}),
+    })
+  }
   await delay(350)
   return MOCK_USERS
 }

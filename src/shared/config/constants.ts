@@ -18,6 +18,7 @@ export const I18N_NAMESPACES = [
   'spaces',
   'materials',
   'quotations',
+  'suppliers',
 ] as const
 
 /** localStorage keys. Must match index.html's pre-paint bootstrap script. */
