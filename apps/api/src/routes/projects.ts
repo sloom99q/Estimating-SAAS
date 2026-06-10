@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { prisma } from '../db'
+import { tenantDb } from '../db/tenantDb'
 import { requireAuth } from '../middleware/auth'
 import type { Router } from './router'
 import { emptyResponse, errorResponse, jsonResponse } from '../utils/json'
@@ -62,12 +62,10 @@ export function registerProjectRoutes(router: Router): void {
   router.get(
     '/api/projects',
     requireAuth(async (_req, ctx) => {
+      const db = tenantDb(ctx.organizationId)
       const includeDeleted = ctx.query.get('includeDeleted') === 'true'
-      const rows = await prisma.project.findMany({
-        where: {
-          organizationId: ctx.organizationId,
-          ...(includeDeleted ? {} : { deletedAt: null }),
-        },
+      const rows = await db.project.findMany({
+        where: includeDeleted ? {} : { deletedAt: null },
         orderBy: { createdAt: 'desc' },
       })
       return jsonResponse(rows.map(project))
@@ -77,8 +75,9 @@ export function registerProjectRoutes(router: Router): void {
   router.get(
     '/api/projects/:id',
     requireAuth(async (_req, ctx) => {
-      const row = await prisma.project.findFirst({
-        where: { id: ctx.params.id, organizationId: ctx.organizationId, deletedAt: null },
+      const db = tenantDb(ctx.organizationId)
+      const row = await db.project.findFirst({
+        where: { id: ctx.params.id, deletedAt: null },
       })
       if (!row) return errorResponse(404, 'Project not found')
       return jsonResponse(project(row))
@@ -90,8 +89,10 @@ export function registerProjectRoutes(router: Router): void {
     requireAuth(async (req, ctx) => {
       const parsed = await readBody(req, createBody)
       if (parsed instanceof Response) return parsed
-      const created = await prisma.project.create({
+      const db = tenantDb(ctx.organizationId)
+      const created = await db.project.create({
         data: {
+          // Compiler-required but extension-overridden — see tenantDb.ts.
           organizationId: ctx.organizationId,
           name: parsed.name,
           clientName: parsed.clientName,
@@ -109,13 +110,11 @@ export function registerProjectRoutes(router: Router): void {
     requireAuth(async (req, ctx) => {
       const parsed = await readBody(req, updateBody)
       if (parsed instanceof Response) return parsed
-
-      const existing = await prisma.project.findFirst({
-        where: { id: ctx.params.id, organizationId: ctx.organizationId },
-      })
+      const db = tenantDb(ctx.organizationId)
+      const existing = await db.project.findFirst({ where: { id: ctx.params.id } })
       if (!existing) return errorResponse(404, 'Project not found')
 
-      const updated = await prisma.project.update({
+      const updated = await db.project.update({
         where: { id: existing.id },
         data: {
           ...(parsed.name !== undefined ? { name: parsed.name } : {}),
@@ -132,17 +131,17 @@ export function registerProjectRoutes(router: Router): void {
   router.del(
     '/api/projects/:id',
     requireAuth(async (_req, ctx) => {
-      const existing = await prisma.project.findFirst({
-        where: { id: ctx.params.id, organizationId: ctx.organizationId, deletedAt: null },
+      const db = tenantDb(ctx.organizationId)
+      const existing = await db.project.findFirst({
+        where: { id: ctx.params.id, deletedAt: null },
       })
       if (!existing) return emptyResponse()
       const now = new Date()
-      await prisma.$transaction([
-        prisma.project.update({
-          where: { id: existing.id },
-          data: { deletedAt: now },
-        }),
-        prisma.space.updateMany({
+      // Tenant extension scopes both calls; we batch the writes in a tx so the
+      // cascade is atomic.
+      await db.$transaction([
+        db.project.update({ where: { id: existing.id }, data: { deletedAt: now } }),
+        db.space.updateMany({
           where: { projectId: existing.id, deletedAt: null },
           data: { deletedAt: now },
         }),
@@ -154,11 +153,10 @@ export function registerProjectRoutes(router: Router): void {
   router.post(
     '/api/projects/:id/restore',
     requireAuth(async (_req, ctx) => {
-      const existing = await prisma.project.findFirst({
-        where: { id: ctx.params.id, organizationId: ctx.organizationId },
-      })
+      const db = tenantDb(ctx.organizationId)
+      const existing = await db.project.findFirst({ where: { id: ctx.params.id } })
       if (!existing) return errorResponse(404, 'Project not found')
-      const restored = await prisma.project.update({
+      const restored = await db.project.update({
         where: { id: existing.id },
         data: { deletedAt: null },
       })

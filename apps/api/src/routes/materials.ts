@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { prisma } from '../db'
+import { tenantDb } from '../db/tenantDb'
 import { requireAuth } from '../middleware/auth'
 import type { Router } from './router'
 import { emptyResponse, errorResponse, jsonResponse } from '../utils/json'
@@ -99,12 +100,10 @@ export function registerMaterialRoutes(router: Router): void {
   router.get(
     '/api/materials',
     requireAuth(async (_req, ctx) => {
+      const db = tenantDb(ctx.organizationId)
       const includeDeleted = ctx.query.get('includeDeleted') === 'true'
-      const rows = await prisma.material.findMany({
-        where: {
-          organizationId: ctx.organizationId,
-          ...(includeDeleted ? {} : { deletedAt: null }),
-        },
+      const rows = await db.material.findMany({
+        where: includeDeleted ? {} : { deletedAt: null },
         orderBy: { name: 'asc' },
       })
       return jsonResponse(rows.map(material))
@@ -114,8 +113,9 @@ export function registerMaterialRoutes(router: Router): void {
   router.get(
     '/api/materials/:id',
     requireAuth(async (_req, ctx) => {
-      const row = await prisma.material.findFirst({
-        where: { id: ctx.params.id, organizationId: ctx.organizationId, deletedAt: null },
+      const db = tenantDb(ctx.organizationId)
+      const row = await db.material.findFirst({
+        where: { id: ctx.params.id, deletedAt: null },
       })
       if (!row) return errorResponse(404, 'Material not found')
       return jsonResponse(material(row))
@@ -127,12 +127,16 @@ export function registerMaterialRoutes(router: Router): void {
     requireAuth(async (req, ctx) => {
       const parsed = await readBody(req, createBody)
       if (parsed instanceof Response) return parsed
+      const db = tenantDb(ctx.organizationId)
+      // Organization is non-tenant; read it via the raw client.
       const org = await prisma.organization.findUnique({
         where: { id: ctx.organizationId },
         select: { defaultCurrency: true },
       })
-      const created = await prisma.material.create({
+      const created = await db.material.create({
         data: {
+          // The tenant extension overrides this at runtime, but Prisma's
+          // generated types insist on it being present. Same value either way.
           organizationId: ctx.organizationId,
           name: parsed.name,
           category: parsed.category,
@@ -156,12 +160,11 @@ export function registerMaterialRoutes(router: Router): void {
     requireAuth(async (req, ctx) => {
       const parsed = await readBody(req, updateBody)
       if (parsed instanceof Response) return parsed
-      const existing = await prisma.material.findFirst({
-        where: { id: ctx.params.id, organizationId: ctx.organizationId },
-      })
+      const db = tenantDb(ctx.organizationId)
+      const existing = await db.material.findFirst({ where: { id: ctx.params.id } })
       if (!existing) return errorResponse(404, 'Material not found')
 
-      const updated = await prisma.material.update({
+      const updated = await db.material.update({
         where: { id: existing.id },
         data: {
           ...(parsed.name !== undefined ? { name: parsed.name } : {}),
@@ -183,11 +186,12 @@ export function registerMaterialRoutes(router: Router): void {
   router.del(
     '/api/materials/:id',
     requireAuth(async (_req, ctx) => {
-      const existing = await prisma.material.findFirst({
-        where: { id: ctx.params.id, organizationId: ctx.organizationId, deletedAt: null },
+      const db = tenantDb(ctx.organizationId)
+      const existing = await db.material.findFirst({
+        where: { id: ctx.params.id, deletedAt: null },
       })
       if (!existing) return emptyResponse()
-      await prisma.material.update({
+      await db.material.update({
         where: { id: existing.id },
         data: { deletedAt: new Date() },
       })
@@ -198,11 +202,10 @@ export function registerMaterialRoutes(router: Router): void {
   router.post(
     '/api/materials/:id/restore',
     requireAuth(async (_req, ctx) => {
-      const existing = await prisma.material.findFirst({
-        where: { id: ctx.params.id, organizationId: ctx.organizationId },
-      })
+      const db = tenantDb(ctx.organizationId)
+      const existing = await db.material.findFirst({ where: { id: ctx.params.id } })
       if (!existing) return errorResponse(404, 'Material not found')
-      const restored = await prisma.material.update({
+      const restored = await db.material.update({
         where: { id: existing.id },
         data: { deletedAt: null },
       })

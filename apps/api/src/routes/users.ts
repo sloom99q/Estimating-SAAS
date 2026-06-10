@@ -1,4 +1,4 @@
-import { prisma } from '../db'
+import { tenantDb } from '../db/tenantDb'
 import { requireAuth } from '../middleware/auth'
 import type { Router } from './router'
 import { jsonResponse } from '../utils/json'
@@ -12,8 +12,8 @@ export function registerUserRoutes(router: Router): void {
   router.get(
     '/api/users',
     requireAuth(async (_req, ctx) => {
-      const memberships = await prisma.membership.findMany({
-        where: { organizationId: ctx.organizationId },
+      const db = tenantDb(ctx.organizationId)
+      const memberships = await db.membership.findMany({
         include: { user: true },
       })
       const rows = memberships

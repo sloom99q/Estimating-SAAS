@@ -1,23 +1,44 @@
-// Phase 8A — Production-shaped Prisma schema for the API.
+// Sprint-1 schema (Phase 9). PostgreSQL is now the live source of truth.
+// SQLite has been retired — the previous app.db is migrated by
+// `apps/api/scripts/migrate-sqlite-to-postgres.ts`.
 //
-// SQLite for now; migrating to PostgreSQL is a `provider = "postgresql"` change
-// + re-running `prisma migrate dev`. We avoid every SQLite-incompatible attribute
-// (no @db.Timestamptz, no @db.Decimal, no @db.Char), so swap-time is minimal.
+// Conventions (per architect rulings, ADR-010):
+//   - cuid() PKs
+//   - @db.Timestamptz(6) on every DateTime
+//   - Decimal @db.Decimal(p, s) for money/qty on NEW takeoff models
+//     (Sprint 2+). Existing 8A/8B Float columns stay Float for now to keep
+//     /materials and /suppliers wire-shape stable; promotion to Decimal is a
+//     follow-up cleanup, not Sprint 1.
+//   - organizationId on every tenant-scoped row; composite uniques scope by org.
+//   - Soft-delete via deletedAt; audit createdAt/updatedAt.
+//   - Role enum uses the repo's 4-role vocabulary (owner/admin/estimator/viewer).
 //
-// CRITICAL invariants:
-//   - Every tenant-scoped row carries `organizationId`.
-//   - Every row carries `createdAt / updatedAt / deletedAt` (soft delete).
-//   - String-typed enums (status / role) match the union types in src/.
-//   - Composite uniqueness `[organizationId, id]` lets future child tables use
-//     `references: [organizationId, id]` for structural tenant FKs.
+// ADR-009 (8B pricing model supersedes spec §2):
+//   - MaterialSupplierPrice + PriceSnapshot are retained as the authoritative
+//     procurement schema. Supplier gains `creditLimitAed`.
+//
+// ADR-010 (schema source of truth):
+//   - apps/api/prisma/schema.prisma is now the LIVE schema; the root
+//     prisma/schema.prisma stays as the long-term reference.
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum MembershipRole {
+  owner
+  admin
+  estimator
+  viewer
 }
 
 // ---------------------------------------------------------------------------
@@ -31,9 +52,9 @@ model User {
   passwordHash String
   avatarUrl    String?
   isSuperAdmin Boolean   @default(false)
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
-  deletedAt    DateTime?
+  createdAt    DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt    DateTime? @db.Timestamptz(6)
 
   memberships Membership[]
 
@@ -45,33 +66,31 @@ model Organization {
   name            String
   slug            String    @unique
   defaultCurrency String    @default("AED")
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
-  deletedAt       DateTime?
+  createdAt       DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt       DateTime? @db.Timestamptz(6)
 
-  memberships Membership[]
-  projects    Project[]
-  spaces      Space[]
-  materials   Material[]
-  // Phase 8B — supplier intelligence
+  memberships            Membership[]
+  projects               Project[]
+  spaces                 Space[]
+  materials              Material[]
   suppliers              Supplier[]
   materialSupplierPrices MaterialSupplierPrice[]
   priceSnapshots         PriceSnapshot[]
+  jobs                   Job[]
+  usage                  Usage?
 
   @@map("organizations")
 }
 
-/// A user's membership in an organization, carrying the org-scoped role.
-/// role is one of: owner | admin | estimator | viewer
-/// status is one of: invited | active | disabled
 model Membership {
-  id             String    @id @default(cuid())
+  id             String         @id @default(cuid())
   organizationId String
   userId         String
-  role           String    @default("estimator")
-  status         String    @default("active")
-  invitedAt      DateTime  @default(now())
-  joinedAt       DateTime?
+  role           MembershipRole @default(estimator)
+  status         String         @default("active")
+  invitedAt      DateTime       @default(now()) @db.Timestamptz(6)
+  joinedAt       DateTime?      @db.Timestamptz(6)
 
   organization Organization @relation(fields: [organizationId], references: [id])
   user         User         @relation(fields: [userId], references: [id])
@@ -82,11 +101,9 @@ model Membership {
 }
 
 // ---------------------------------------------------------------------------
-// Estimation domain
+// Estimation domain (8A)
 // ---------------------------------------------------------------------------
 
-/// status: lead | active | on_hold | completed | cancelled
-/// type:   residential | commercial | luxury
 model Project {
   id             String    @id @default(cuid())
   organizationId String
@@ -95,9 +112,9 @@ model Project {
   location       String
   type           String
   status         String    @default("lead")
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
-  deletedAt      DateTime?
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime? @db.Timestamptz(6)
 
   organization Organization @relation(fields: [organizationId], references: [id])
   spaces       Space[]
@@ -118,9 +135,9 @@ model Space {
   floorMaterialId   String?
   wallMaterialId    String?
   ceilingMaterialId String?
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
-  deletedAt         DateTime?
+  createdAt         DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt         DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt         DateTime? @db.Timestamptz(6)
 
   organization Organization @relation(fields: [organizationId], references: [id])
   project      Project      @relation(fields: [projectId], references: [id])
@@ -130,8 +147,6 @@ model Space {
   @@map("spaces")
 }
 
-/// category: tiles | marble | paint | gypsum | glue | grout | cladding | other
-/// unit:     m2 | kg | bag | piece
 model Material {
   id             String    @id @default(cuid())
   organizationId String
@@ -146,12 +161,11 @@ model Material {
   notes          String?
   imageUrl       String?
   active         Boolean   @default(true)
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
-  deletedAt      DateTime?
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime? @db.Timestamptz(6)
 
-  organization Organization @relation(fields: [organizationId], references: [id])
-  // Phase 8B — supplier intelligence relations
+  organization   Organization            @relation(fields: [organizationId], references: [id])
   supplierPrices MaterialSupplierPrice[]
   priceSnapshots PriceSnapshot[]
 
@@ -160,13 +174,10 @@ model Material {
   @@map("materials")
 }
 
-// ===========================================================================
-// Phase 8B — Supplier intelligence
-// ===========================================================================
+// ---------------------------------------------------------------------------
+// Supplier intelligence (8B) — kept per ADR-009. NEW: `creditLimitAed`.
+// ---------------------------------------------------------------------------
 
-/// Org-scoped procurement directory. `preferred` flags an org-wide
-/// preference — the directory's default; a per-material preferred supplier is
-/// tracked on `MaterialSupplierPrice.isPreferred`.
 model Supplier {
   id             String    @id @default(cuid())
   organizationId String
@@ -177,15 +188,15 @@ model Supplier {
   phone          String?
   website        String?
   paymentTerms   String?
-  /// Average lead time in days for orders from this supplier (org default).
   leadTimeDays   Int?
-  /// Quality rating in [0, 5]. Nullable while the org is still ranking suppliers.
   rating         Float?
   preferred      Boolean   @default(false)
   notes          String?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
-  deletedAt      DateTime?
+  // ADR-009 addition — original requirements field that was missing in 8B.
+  creditLimitAed Decimal?  @db.Decimal(14, 2)
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime? @db.Timestamptz(6)
 
   organization   Organization            @relation(fields: [organizationId], references: [id])
   materialPrices MaterialSupplierPrice[]
@@ -197,12 +208,6 @@ model Supplier {
   @@map("suppliers")
 }
 
-/// The CURRENT price for a (material, supplier) pair. Exactly one live row
-/// per pair (enforced by the composite unique index). `isPreferred` marks the
-/// org's chosen supplier for THIS material — different from `Supplier.preferred`.
-///
-/// Updating the price never overwrites history: the route writes a new
-/// `PriceSnapshot` and updates this row's `unitPrice` + `effectiveDate`.
 model MaterialSupplierPrice {
   id                   String    @id @default(cuid())
   organizationId       String
@@ -212,12 +217,12 @@ model MaterialSupplierPrice {
   currency             String
   minimumOrderQuantity Float?
   leadTimeDays         Int?
-  effectiveDate        DateTime
+  effectiveDate        DateTime  @db.Timestamptz(6)
   isPreferred          Boolean   @default(false)
   notes                String?
-  createdAt            DateTime  @default(now())
-  updatedAt            DateTime  @updatedAt
-  deletedAt            DateTime?
+  createdAt            DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt            DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt            DateTime? @db.Timestamptz(6)
 
   organization Organization @relation(fields: [organizationId], references: [id])
   material     Material     @relation(fields: [materialId], references: [id])
@@ -229,10 +234,6 @@ model MaterialSupplierPrice {
   @@map("material_supplier_prices")
 }
 
-/// Immutable price history. Written on every `MaterialSupplierPrice` create
-/// AND on every price change. Never updated, never deleted. Drives the
-/// timeline chart + trend detection (`up | down | stable`) on the material
-/// detail page.
 model PriceSnapshot {
   id             String   @id @default(cuid())
   organizationId String
@@ -240,8 +241,8 @@ model PriceSnapshot {
   supplierId     String
   price          Float
   currency       String
-  effectiveDate  DateTime
-  createdAt      DateTime @default(now())
+  effectiveDate  DateTime @db.Timestamptz(6)
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
 
   organization Organization @relation(fields: [organizationId], references: [id])
   material     Material     @relation(fields: [materialId], references: [id])
@@ -250,4 +251,52 @@ model PriceSnapshot {
   @@index([organizationId, materialId, supplierId, effectiveDate])
   @@index([organizationId, materialId, effectiveDate])
   @@map("price_snapshots")
+}
+
+// ===========================================================================
+// Sprint 1 infrastructure: Job runner + usage metering
+// ===========================================================================
+
+/// Background-job table. Worker claims via UPDATE ... FOR UPDATE SKIP LOCKED.
+/// Retry-with-backoff lives in code: 2^attempt × 2s, max 3 attempts.
+/// Sprint 2+ wires the real handlers (INGEST / CLASSIFY / EXTRACT_* / etc.);
+/// Sprint 1 ships NOOP + FORCE_FAIL handlers to prove the lifecycle.
+model Job {
+  id             String    @id @default(cuid())
+  organizationId String
+  projectId      String?
+  type           String
+  payload        Json
+  status         String    @default("QUEUED")
+  attempts       Int       @default(0)
+  error          String?
+  result         Json?
+  /// When the row should next become eligible for claim. Null = immediately.
+  scheduledFor   DateTime? @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  startedAt      DateTime? @db.Timestamptz(6)
+  finishedAt     DateTime? @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([status, scheduledFor, createdAt])
+  @@index([organizationId, createdAt])
+  @@map("jobs")
+}
+
+/// Per-org metering. Incremented from job handlers (Sprint 2+). Single row
+/// per org maintained by upsert.
+model Usage {
+  id             String   @id @default(cuid())
+  organizationId String   @unique
+  pagesProcessed Int      @default(0)
+  jobsRun        Int      @default(0)
+  jobsFailed     Int      @default(0)
+  tokensIn       Int      @default(0)
+  tokensOut      Int      @default(0)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@map("usages")
 }

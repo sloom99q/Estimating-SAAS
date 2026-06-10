@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { prisma } from '../db'
+import { tenantDb } from '../db/tenantDb'
 import { requireAuth } from '../middleware/auth'
 import type { Router } from './router'
 import { emptyResponse, errorResponse, jsonResponse } from '../utils/json'
@@ -79,11 +79,11 @@ export function registerSpaceRoutes(router: Router): void {
   router.get(
     '/api/spaces',
     requireAuth(async (_req, ctx) => {
+      const db = tenantDb(ctx.organizationId)
       const projectId = ctx.query.get('projectId')
       const includeDeleted = ctx.query.get('includeDeleted') === 'true'
-      const rows = await prisma.space.findMany({
+      const rows = await db.space.findMany({
         where: {
-          organizationId: ctx.organizationId,
           ...(projectId ? { projectId } : {}),
           ...(includeDeleted ? {} : { deletedAt: null }),
         },
@@ -96,8 +96,9 @@ export function registerSpaceRoutes(router: Router): void {
   router.get(
     '/api/spaces/:id',
     requireAuth(async (_req, ctx) => {
-      const row = await prisma.space.findFirst({
-        where: { id: ctx.params.id, organizationId: ctx.organizationId, deletedAt: null },
+      const db = tenantDb(ctx.organizationId)
+      const row = await db.space.findFirst({
+        where: { id: ctx.params.id, deletedAt: null },
       })
       if (!row) return errorResponse(404, 'Space not found')
       return jsonResponse(space(row))
@@ -109,18 +110,16 @@ export function registerSpaceRoutes(router: Router): void {
     requireAuth(async (req, ctx) => {
       const parsed = await readBody(req, createBody)
       if (parsed instanceof Response) return parsed
+      const db = tenantDb(ctx.organizationId)
 
-      const parent = await prisma.project.findFirst({
-        where: {
-          id: parsed.projectId,
-          organizationId: ctx.organizationId,
-          deletedAt: null,
-        },
+      const parent = await db.project.findFirst({
+        where: { id: parsed.projectId, deletedAt: null },
       })
       if (!parent) return errorResponse(400, 'projectId does not belong to your organization')
 
-      const created = await prisma.space.create({
+      const created = await db.space.create({
         data: {
+          // Compiler-required but extension-overridden — see tenantDb.ts.
           organizationId: ctx.organizationId,
           projectId: parsed.projectId,
           name: parsed.name,
@@ -138,27 +137,27 @@ export function registerSpaceRoutes(router: Router): void {
     requireAuth(async (req, ctx) => {
       const parsed = await readBody(req, updateBody)
       if (parsed instanceof Response) return parsed
+      const db = tenantDb(ctx.organizationId)
 
-      const existing = await prisma.space.findFirst({
-        where: { id: ctx.params.id, organizationId: ctx.organizationId },
-      })
+      const existing = await db.space.findFirst({ where: { id: ctx.params.id } })
       if (!existing) return errorResponse(404, 'Space not found')
 
-      // Verify material assignments belong to this org. Null is allowed (clears
-      // the assignment), undefined is skipped (no change).
+      // Verify material assignments belong to this org. Null is allowed
+      // (clears the assignment), undefined is skipped (no change). Looked
+      // up via tenantDb, so a cross-org material id resolves to null.
       for (const materialId of [
         parsed.floorMaterialId,
         parsed.wallMaterialId,
         parsed.ceilingMaterialId,
       ]) {
         if (materialId == null) continue
-        const found = await prisma.material.findFirst({
-          where: { id: materialId, organizationId: ctx.organizationId, deletedAt: null },
+        const found = await db.material.findFirst({
+          where: { id: materialId, deletedAt: null },
         })
         if (!found) return errorResponse(400, `Material ${materialId} not found in this organization`)
       }
 
-      const updated = await prisma.space.update({
+      const updated = await db.space.update({
         where: { id: existing.id },
         data: {
           ...(parsed.name !== undefined ? { name: parsed.name } : {}),
@@ -179,11 +178,12 @@ export function registerSpaceRoutes(router: Router): void {
   router.del(
     '/api/spaces/:id',
     requireAuth(async (_req, ctx) => {
-      const existing = await prisma.space.findFirst({
-        where: { id: ctx.params.id, organizationId: ctx.organizationId, deletedAt: null },
+      const db = tenantDb(ctx.organizationId)
+      const existing = await db.space.findFirst({
+        where: { id: ctx.params.id, deletedAt: null },
       })
       if (!existing) return emptyResponse()
-      await prisma.space.update({
+      await db.space.update({
         where: { id: existing.id },
         data: { deletedAt: new Date() },
       })
@@ -194,11 +194,10 @@ export function registerSpaceRoutes(router: Router): void {
   router.post(
     '/api/spaces/:id/restore',
     requireAuth(async (_req, ctx) => {
-      const existing = await prisma.space.findFirst({
-        where: { id: ctx.params.id, organizationId: ctx.organizationId },
-      })
+      const db = tenantDb(ctx.organizationId)
+      const existing = await db.space.findFirst({ where: { id: ctx.params.id } })
       if (!existing) return errorResponse(404, 'Space not found')
-      const restored = await prisma.space.update({
+      const restored = await db.space.update({
         where: { id: existing.id },
         data: { deletedAt: null },
       })
