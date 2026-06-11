@@ -40,11 +40,26 @@ function categoryFor(kind: string | null | undefined): 'FLOOR_FINISH' | 'WALL_FI
   return 'OTHER'
 }
 
-async function renderFullPageJpegBase64(sourceBytes: Buffer, pageNo: number): Promise<string | null> {
-  // Re-use the quadrant renderer at low overlap and take the TL only when we
-  // need a single image — that's equivalent to a single 220-DPI render but
-  // keeps the implementation in one place. The legend tables are small;
-  // 220 DPI quadrant TL is plenty.
+async function renderFullPageJpegBase64(
+  sourceBytes: Buffer,
+  pageNo: number,
+  fallbackImageKey: string | null,
+  blob: ReturnType<typeof getBlobStore>,
+): Promise<string | null> {
+  // Sprint-6 live-gate finding: the original TL-only quadrant render missed
+  // every legend table that wasn't in the top-left of the page (Plot 4357's
+  // I401-I404 keep theirs centre-right). We need the WHOLE page in one
+  // image. Use the INGEST 110-DPI full-page jpeg directly — Anthropic will
+  // downsample, but the legend tags (ST01 etc.) are easily readable at that
+  // size. Fall back to a 220-DPI quadrant pass if the INGEST image is gone.
+  if (fallbackImageKey) {
+    try {
+      const bytes = await blob.get(fallbackImageKey)
+      return bytes.toString('base64')
+    } catch {
+      // fall through to the slower quadrant path
+    }
+  }
   try {
     const quads = await renderPageQuadrants(sourceBytes, pageNo, { dpi: 220, overlapPct: 0 })
     return quads[0]?.base64 ?? null
@@ -80,7 +95,12 @@ export const extractFinishLegendHandler: JobHandler = async (job: JobRecord) => 
   const allCodes = new Set<string>()
 
   for (const sheet of sheets) {
-    const jpegBase64 = await renderFullPageJpegBase64(sourceBytes, sheet.pageNo)
+    const jpegBase64 = await renderFullPageJpegBase64(
+      sourceBytes,
+      sheet.pageNo,
+      sheet.imageKey,
+      blob,
+    )
     const textSnippet = sheet.rawTextKey
       ? (await blob.get(sheet.rawTextKey).then((b) => b.toString('utf-8')).catch(() => '')).slice(0, 4000)
       : ''

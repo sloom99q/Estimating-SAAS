@@ -186,11 +186,20 @@ export function registerBoqRoutes(router: Router): void {
 
       // Group by section. S4-4: skip the categories in NEVER_BOQ (today only
       // ROOM) — they're QUANTIFY inputs, not bill items.
+      // Sprint-6: also skip items with meta.kind='LEGEND'. Those are MATERIAL
+      // DEFINITIONS that the EXTRACT_FINISH_LEGEND stage planted as
+      // reference rows; they have null qty and would pollute the BOQ.
       const sectionBuckets = new Map<string, typeof items>()
       let skippedRoomItems = 0
+      let skippedLegendItems = 0
       for (const item of items) {
         if (NEVER_BOQ.has(item.category)) {
           skippedRoomItems += 1
+          continue
+        }
+        const meta = (item.meta ?? {}) as Record<string, unknown>
+        if (meta.kind === 'LEGEND') {
+          skippedLegendItems += 1
           continue
         }
         const sectionCode = CATEGORY_TO_SECTION[item.category] ?? '1.0'
