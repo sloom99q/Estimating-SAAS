@@ -70,9 +70,26 @@ export const classifyHandler: JobHandler = async (job: JobRecord) => {
   const blob = getBlobStore()
   let tokensIn = 0
   let tokensOut = 0
+  // Sprint-5 S5-A idempotency contract:
+  //   - Initial filter skips sheets whose `aiJson` is already populated. This
+  //     covers the steady-state reaper-driven retry case (one process, one
+  //     attempt at a time): a previous attempt's per-sheet writes already
+  //     survived into the DB, so the next attempt only does the rest.
+  //   - The per-iteration freshness check below also guards against the
+  //     concurrent-worker case (Sprint 4+ may run multiple workers). A
+  //     sibling worker could have classified this sheet between the bulk
+  //     load above and this loop iteration; if so, skip and don't re-bill
+  //     Anthropic.
+  // Either way: an already-classified sheet is never re-billed.
   const pendingSheets = sheets.filter((s) => s.aiJson === null)
 
   for (const sheet of pendingSheets) {
+    const fresh = await prisma.sheet.findUnique({
+      where: { id: sheet.id },
+      select: { aiJson: true },
+    })
+    if (fresh?.aiJson !== null && fresh?.aiJson !== undefined) continue
+
     const textSnippet = sheet.rawTextKey
       ? (await blob.get(sheet.rawTextKey).then((b) => b.toString('utf-8')).catch(() => '')).slice(0, 1500)
       : ''

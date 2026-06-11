@@ -107,6 +107,14 @@ export async function renderBoqXlsx(boq: XlsxBoq, options: XlsxOptions = {}): Pr
     })
 
     for (const line of section.lines) {
+      // ADR-014: P/S amount cell prints '—' when psAmount is null. Renders
+      // tidy and tells the commercial team explicitly that the carry must
+      // be entered. Zero used to look like an answer.
+      const amountCell = line.isProvisional
+        ? line.psAmount === null
+          ? '—'
+          : num(line.psAmount)
+        : num(line.amount)
       const row = options.includeInternal
         ? [
             line.itemRef,
@@ -114,7 +122,7 @@ export async function renderBoqXlsx(boq: XlsxBoq, options: XlsxOptions = {}): Pr
             line.unit,
             num(line.qty),
             line.isProvisional ? 'P/S' : num(line.rate),
-            line.isProvisional ? num(line.psAmount) : num(line.amount),
+            amountCell,
             line.confidence ?? '',
             line.rateSource ?? '',
           ]
@@ -124,7 +132,7 @@ export async function renderBoqXlsx(boq: XlsxBoq, options: XlsxOptions = {}): Pr
             line.unit,
             num(line.qty),
             line.isProvisional ? 'P/S' : num(line.rate),
-            line.isProvisional ? num(line.psAmount) : num(line.amount),
+            amountCell,
           ]
       const xlsRow = sheet.addRow(row)
       xlsRow.getCell(4).numFmt = '#,##0.00'

@@ -133,12 +133,17 @@ export const priceHandler: JobHandler = async (job: JobRecord) => {
 
   // Index the cached reference data for O(1) lookups.
   const categoryByTakeoffId = new Map(takeoffItems.map((t) => [t.id, t.category]))
-  const rateByCode = new Map<string, { rate: Prisma.Decimal; isGlobal: boolean }>()
-  // Per-org rows win on collision (already returned alongside globals).
+  // ADR-014: rate lookup now keys on (code, unit). Two rates with the same
+  // code but different units (e.g. ceramic-tile-m2 vs ceramic-tile-nr) live
+  // alongside each other. The line's `unit` must match.
+  const rateByCode = new Map<
+    string,
+    { rate: Prisma.Decimal; unit: string; isGlobal: boolean }
+  >()
   for (const r of rateLibrary) {
     const existing = rateByCode.get(r.code)
     if (!existing || (existing.isGlobal && r.organizationId !== null)) {
-      rateByCode.set(r.code, { rate: r.rate, isGlobal: r.organizationId === null })
+      rateByCode.set(r.code, { rate: r.rate, unit: r.unit, isGlobal: r.organizationId === null })
     }
   }
   const assembliesByApplies = new Map<string, typeof assemblies>()
@@ -147,6 +152,10 @@ export const priceHandler: JobHandler = async (job: JobRecord) => {
     const bucket = assembliesByApplies.get(k)
     if (bucket) bucket.push(a)
     else assembliesByApplies.set(k, [a])
+  }
+  const unitsMatch = (a: string | null | undefined, b: string | null | undefined) => {
+    const norm = (s: string | null | undefined) => (s ?? '').trim().toLowerCase()
+    return norm(a) === norm(b)
   }
 
   interface PendingUpdate {
@@ -174,12 +183,14 @@ export const priceHandler: JobHandler = async (job: JobRecord) => {
       let rate: Prisma.Decimal | null = null
       let rateSource: string | null = null
 
-      // Tier 1 — Assembly match (in-memory).
+      // Tier 1 — Assembly match (in-memory). ADR-014: assembly.outputUnit
+      // must equal line.unit. A WALL assembly with outputUnit='m²' cannot
+      // price a window line with unit='nr'.
       const appliesTo = appliesToForCategory(category)
       if (appliesTo) {
-        const candidates = (assembliesByApplies.get(appliesTo) ?? []).concat(
-          assembliesByApplies.get('GENERIC') ?? [],
-        )
+        const candidates = (assembliesByApplies.get(appliesTo) ?? [])
+          .concat(assembliesByApplies.get('GENERIC') ?? [])
+          .filter((a) => unitsMatch(a.outputUnit, line.unit))
         if (candidates.length === 1) {
           const a = candidates[0]!
           const cost = computeAssemblyUnitCost(
@@ -198,14 +209,16 @@ export const priceHandler: JobHandler = async (job: JobRecord) => {
         }
       }
 
-      // Tiers 2-3: supplier prices — Sprint 4 no-op (no takeoff→Material link).
+      // Tiers 2-3: supplier prices — Sprint 4 no-op (no takeoff→Material
+      // link). When wired (Sprint 6+) ADR-014 applies: the supplier price's
+      // material.unit must equal line.unit.
 
-      // Tiers 4-5: rate library — already merged org-over-global above.
+      // Tiers 4-5: rate library. ADR-014: found.unit must equal line.unit.
       if (rate === null) {
         const code = rateCodeFor(line, category)
         if (code) {
           const found = rateByCode.get(code)
-          if (found) {
+          if (found && unitsMatch(found.unit, line.unit)) {
             rate = found.rate
             rateSource = `rate-library:${found.isGlobal ? 'global' : 'org'}:${code}`
           }
@@ -239,6 +252,9 @@ export const priceHandler: JobHandler = async (job: JobRecord) => {
 
   // S4-6: chunked transactional writes. Each chunk completes within Neon's
   // pooler idle window even at 200+ lines.
+  // ADR-014: P/S lines get psAmount = null (not zero). Null renders as '—'
+  // in the XLSX and tells the commercial team "enter the carry value here."
+  // Zero looks deceptively tidy and was masking missing inputs.
   for (let i = 0; i < pending.length; i += CHUNK_SIZE) {
     const chunk = pending.slice(i, i + CHUNK_SIZE)
     await prisma.$transaction(
@@ -250,7 +266,7 @@ export const priceHandler: JobHandler = async (job: JobRecord) => {
             rateSource: u.rateSource,
             amount: u.amount,
             isProvisional: u.isProvisional,
-            psAmount: u.isProvisional ? new Prisma.Decimal(0) : null,
+            psAmount: null,
           },
         }),
       ),

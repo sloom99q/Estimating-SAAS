@@ -16,14 +16,20 @@
  */
 import { Prisma, PrismaClient } from '@prisma/client'
 
-export const RATE_LIBRARY_SOURCE =
+/** Sources are now per-row. Architect-authoritative rows cite the real Triple-A
+ *  bid; everything else still carries the 'estimated; pending review' tag. */
+export const RATE_LIBRARY_SOURCE_ESTIMATED =
   'triple-a-sharjah-2026-estimated; pending architect review'
+export const RATE_LIBRARY_SOURCE_TRIPLE_A =
+  'Triple-A Qo/202605/221 Rev-01'
 
 export interface SeedRate {
   code: string
   description: string
   unit: string
   rate: number
+  /** When omitted, defaults to RATE_LIBRARY_SOURCE_ESTIMATED. */
+  source?: string
 }
 
 export const SHARJAH_GLOBAL_RATES: SeedRate[] = [
@@ -42,7 +48,8 @@ export const SHARJAH_GLOBAL_RATES: SeedRate[] = [
   { code: 'solid-wood-door-supply',    description: 'Solid wood door leaf, supply only',            unit: 'nr',      rate: 1200 },
 
   // -- 2.8 Doors / Windows / Glazing ------------------------------------
-  { code: 'door-single-supply-install',description: 'Single swing door, supply + install',          unit: 'nr',      rate: 1850 },
+  // S5-B: door-single-supply-install rate replaced with the Triple-A bid value.
+  { code: 'door-single-supply-install',description: 'Single swing door, supply + install',          unit: 'nr',      rate: 2400, source: RATE_LIBRARY_SOURCE_TRIPLE_A },
   { code: 'door-double-supply-install',description: 'Double swing door, supply + install',          unit: 'nr',      rate: 3200 },
   { code: 'curtain-wall-aluminium-m2', description: 'Aluminium curtain wall & glazing',             unit: 'm²',      rate: 1150 },
   { code: 'glazed-partition-12mm',     description: 'Glazed partition, 12mm tempered',              unit: 'm²',      rate: 680 },
@@ -50,11 +57,14 @@ export const SHARJAH_GLOBAL_RATES: SeedRate[] = [
   // -- 2.9 Finishes ------------------------------------------------------
   { code: 'paint-emulsion-2coat',      description: 'Emulsion paint, 2 coats incl primer',          unit: 'm²',      rate: 22 },
   { code: 'paint-jotun-system-a',      description: 'Jotun interior paint system A',                unit: 'm²',      rate: 20.20 },
-  { code: 'ceramic-tile-600',          description: 'Glazed ceramic floor tile 600×600',            unit: 'm²',      rate: 95 },
+  // S5-B: ceramic floor rate replaced with Triple-A bid value.
+  { code: 'ceramic-tile-600',          description: 'Glazed ceramic floor tile 600×600',            unit: 'm²',      rate: 200, source: RATE_LIBRARY_SOURCE_TRIPLE_A },
   { code: 'porcelain-anti-slip',       description: 'Porcelain anti-slip floor tile',               unit: 'm²',      rate: 165 },
   { code: 'marble-polished',           description: 'Natural marble polished tiling',               unit: 'm²',      rate: 380 },
-  { code: 'gypsum-ceiling-frame',      description: 'Gypsum board ceiling on metal frame',          unit: 'm²',      rate: 95 },
-  { code: 'skirting-mdf-100',          description: 'MDF skirting 100mm, painted',                  unit: 'm',       rate: 38 },
+  // S5-B: gypsum ceiling rate replaced with Triple-A bid value.
+  { code: 'gypsum-ceiling-frame',      description: 'Gypsum board ceiling on metal frame',          unit: 'm²',      rate: 150, source: RATE_LIBRARY_SOURCE_TRIPLE_A },
+  // S5-B: MDF skirting rate replaced with Triple-A bid value.
+  { code: 'skirting-mdf-100',          description: 'MDF skirting 100mm, painted',                  unit: 'm',       rate: 120, source: RATE_LIBRARY_SOURCE_TRIPLE_A },
   { code: 'plaster-internal',          description: 'Internal cement plaster, 12mm',                unit: 'm²',      rate: 28 },
   { code: 'screed-cement-25',          description: 'Cement screed 25mm',                           unit: 'm²',      rate: 32 },
   { code: 'waterproofing-membrane',    description: 'Waterproofing membrane, wet areas',            unit: 'm²',      rate: 48 },
@@ -84,6 +94,7 @@ if (SHARJAH_GLOBAL_RATES.length !== 26) {
 export async function seedGlobalRates(client: PrismaClient): Promise<number> {
   let touched = 0
   for (const row of SHARJAH_GLOBAL_RATES) {
+    const source = row.source ?? RATE_LIBRARY_SOURCE_ESTIMATED
     const existing = await client.rateLibraryItem.findFirst({
       where: { organizationId: null, code: row.code, region: 'SHJ' },
       select: { id: true },
@@ -95,7 +106,7 @@ export async function seedGlobalRates(client: PrismaClient): Promise<number> {
           description: row.description,
           unit: row.unit,
           rate: row.rate,
-          source: RATE_LIBRARY_SOURCE,
+          source,
         },
       })
     } else {
@@ -106,7 +117,7 @@ export async function seedGlobalRates(client: PrismaClient): Promise<number> {
           description: row.description,
           unit: row.unit,
           rate: row.rate,
-          source: RATE_LIBRARY_SOURCE,
+          source,
           region: 'SHJ',
         },
       })
