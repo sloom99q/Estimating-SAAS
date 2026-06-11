@@ -29,15 +29,10 @@ import {
   CLASSIFY_TOOL,
 } from './prompts/classify.v1'
 import {
-  EXTRACT_DOORS_PROMPT_VERSION,
-  EXTRACT_DOORS_SYSTEM_PROMPT,
-  EXTRACT_DOORS_TOOL,
-} from './prompts/extractDoors.v1'
-import {
-  EXTRACT_WINDOWS_PROMPT_VERSION,
-  EXTRACT_WINDOWS_SYSTEM_PROMPT,
-  EXTRACT_WINDOWS_TOOL,
-} from './prompts/extractWindows.v1'
+  EXTRACT_SCHEDULE_PROMPT_VERSION,
+  EXTRACT_SCHEDULE_SYSTEM_PROMPT,
+  EXTRACT_SCHEDULE_TOOL,
+} from './prompts/extractSchedule.v2'
 import {
   EXTRACT_ROOMS_PROMPT_VERSION,
   EXTRACT_ROOMS_SYSTEM_PROMPT,
@@ -226,19 +221,18 @@ export async function extractSchedule(
   input: ExtractScheduleInput,
 ): Promise<ExtractScheduleOutput> {
   if (isStubMode()) return zeroTokens(stampStub(stubExtractSchedule(input)))
-  const tool = input.kind === 'DOOR' ? EXTRACT_DOORS_TOOL : EXTRACT_WINDOWS_TOOL
-  const systemPrompt =
-    input.kind === 'DOOR' ? EXTRACT_DOORS_SYSTEM_PROMPT : EXTRACT_WINDOWS_SYSTEM_PROMPT
-  const promptVersion =
-    input.kind === 'DOOR' ? EXTRACT_DOORS_PROMPT_VERSION : EXTRACT_WINDOWS_PROMPT_VERSION
+
+  const hint = input.kindHint
+    ? `Title heuristic suggests this is a ${input.kindHint} schedule, but trust your own eyes. If you see otherwise, set kind accordingly.`
+    : 'The title heuristic is inconclusive — decide for yourself.'
 
   const res = await callMessages({
     model: config.anthropicModel,
-    max_tokens: 2048,
+    max_tokens: 4096,
     temperature: 0,
-    system: systemPrompt,
-    tools: [tool],
-    tool_choice: { type: 'tool', name: tool.name },
+    system: EXTRACT_SCHEDULE_SYSTEM_PROMPT,
+    tools: [EXTRACT_SCHEDULE_TOOL],
+    tool_choice: { type: 'tool', name: EXTRACT_SCHEDULE_TOOL.name },
     messages: [
       {
         role: 'user',
@@ -246,19 +240,22 @@ export async function extractSchedule(
           ...buildImageBlock(input.jpegBase64),
           {
             type: 'text',
-            text: `Document=${input.documentId} page=${input.pageNo} (${input.kind} schedule)\n\nFirst 1500 chars of text layer:\n${input.textSnippet.slice(0, 1500)}`,
+            text: `Document=${input.documentId} page=${input.pageNo}\n${hint}\n\nFirst 1500 chars of text layer:\n${input.textSnippet.slice(0, 1500)}`,
           },
         ],
       },
     ],
   })
-  const raw = findToolInput(res, tool.name) as { rows?: ExtractScheduleOutput['rows'] }
+  const raw = findToolInput(res, EXTRACT_SCHEDULE_TOOL.name) as {
+    kind?: ExtractScheduleOutput['kind']
+    rows?: ExtractScheduleOutput['rows']
+  }
   return {
-    kind: input.kind,
+    kind: raw.kind === 'DOOR' || raw.kind === 'WINDOW' ? raw.kind : null,
     rows: Array.isArray(raw.rows) ? raw.rows : [],
     tokensIn: res.usage?.input_tokens ?? 0,
     tokensOut: res.usage?.output_tokens ?? 0,
-    promptVersion,
+    promptVersion: EXTRACT_SCHEDULE_PROMPT_VERSION,
   }
 }
 

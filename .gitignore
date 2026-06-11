@@ -41,6 +41,10 @@ yarn-error.log*
 coverage/
 
 # Sprint-2 takeoff pipeline — never commit binary fixtures or runtime data.
-apps/api/fixtures/
+# Sprint-4: glob the dir contents (not the dir itself) so the small text
+# groundtruth.json can be re-included with a negation.
+apps/api/fixtures/**
+!apps/api/fixtures/
+!apps/api/fixtures/plot4357.groundtruth.json
 apps/api/data/
 apps/api/tmp/

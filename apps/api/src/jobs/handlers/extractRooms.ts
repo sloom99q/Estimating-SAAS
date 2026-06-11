@@ -1,12 +1,20 @@
 /**
- * EXTRACT_ROOMS — Sprint 2 final pipeline stage.
+ * EXTRACT_ROOMS — Sprint 2 → Sprint 4 final pipeline stage.
  *
  *   payload = { documentId }
  *
- * For every sheet classified as plan or finish_plan:
- *   (a) VISION pass: AI extractRooms.v1.
- *   (b) TEXT pass:   independent regex parse of pdftotext output.
- * Reconcile by room name. Same scoring rules as EXTRACT_SCHEDULES.
+ * Sprint-4 vision quality fix (S4-3): for every plan / finish_plan sheet,
+ * we re-render at 220 DPI and TILE the page into 4 OVERLAPPING quadrants.
+ * Each quadrant gets its own vision pass — `extractRooms.v1` reads them as
+ * 4 separate images. Results are merged + deduped before reconciliation
+ * against the text pass.
+ *
+ * Why: A1 plan tag text is ~1.5 mm tall. At Sprint-2's 110 DPI INGEST
+ * resolution that's ~6 pixels — Sonnet can't read it. At 220 DPI full-page
+ * the image exceeds Anthropic's size budget. Quadrant tiling at 220 DPI
+ * gives 4 reads of ~half the page each, all inside the budget, all
+ * readable. Tokens go up ~3-4× on the affected sheets only; the Sprint-3
+ * crown-evidence budget held for that.
  *
  * Then sync into Spaces with source='takeoff'. Manual-source Spaces are NEVER
  * touched — humans win. If a manual Space already exists with the same name
@@ -16,10 +24,13 @@
  * On completion, set Document.status = READY — the pipeline's terminal stage.
  */
 import { STUB_SUFFIX, extractRooms } from '../../ai/anthropic'
+import { normalizeFloor } from '../../ai/floorNormalize'
+import { renderPageQuadrants } from '../../ai/quadrantRender'
 import { roomsTextPass } from '../../ai/roomsTextPass'
 import type { ExtractRoomsRow } from '../../ai/types'
 import { getBlobStore } from '../../blob/fs'
 import { prisma } from '../../db'
+import { runValidators, type ValidatorContext } from '../validators'
 import type { JobHandler, JobRecord } from '../types'
 
 interface ExtractRoomsPayload {
@@ -45,6 +56,29 @@ function compareNumeric(a: number | null, b: number | null): boolean {
   // ±2% tolerance per DoD 4. Spec calls room areas as MEASURED at this rate.
   const tolerance = Math.max(Math.abs(a), Math.abs(b)) * 0.02
   return Math.abs(a - b) <= tolerance
+}
+
+/**
+ * Sprint-4 S4-3: 4 quadrant vision passes can each return the same room
+ * (overlap region). Within a SINGLE sheet, collapse rows with the same
+ * normalized name. Prefer the row that has `area_m2` populated over the one
+ * without; otherwise prefer the row that has a code over one that doesn't.
+ */
+function dedupeBySheet(rows: ExtractRoomsRow[]): ExtractRoomsRow[] {
+  const byName = new Map<string, ExtractRoomsRow>()
+  for (const row of rows) {
+    const key = row.name.trim().toUpperCase()
+    if (!key) continue
+    const existing = byName.get(key)
+    if (!existing) {
+      byName.set(key, row)
+      continue
+    }
+    const score = (r: ExtractRoomsRow) =>
+      (r.area_m2 !== null ? 2 : 0) + (r.code !== null ? 1 : 0)
+    if (score(row) > score(existing)) byName.set(key, row)
+  }
+  return Array.from(byName.values())
 }
 
 function reconcile(vision: ExtractRoomsRow[], text: ExtractRoomsRow[]): ReconciledRoom[] {
@@ -115,42 +149,84 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
   })
 
   const blob = getBlobStore()
+  // Load the source PDF once — every plan/finish_plan sheet needs it for the
+  // quadrant render.
+  const sourceBytes = sheets.length > 0 ? await blob.get(document.storageKey) : Buffer.alloc(0)
   let tokensIn = 0
   let tokensOut = 0
   let itemsCreated = 0
   let spacesUpserted = 0
   let manualSkipped = 0
   let mismatches = 0
+  let quadrantsRendered = 0
 
   for (const sheet of sheets) {
-    const jpegBase64 = sheet.imageKey
-      ? await blob.get(sheet.imageKey).then((b) => b.toString('base64')).catch(() => null)
-      : null
     const textSnippet = sheet.rawTextKey
       ? (await blob.get(sheet.rawTextKey).then((b) => b.toString('utf-8')).catch(() => '')).slice(0, 4000)
       : ''
 
-    const vision = await extractRooms({
-      documentId: document.id,
-      pageNo: sheet.pageNo,
-      jpegBase64,
-      textSnippet,
-    })
-    tokensIn += vision.tokensIn
-    tokensOut += vision.tokensOut
+    // S4-3: render 4 overlapping quadrants at 220 DPI. Each quadrant gets its
+    // own vision pass. Failures fall back to the original full-page jpeg
+    // produced by INGEST at 110 DPI — a degraded but non-broken path.
+    let quadrants: Awaited<ReturnType<typeof renderPageQuadrants>> = []
+    try {
+      quadrants = await renderPageQuadrants(sourceBytes, sheet.pageNo, { dpi: 220, overlapPct: 0.1 })
+    } catch (err) {
+      // Don't kill the job for one bad render.
+      console.error(`[extractRooms] quadrant render failed for page ${sheet.pageNo}:`, err)
+    }
+
+    const visionRows: ExtractRoomsRow[] = []
+    let promptVersion = ''
+    if (quadrants.length === 4) {
+      quadrantsRendered += 4
+      for (const q of quadrants) {
+        const r = await extractRooms({
+          documentId: document.id,
+          pageNo: sheet.pageNo,
+          jpegBase64: q.base64,
+          textSnippet,
+        })
+        tokensIn += r.tokensIn
+        tokensOut += r.tokensOut
+        promptVersion = r.promptVersion
+        visionRows.push(...r.rows)
+      }
+    } else {
+      // Fallback: full-page image at INGEST DPI. Degraded but non-broken.
+      const fallback = sheet.imageKey
+        ? await blob.get(sheet.imageKey).then((b) => b.toString('base64')).catch(() => null)
+        : null
+      const r = await extractRooms({
+        documentId: document.id,
+        pageNo: sheet.pageNo,
+        jpegBase64: fallback,
+        textSnippet,
+      })
+      tokensIn += r.tokensIn
+      tokensOut += r.tokensOut
+      promptVersion = r.promptVersion
+      visionRows.push(...r.rows)
+    }
+
+    // Within-sheet dedupe across the 4 quadrants (a room straddling the center
+    // is captured twice). Keep the row with `area_m2` populated over the one
+    // without.
+    const merged = dedupeBySheet(visionRows)
 
     const text = roomsTextPass(textSnippet, sheet.pageNo)
-    const reconciled = reconcile(vision.rows, text)
-    const visionFromStub = vision.promptVersion.endsWith(STUB_SUFFIX)
+    const reconciled = reconcile(merged, text)
+    const visionFromStub = promptVersion.endsWith(STUB_SUFFIX)
 
     for (const room of reconciled) {
+      const normalizedFloor = normalizeFloor(room.floor)
       const meta: Record<string, unknown> = {
         code: room.code,
         floor: room.floor,
+        floorNormalized: normalizedFloor,
         area_m2: room.area_m2,
         finish_code: room.finish_code,
       }
-      // Sprint-3 A1: stub vision → mark the row.
       if (visionFromStub) meta.stub = true
       const takeoff = await prisma.takeoffItem.create({
         data: {
@@ -158,7 +234,7 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
           projectId: document.projectId,
           category: 'ROOM',
           tag: room.code,
-          description: `${room.name}${room.floor ? ` — ${room.floor}` : ''}`,
+          description: `${room.name}${normalizedFloor ? ` — ${normalizedFloor}` : ''}`,
           unit: 'm²',
           qtyAi: room.area_m2 ?? undefined,
           basis: room.basis,
@@ -166,7 +242,7 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
           sourceSheetId: sheet.id,
           sourceNote: sheet.drawingNo ?? `page ${sheet.pageNo}`,
           meta: meta as object,
-          promptVersion: vision.promptVersion,
+          promptVersion,
         },
       })
       itemsCreated += 1
@@ -184,67 +260,200 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
           },
         })
       }
-
-      // Spaces sync. Manual-source spaces win — never touch them. We dedupe
-      // by name within the project; ARMM-style multi-instance same-name rooms
-      // would need a richer key (out of scope for Sprint 2).
-      const manual = await prisma.space.findFirst({
-        where: {
-          organizationId: job.organizationId,
-          projectId: document.projectId,
-          name: room.name,
-          source: 'manual',
-          deletedAt: null,
-        },
-      })
-      if (manual) {
-        manualSkipped += 1
-        continue
-      }
-      const side = Math.max(0.1, Math.sqrt(room.area_m2 ?? 1))
-      const existing = await prisma.space.findFirst({
-        where: {
-          organizationId: job.organizationId,
-          projectId: document.projectId,
-          name: room.name,
-          source: 'takeoff',
-          deletedAt: null,
-        },
-      })
-      if (existing) {
-        await prisma.space.update({
-          where: { id: existing.id },
-          data: {
-            code: room.code,
-            floor: room.floor,
-            areaM2: room.area_m2 ?? null,
-            confidence: room.confidence,
-            // length / width / height are required by 8A. For takeoff rooms
-            // the areaM2 column is authoritative; we keep a square stand-in
-            // so the wire shape doesn't break the SPA.
-            length: side,
-            width: side,
-          },
-        })
-      } else {
-        await prisma.space.create({
-          data: {
-            organizationId: job.organizationId,
-            projectId: document.projectId,
-            name: room.name,
-            length: side,
-            width: side,
-            height: 3,
-            code: room.code,
-            floor: room.floor,
-            areaM2: room.area_m2 ?? null,
-            source: 'takeoff',
-            confidence: room.confidence,
-          },
-        })
-      }
-      spacesUpserted += 1
     }
+  }
+
+  // ---------------------------------------------------------------------
+  // S4-4 cross-sheet dedupe + Spaces sync from the deduped set.
+  //
+  // The same room frequently appears on plan + finish_plan + RCP sheets.
+  // Group by (normalizedName, normalizedFloor) and keep the row with the
+  // best score: area populated > no area, code populated > no code, higher
+  // confidence wins ties. Losers are soft-deleted.
+  // ---------------------------------------------------------------------
+  const allRoomItems = await prisma.takeoffItem.findMany({
+    where: {
+      organizationId: job.organizationId,
+      projectId: document.projectId,
+      category: 'ROOM',
+      deletedAt: null,
+    },
+    orderBy: { createdAt: 'asc' },
+  })
+  const groups = new Map<string, typeof allRoomItems>()
+  for (const item of allRoomItems) {
+    const m = (item.meta ?? {}) as Record<string, unknown>
+    const name = item.description.split('—')[0]!.trim().toUpperCase()
+    const floor =
+      (typeof m.floorNormalized === 'string' && m.floorNormalized) ||
+      normalizeFloor(typeof m.floor === 'string' ? m.floor : null) ||
+      '∅'
+    const key = `${name}|${floor}`
+    const bucket = groups.get(key)
+    if (bucket) bucket.push(item)
+    else groups.set(key, [item])
+  }
+  const survivors: typeof allRoomItems = []
+  let collapsedRoomDuplicates = 0
+  for (const [, items] of groups) {
+    if (items.length === 1) {
+      survivors.push(items[0]!)
+      continue
+    }
+    const score = (i: (typeof allRoomItems)[number]) =>
+      (i.qtyAi !== null ? 4 : 0) + (i.tag !== null ? 2 : 0) + i.confidence / 100
+    const sorted = items.slice().sort((a, b) => score(b) - score(a))
+    survivors.push(sorted[0]!)
+    const losers = sorted.slice(1)
+    if (losers.length > 0) {
+      await prisma.takeoffItem.updateMany({
+        where: { id: { in: losers.map((l) => l.id) } },
+        data: { deletedAt: new Date() },
+      })
+      collapsedRoomDuplicates += losers.length
+    }
+  }
+
+  // Spaces sync — runs ONLY over the survivors. Manual-source Spaces win.
+  for (const survivor of survivors) {
+    const m = (survivor.meta ?? {}) as Record<string, unknown>
+    const name = survivor.description.split('—')[0]!.trim()
+    const areaM2 = survivor.qtyAi === null ? null : Number(survivor.qtyAi.toString())
+    const floor =
+      (typeof m.floorNormalized === 'string' && m.floorNormalized) ||
+      (typeof m.floor === 'string' ? m.floor : null)
+    const code = typeof m.code === 'string' ? m.code : survivor.tag
+
+    const manual = await prisma.space.findFirst({
+      where: {
+        organizationId: job.organizationId,
+        projectId: document.projectId,
+        name,
+        source: 'manual',
+        deletedAt: null,
+      },
+      select: { id: true },
+    })
+    if (manual) {
+      manualSkipped += 1
+      continue
+    }
+    const side = Math.max(0.1, Math.sqrt(areaM2 ?? 1))
+    const existing = await prisma.space.findFirst({
+      where: {
+        organizationId: job.organizationId,
+        projectId: document.projectId,
+        name,
+        source: 'takeoff',
+        deletedAt: null,
+      },
+      select: { id: true },
+    })
+    if (existing) {
+      await prisma.space.update({
+        where: { id: existing.id },
+        data: {
+          code,
+          floor,
+          areaM2: areaM2 ?? null,
+          confidence: survivor.confidence,
+          length: side,
+          width: side,
+        },
+      })
+    } else {
+      await prisma.space.create({
+        data: {
+          organizationId: job.organizationId,
+          projectId: document.projectId,
+          name,
+          length: side,
+          width: side,
+          height: 3,
+          code,
+          floor,
+          areaM2: areaM2 ?? null,
+          source: 'takeoff',
+          confidence: survivor.confidence,
+        },
+      })
+    }
+    spacesUpserted += 1
+  }
+
+  // ---------------------------------------------------------------------
+  // S4-5 validation net. Pure-TS validators on the final takeoff state.
+  // ---------------------------------------------------------------------
+  const [project, doors, windows, planSheets] = await Promise.all([
+    prisma.project.findUnique({
+      where: { id: document.projectId },
+      select: { type: true },
+    }),
+    prisma.takeoffItem.findMany({
+      where: {
+        organizationId: job.organizationId,
+        projectId: document.projectId,
+        category: 'DOOR',
+        deletedAt: null,
+      },
+      select: { id: true, category: true, tag: true, meta: true },
+    }),
+    prisma.takeoffItem.findMany({
+      where: {
+        organizationId: job.organizationId,
+        projectId: document.projectId,
+        category: 'WINDOW',
+        deletedAt: null,
+      },
+      select: { id: true, category: true, tag: true, meta: true },
+    }),
+    prisma.sheet.findMany({
+      where: {
+        documentId: document.id,
+        organizationId: job.organizationId,
+        sheetType: { in: ['plan', 'finish_plan', 'rcp', 'elevation'] },
+        rawTextKey: { not: null },
+      },
+      select: { rawTextKey: true },
+    }),
+  ])
+  let planTextBlob = ''
+  for (const s of planSheets) {
+    if (!s.rawTextKey) continue
+    const t = await blob.get(s.rawTextKey).then((b) => b.toString('utf-8')).catch(() => '')
+    planTextBlob += `\n${t}`
+  }
+  const validatorCtx: ValidatorContext = {
+    projectType: project?.type ?? null,
+    doors,
+    windows,
+    planTextBlob,
+  }
+  const validatorResults = runValidators(validatorCtx)
+  for (const r of validatorResults) {
+    // Don't double-write the same flag if a previous run already raised it.
+    const existing = await prisma.validationFlag.findFirst({
+      where: {
+        organizationId: job.organizationId,
+        projectId: document.projectId,
+        rule: r.rule,
+        takeoffItemId: r.takeoffItemId ?? null,
+        message: r.message,
+        resolved: false,
+      },
+      select: { id: true },
+    })
+    if (existing) continue
+    await prisma.validationFlag.create({
+      data: {
+        organizationId: job.organizationId,
+        projectId: document.projectId,
+        takeoffItemId: r.takeoffItemId ?? null,
+        rule: r.rule,
+        severity: r.severity,
+        message: r.message,
+      },
+    })
   }
 
   if (tokensIn > 0 || tokensOut > 0) {
@@ -268,9 +477,16 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
     ok: true,
     documentId: document.id,
     roomsProcessed: itemsCreated,
+    /** Sprint-4 S4-4: rooms that survived the cross-sheet dedupe pass. */
+    deduplicatedSurvivors: itemsCreated - collapsedRoomDuplicates,
+    /** Sprint-4 S4-4: per-project duplicate ROOM rows collapsed. */
+    collapsedRoomDuplicates,
     spacesUpserted,
     manualSpacesSkipped: manualSkipped,
     rowMismatches: mismatches,
+    quadrantsRendered,
+    /** Sprint-4 S4-5: validation flags raised by the post-extraction net. */
+    validatorFlagsRaised: validatorResults.length,
     tokensIn,
     tokensOut,
   }

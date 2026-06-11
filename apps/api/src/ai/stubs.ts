@@ -32,8 +32,7 @@ import type {
   SheetType,
 } from './types'
 import { CLASSIFY_PROMPT_VERSION } from './prompts/classify.v1'
-import { EXTRACT_DOORS_PROMPT_VERSION } from './prompts/extractDoors.v1'
-import { EXTRACT_WINDOWS_PROMPT_VERSION } from './prompts/extractWindows.v1'
+import { EXTRACT_SCHEDULE_PROMPT_VERSION } from './prompts/extractSchedule.v2'
 import { EXTRACT_ROOMS_PROMPT_VERSION } from './prompts/extractRooms.v1'
 
 /**
@@ -168,39 +167,48 @@ export function stubClassify(input: ClassifyInput): ClassifyOutput {
 }
 
 /**
- * Two passes returned in sequence: the vision pass matches the text-layer
- * pass on every row EXCEPT one deliberate disagreement so the dual-pass
- * reconciler raises ROW_MISMATCH (DoD 3). Pilot lesson: CW09↔CW10 swap.
+ * Sprint-4: stub uses the kindHint passed by the handler (which now comes
+ * from the title heuristic) to decide what shape to return. Where the hint
+ * is null, returns kind=null + empty rows — the new vision pass has the
+ * authority to say "not a schedule." Keeps the CW09 deliberate text/vision
+ * disagreement so the existing ROW_MISMATCH demonstration still works.
  */
 export function stubExtractSchedule(input: ExtractScheduleInput): ExtractScheduleOutput {
-  if (input.kind === 'DOOR') {
+  if (input.kindHint === 'DOOR') {
     return {
       kind: 'DOOR',
       rows: [
-        { tag: 'D01-A', width_mm: 900, height_mm: 2100, type: 'Single Swing', finish: 'Veneer', remarks: null },
-        // Plot 4357 lesson: same tag, different finish ⇒ separate rows.
-        { tag: 'D01-B', width_mm: 900, height_mm: 2100, type: 'Single Swing', finish: 'Paint', remarks: null },
-        { tag: 'D02', width_mm: 1800, height_mm: 2100, type: 'Double Swing', finish: 'Veneer', remarks: 'Glazed' },
-        { tag: 'D03', width_mm: 900, height_mm: 2100, type: 'Single Sliding', finish: 'Glass', remarks: null },
+        { tag: 'D01-A', count: 1, width_mm: 900, height_mm: 2100, type: 'Single Swing', finish: 'Veneer', remarks: null },
+        { tag: 'D01-B', count: 1, width_mm: 900, height_mm: 2100, type: 'Single Swing', finish: 'Paint', remarks: null },
+        { tag: 'D02', count: 2, width_mm: 1800, height_mm: 2100, type: 'Double Swing', finish: 'Veneer', remarks: 'Glazed' },
+        { tag: 'D03', count: 1, width_mm: 900, height_mm: 2100, type: 'Single Sliding', finish: 'Glass', remarks: null },
       ],
       tokensIn: 1100,
       tokensOut: 350,
-      promptVersion: EXTRACT_DOORS_PROMPT_VERSION,
+      promptVersion: EXTRACT_SCHEDULE_PROMPT_VERSION,
     }
   }
-  // Window/curtain-wall schedule. Note CW09 width: vision reads 2400, text
-  // layer reads 2350 — the dual-pass reconciler flags this as ROW_MISMATCH.
+  if (input.kindHint === 'WINDOW') {
+    return {
+      kind: 'WINDOW',
+      rows: [
+        { tag: 'CW02', count: 1, width_mm: 1800, height_mm: 2700, type: 'Curtain Wall', finish: 'Aluminium', remarks: null },
+        { tag: 'CW09', count: 1, width_mm: 2400, height_mm: 2700, type: 'Curtain Wall', finish: 'Aluminium', remarks: 'Corner unit' },
+        { tag: 'CW10', count: 1, width_mm: 2100, height_mm: 2700, type: 'Curtain Wall', finish: 'Aluminium', remarks: null },
+        { tag: 'CW11', count: 1, width_mm: 1800, height_mm: 2700, type: 'Curtain Wall', finish: 'Aluminium', remarks: null },
+      ],
+      tokensIn: 1150,
+      tokensOut: 360,
+      promptVersion: EXTRACT_SCHEDULE_PROMPT_VERSION,
+    }
+  }
+  // No hint — stub mirrors a live "this isn't a schedule" response.
   return {
-    kind: 'WINDOW',
-    rows: [
-      { tag: 'CW02', width_mm: 1800, height_mm: 2700, type: 'Curtain Wall', finish: 'Aluminium', remarks: null },
-      { tag: 'CW09', width_mm: 2400, height_mm: 2700, type: 'Curtain Wall', finish: 'Aluminium', remarks: 'Corner unit' },
-      { tag: 'CW10', width_mm: 2100, height_mm: 2700, type: 'Curtain Wall', finish: 'Aluminium', remarks: null },
-      { tag: 'CW11', width_mm: 1800, height_mm: 2700, type: 'Curtain Wall', finish: 'Aluminium', remarks: null },
-    ],
-    tokensIn: 1150,
-    tokensOut: 360,
-    promptVersion: EXTRACT_WINDOWS_PROMPT_VERSION,
+    kind: null,
+    rows: [],
+    tokensIn: 600,
+    tokensOut: 30,
+    promptVersion: EXTRACT_SCHEDULE_PROMPT_VERSION,
   }
 }
 

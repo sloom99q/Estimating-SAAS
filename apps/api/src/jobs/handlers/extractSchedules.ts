@@ -1,23 +1,25 @@
 /**
- * EXTRACT_SCHEDULES — Sprint 2 third pipeline stage.
+ * EXTRACT_SCHEDULES — Sprint 2 → Sprint 4 third pipeline stage.
  *
  *   payload = { documentId }
  *
- * DUAL-PASS reconciliation, per the Plot 4357 pilot lesson:
+ * Sprint-4 changes:
+ *   - Vision call is `extractSchedule.v2` (unified). The model self-reports
+ *     `kind: DOOR | WINDOW | null`. The handler's `decideKind` title heuristic
+ *     becomes a hint (extended with glazing|cw|curtain|panel), passed in
+ *     `kindHint`. The vision-reported kind wins on conflict.
+ *   - Sheets classified as `legend` (not just `schedule`) are eligible — a
+ *     Plot-4357 lesson where the window schedule was titled "GLAZING TYPES"
+ *     and lived on a sheet that classify rightly called 'legend'.
+ *   - Vision returns kind=null + rows=[] when the sheet isn't actually a
+ *     schedule; the handler quietly skips the sheet (no flag).
  *
- *   (a) VISION pass: Anthropic vision call (extractDoors.v1 / extractWindows.v1)
- *       runs against the page rendered at 200 DPI.
- *   (b) TEXT pass:   independent regex parse of pdftotext output (stubbed in
- *       dev to a hand-designed mismatch on CW09 width).
- *
- * Per tag:
+ * Dual-pass reconciliation unchanged:
  *   - both agree                ⇒ TakeoffItem basis=MEASURED confidence=90
  *   - both disagree on any col  ⇒ TakeoffItem basis=MEASURED confidence=60
  *                                + ValidationFlag(ROW_MISMATCH, ERROR, both values)
  *   - vision only               ⇒ TakeoffItem basis=VISUAL confidence=70
  *   - text only                 ⇒ TakeoffItem basis=PARAMETRIC confidence=50
- *
- * NEVER silent-pick on a mismatch. The flag fires and the human reviews.
  *
  * Chains into EXTRACT_ROOMS on success.
  */
@@ -163,10 +165,17 @@ async function renderHighRes(documentBytes: Buffer, pageNo: number): Promise<str
   }
 }
 
+/**
+ * Sprint-4: returns a HINT only. The vision pass's `kind` self-report wins.
+ * Extended vocabulary so glazing/curtain-wall sheets (Plot 4357 A501/A502
+ * "GLAZING TYPES") are seeded toward WINDOW even when the title omits the
+ * word "window" or "schedule".
+ */
 function decideKind(sheet: { title: string | null; drawingNo: string | null }): ScheduleKind | null {
   const haystack = `${sheet.title ?? ''} ${sheet.drawingNo ?? ''}`.toLowerCase()
   if (/door/.test(haystack)) return 'DOOR'
-  if (/window|curtain[\s_-]*wall|cw/.test(haystack)) return 'WINDOW'
+  // 'glazing' / 'cw' / 'curtain' / 'panel' / 'window' all route to WINDOW.
+  if (/window|curtain[\s_-]*wall|glazing|panel|\bcw\b|^cw/.test(haystack)) return 'WINDOW'
   return null
 }
 
@@ -197,8 +206,10 @@ export const extractSchedulesHandler: JobHandler = async (job: JobRecord) => {
   let mismatches = 0
 
   for (const sheet of sheets) {
-    const kind = decideKind({ title: sheet.title, drawingNo: sheet.drawingNo })
-    if (!kind) continue
+    // Sprint-4: the title heuristic is now ADVISORY. Even if kindHint is
+    // null, we still call vision — it may correctly identify a schedule the
+    // title didn't reveal. Vision-reported kind wins.
+    const kindHint = decideKind({ title: sheet.title, drawingNo: sheet.drawingNo })
 
     const jpegBase64 = await renderHighRes(sourceBytes, sheet.pageNo)
     const textSnippet = sheet.rawTextKey
@@ -208,12 +219,16 @@ export const extractSchedulesHandler: JobHandler = async (job: JobRecord) => {
     const vision = await extractSchedule({
       documentId: document.id,
       pageNo: sheet.pageNo,
-      kind,
+      kindHint,
       jpegBase64,
       textSnippet,
     })
     tokensIn += vision.tokensIn
     tokensOut += vision.tokensOut
+
+    // Vision said "not a schedule" → quietly skip.
+    if (vision.kind === null) continue
+    const kind: ScheduleKind = vision.kind
 
     const text = scheduleTextPass(textSnippet, kind)
     const reconciled = reconcile(vision.rows, text, kind)

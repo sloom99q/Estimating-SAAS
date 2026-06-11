@@ -51,16 +51,23 @@ export interface ClassifyOutput extends AiUsage {
 
 export type ScheduleKind = 'DOOR' | 'WINDOW'
 
+/**
+ * Sprint-4: `kindHint` replaces the old required `kind`. The vision pass
+ * decides for itself; we only suggest a starting bias from the title/drawing-no
+ * heuristic (`decideKind` in the handler). Vision's `output.kind` wins.
+ */
 export interface ExtractScheduleInput {
   documentId: string
   pageNo: number
-  kind: ScheduleKind
+  kindHint: ScheduleKind | null
   jpegBase64: string | null
   textSnippet: string
 }
 
 export interface ExtractScheduleRow {
   tag: string
+  /** Sprint-4: schedules often include a count column (e.g. "D01 6 1.00 3.00" — 6 copies). */
+  count?: number | null
   width_mm: number | null
   height_mm: number | null
   type: string | null
@@ -69,7 +76,8 @@ export interface ExtractScheduleRow {
 }
 
 export interface ExtractScheduleOutput extends AiUsage {
-  kind: ScheduleKind
+  /** Sprint-4: vision-reported kind. null = "neither door nor window schedule". */
+  kind: ScheduleKind | null
   rows: ExtractScheduleRow[]
 }
 

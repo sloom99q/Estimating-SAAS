@@ -20,7 +20,7 @@
  * Recomputes amount = qty × rate (P/S lines get amount=0, psAmount=0; the
  * commercial team enters the carry manually).
  */
-import { Prisma, type PrismaClient } from '@prisma/client'
+import { Prisma } from '@prisma/client'
 import { prisma } from '../../db'
 import { computeAssemblyUnitCost } from '../../pricing/assemblyEngine'
 import type { JobHandler, JobRecord } from '../types'
@@ -89,146 +89,143 @@ function appliesToForCategory(category: string): 'WALL' | 'FLOOR' | 'CEILING' | 
   return null
 }
 
-async function findMatchingAssembly(
-  client: PrismaClient,
-  organizationId: string,
-  category: string,
-): Promise<{ id: string; components: Parameters<typeof computeAssemblyUnitCost>[0] } | null> {
-  const applies = appliesToForCategory(category)
-  if (!applies) return null
-  const candidates = await client.assembly.findMany({
-    where: {
-      organizationId,
-      deletedAt: null,
-      appliesTo: { in: [applies, 'GENERIC'] },
-    },
-    include: { components: { orderBy: { sortOrder: 'asc' } } },
-  })
-  // If exactly one match wins. Multiple matches are ambiguous; we don't auto-
-  // pick (leaves the line for the next waterfall tier — preserves the
-  // architect's "never silent-pick on ambiguity" rule).
-  if (candidates.length !== 1) return null
-  const a = candidates[0]!
-  return {
-    id: a.id,
-    components: a.components.map((c) => ({
-      kind: c.kind as 'MATERIAL' | 'LABOR' | 'TOOL_FIXED',
-      label: c.label,
-      unitPrice: c.unitPrice,
-      coverage: c.coverage,
-      coats: c.coats,
-      wastagePct: c.wastagePct,
-      fixedCost: c.fixedCost,
-    })),
-  }
-}
-
-async function findRate(
-  client: PrismaClient,
-  organizationId: string,
-  code: string,
-): Promise<{
-  rate: Prisma.Decimal
-  source: 'rate-library:org' | 'rate-library:global'
-  code: string
-} | null> {
-  // Org-private rate first; falls through to global. ADR-012 enforces the
-  // explicit union (RateLibraryItem is NOT in TENANT_MODELS).
-  const rows = await client.rateLibraryItem.findMany({
-    where: {
-      AND: [
-        { OR: [{ organizationId }, { organizationId: null }] },
-        { code, deletedAt: null, region: 'SHJ' },
-      ],
-    },
-  })
-  if (rows.length === 0) return null
-  // Per-org row wins on collision; otherwise the global row.
-  const sorted = rows.sort((a, b) =>
-    (a.organizationId === null ? 1 : 0) - (b.organizationId === null ? 1 : 0),
-  )
-  const winner = sorted[0]!
-  return {
-    rate: winner.rate,
-    source: winner.organizationId ? 'rate-library:org' : 'rate-library:global',
-    code: winner.code,
-  }
-}
+// Sprint-4 S4-6: the previous per-line `findMatchingAssembly` and `findRate`
+// helpers were replaced by batched in-memory map lookups inside the handler
+// (assembliesByApplies + rateByCode). The Sprint-3 PRICE run died after 80s
+// of sequential round-trips against Neon's pooler — this rewrite collapses
+// those to four upfront reads + one write per chunk.
 
 export const priceHandler: JobHandler = async (job: JobRecord) => {
   const payload = (job.payload ?? {}) as PricePayload
   if (!payload.boqId) throw new Error('PRICE: payload.boqId required')
 
-  const boq = await prisma.boq.findFirst({
-    where: { id: payload.boqId, organizationId: job.organizationId, deletedAt: null },
-    include: {
-      sections: { include: { lines: true } },
-    },
-  })
+  // Sprint-4 S4-6: single batched read of EVERYTHING the handler will need,
+  // then in-memory pricing, then chunked writes in `$transaction` blocks of
+  // CHUNK_SIZE. The Sprint-3 P1017 connection drop happened because the
+  // per-line round-trip held the pooled connection for 80+ seconds.
+  const CHUNK_SIZE = 50
+
+  const [boq, takeoffItems, assemblies, rateLibrary] = await Promise.all([
+    prisma.boq.findFirst({
+      where: { id: payload.boqId, organizationId: job.organizationId, deletedAt: null },
+      include: {
+        sections: { include: { lines: { orderBy: { sortOrder: 'asc' } } } },
+      },
+    }),
+    prisma.takeoffItem.findMany({
+      where: { organizationId: job.organizationId, deletedAt: null },
+      select: { id: true, category: true },
+    }),
+    prisma.assembly.findMany({
+      where: { organizationId: job.organizationId, deletedAt: null },
+      include: { components: { orderBy: { sortOrder: 'asc' } } },
+    }),
+    prisma.rateLibraryItem.findMany({
+      where: {
+        AND: [
+          { OR: [{ organizationId: job.organizationId }, { organizationId: null }] },
+          { deletedAt: null, region: 'SHJ' },
+        ],
+      },
+    }),
+  ])
   if (!boq) throw new Error(`PRICE: boq ${payload.boqId} not found`)
 
+  // Index the cached reference data for O(1) lookups.
+  const categoryByTakeoffId = new Map(takeoffItems.map((t) => [t.id, t.category]))
+  const rateByCode = new Map<string, { rate: Prisma.Decimal; isGlobal: boolean }>()
+  // Per-org rows win on collision (already returned alongside globals).
+  for (const r of rateLibrary) {
+    const existing = rateByCode.get(r.code)
+    if (!existing || (existing.isGlobal && r.organizationId !== null)) {
+      rateByCode.set(r.code, { rate: r.rate, isGlobal: r.organizationId === null })
+    }
+  }
+  const assembliesByApplies = new Map<string, typeof assemblies>()
+  for (const a of assemblies) {
+    const k = a.appliesTo
+    const bucket = assembliesByApplies.get(k)
+    if (bucket) bucket.push(a)
+    else assembliesByApplies.set(k, [a])
+  }
+
+  interface PendingUpdate {
+    id: string
+    sectionId: string
+    rate: Prisma.Decimal | null
+    rateSource: string | null
+    amount: Prisma.Decimal
+    isProvisional: boolean
+  }
+  const pending: PendingUpdate[] = []
   let pricedLines = 0
   let provisionalLines = 0
   let totalSubtotal = new Prisma.Decimal(0)
   let totalProvisional = new Prisma.Decimal(0)
+  const sectionSubtotals = new Map<string, Prisma.Decimal>()
 
   for (const section of boq.sections) {
     let sectionSubtotal = new Prisma.Decimal(0)
     for (const line of section.lines) {
-      const category = await prisma.takeoffItem
-        .findUnique({
-          where: line.takeoffItemId ? { id: line.takeoffItemId } : { id: '__none__' },
-          select: { category: true },
-        })
-        .then((t) => t?.category ?? 'OTHER')
+      const category = line.takeoffItemId
+        ? categoryByTakeoffId.get(line.takeoffItemId) ?? 'OTHER'
+        : 'OTHER'
 
       let rate: Prisma.Decimal | null = null
       let rateSource: string | null = null
-      let isProvisional = false
 
-      // Tier 1: Assembly.
-      const assembly = await findMatchingAssembly(prisma, job.organizationId, category)
-      if (assembly) {
-        const cost = computeAssemblyUnitCost(assembly.components)
-        rate = cost.unitCost
-        rateSource = `assembly:${assembly.id}`
+      // Tier 1 — Assembly match (in-memory).
+      const appliesTo = appliesToForCategory(category)
+      if (appliesTo) {
+        const candidates = (assembliesByApplies.get(appliesTo) ?? []).concat(
+          assembliesByApplies.get('GENERIC') ?? [],
+        )
+        if (candidates.length === 1) {
+          const a = candidates[0]!
+          const cost = computeAssemblyUnitCost(
+            a.components.map((c) => ({
+              kind: c.kind as 'MATERIAL' | 'LABOR' | 'TOOL_FIXED',
+              label: c.label,
+              unitPrice: c.unitPrice,
+              coverage: c.coverage,
+              coats: c.coats,
+              wastagePct: c.wastagePct,
+              fixedCost: c.fixedCost,
+            })),
+          )
+          rate = cost.unitCost
+          rateSource = `assembly:${a.id}`
+        }
       }
 
-      // Tiers 2-3: supplier prices. Stub in Sprint 3 — takeoff items don't
-      // yet link to Material rows. Wiring intact for Sprint 4.
+      // Tiers 2-3: supplier prices — Sprint 4 no-op (no takeoff→Material link).
 
-      // Tiers 4-5: rate library (org → global).
+      // Tiers 4-5: rate library — already merged org-over-global above.
       if (rate === null) {
         const code = rateCodeFor(line, category)
         if (code) {
-          const found = await findRate(prisma, job.organizationId, code)
+          const found = rateByCode.get(code)
           if (found) {
             rate = found.rate
-            rateSource = `${found.source}:${found.code}`
+            rateSource = `rate-library:${found.isGlobal ? 'global' : 'org'}:${code}`
           }
         }
       }
 
-      // Tier 6: provisional sum.
-      if (rate === null) {
-        isProvisional = true
-        rateSource = 'provisional-sum'
-      }
-
+      const isProvisional = rate === null
+      if (isProvisional) rateSource = 'provisional-sum'
       const qty = line.qty ?? new Prisma.Decimal(0)
-      const amount = rate === null ? new Prisma.Decimal(0) : qty.times(rate)
+      const amount = isProvisional ? new Prisma.Decimal(0) : qty.times(rate!)
       if (rate !== null) pricedLines += 1
       if (isProvisional) provisionalLines += 1
 
-      await prisma.boqLine.update({
-        where: { id: line.id },
-        data: {
-          rate,
-          rateSource,
-          amount,
-          isProvisional,
-          psAmount: isProvisional ? new Prisma.Decimal(0) : null,
-        },
+      pending.push({
+        id: line.id,
+        sectionId: section.id,
+        rate,
+        rateSource,
+        amount,
+        isProvisional,
       })
 
       sectionSubtotal = sectionSubtotal.plus(amount)
@@ -236,17 +233,39 @@ export const priceHandler: JobHandler = async (job: JobRecord) => {
         totalProvisional = totalProvisional.plus(line.psAmount ?? 0)
       }
     }
+    sectionSubtotals.set(section.id, sectionSubtotal)
     totalSubtotal = totalSubtotal.plus(sectionSubtotal)
-    await prisma.boqSection.update({
-      where: { id: section.id },
-      data: { subtotal: sectionSubtotal },
-    })
   }
 
-  await prisma.boq.update({
-    where: { id: boq.id },
-    data: { subtotal: totalSubtotal, totalProvisional },
-  })
+  // S4-6: chunked transactional writes. Each chunk completes within Neon's
+  // pooler idle window even at 200+ lines.
+  for (let i = 0; i < pending.length; i += CHUNK_SIZE) {
+    const chunk = pending.slice(i, i + CHUNK_SIZE)
+    await prisma.$transaction(
+      chunk.map((u) =>
+        prisma.boqLine.update({
+          where: { id: u.id },
+          data: {
+            rate: u.rate,
+            rateSource: u.rateSource,
+            amount: u.amount,
+            isProvisional: u.isProvisional,
+            psAmount: u.isProvisional ? new Prisma.Decimal(0) : null,
+          },
+        }),
+      ),
+    )
+  }
+
+  await prisma.$transaction([
+    ...Array.from(sectionSubtotals.entries()).map(([sectionId, subtotal]) =>
+      prisma.boqSection.update({ where: { id: sectionId }, data: { subtotal } }),
+    ),
+    prisma.boq.update({
+      where: { id: boq.id },
+      data: { subtotal: totalSubtotal, totalProvisional },
+    }),
+  ])
 
   return {
     ok: true,

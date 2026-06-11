@@ -24,6 +24,29 @@ import type { JobHandler, JobRecord } from '../types'
 
 const isStubResult = (promptVersion: string): boolean => promptVersion.endsWith(STUB_SUFFIX)
 
+// Sprint-4 S4-6 (c): UAE-convention drawing-number prefixes. MEP sheets use
+// 'M-…' (mechanical) or 'E-…' (electrical). Structural is 'S-…'. The check
+// is intentionally loose — the vision pass sometimes drops the dash or
+// reads e.g. "ME-001" — so we look at the first character only.
+function firstChar(drawingNo: string | null | undefined): string | null {
+  if (!drawingNo) return null
+  const trimmed = drawingNo.trim()
+  return trimmed.length === 0 ? null : trimmed.charAt(0).toUpperCase()
+}
+
+function isMepDrawingPrefix(drawingNo: string | null | undefined): boolean {
+  const c = firstChar(drawingNo)
+  // Unknown drawing-no → don't assert mismatch (we can't disprove).
+  if (c === null) return true
+  return c === 'M' || c === 'E' || c === 'P' // P for plumbing
+}
+
+function isStrDrawingPrefix(drawingNo: string | null | undefined): boolean {
+  const c = firstChar(drawingNo)
+  if (c === null) return true
+  return c === 'S'
+}
+
 interface ClassifyJobPayload {
   documentId: string
 }
@@ -68,6 +91,21 @@ export const classifyHandler: JobHandler = async (job: JobRecord) => {
     tokensIn += result.tokensIn
     tokensOut += result.tokensOut
 
+    // Sprint-4 S4-6 (c): register misclassification guard. The Sprint-3 live
+    // run had vision assert discipline=MEP on architectural sheets whose
+    // drawing-no started with A. UAE convention: M / E prefix = MEP; S = STR.
+    // If the assertion doesn't match the prefix, downgrade the discipline to
+    // UNKNOWN and emit an INFO flag at the document level (added below).
+    let effectiveDiscipline = result.discipline
+    let prefixMismatch = false
+    if (result.discipline === 'MEP' && !isMepDrawingPrefix(result.drawing_no)) {
+      effectiveDiscipline = 'UNKNOWN'
+      prefixMismatch = true
+    } else if (result.discipline === 'STR' && !isStrDrawingPrefix(result.drawing_no)) {
+      effectiveDiscipline = 'UNKNOWN'
+      prefixMismatch = true
+    }
+
     // Sprint-3 A1: stub outputs carry an unmistakable marker so fabricated
     // data is recognisable forever — both via promptVersion (`...-stub`) and
     // via aiJson.stub=true.
@@ -75,18 +113,45 @@ export const classifyHandler: JobHandler = async (job: JobRecord) => {
       ...(result as unknown as Record<string, unknown>),
     }
     if (isStubResult(result.promptVersion)) aiJson.stub = true
+    if (prefixMismatch) {
+      aiJson.disciplineRaw = result.discipline
+      aiJson.disciplinePrefixMismatch = true
+    }
     await prisma.sheet.update({
       where: { id: sheet.id },
       data: {
         drawingNo: result.drawing_no,
         title: result.title,
-        discipline: result.discipline,
+        discipline: effectiveDiscipline,
         sheetType: result.sheet_type,
         scaleNote: result.scale,
         aiJson: aiJson as object,
         promptVersion: result.promptVersion,
       },
     })
+    if (prefixMismatch) {
+      const existing = await prisma.validationFlag.findFirst({
+        where: {
+          organizationId: job.organizationId,
+          projectId: document.projectId,
+          rule: 'DISCIPLINE_PREFIX_MISMATCH',
+          message: { contains: sheet.id },
+          resolved: false,
+        },
+        select: { id: true },
+      })
+      if (!existing) {
+        await prisma.validationFlag.create({
+          data: {
+            organizationId: job.organizationId,
+            projectId: document.projectId,
+            rule: 'DISCIPLINE_PREFIX_MISMATCH',
+            severity: 'INFO',
+            message: `Sheet ${sheet.id} drawing_no=${result.drawing_no ?? '?'} (page ${sheet.pageNo}): AI asserted discipline=${result.discipline} but the drawing-no prefix doesn't match UAE convention (M/E for MEP, S for STR). Downgraded to UNKNOWN.`,
+          },
+        })
+      }
+    }
   }
 
   // Re-read after writes so we work off the now-classified set.
@@ -98,31 +163,37 @@ export const classifyHandler: JobHandler = async (job: JobRecord) => {
     classified.map((c) => c.discipline).filter((d): d is string => !!d),
   )
 
-  const missingDiscipline = !disciplines.has('STR') && !disciplines.has('MEP')
-  if (missingDiscipline) {
-    // Idempotent: skip if we already flagged this project for the same rule.
+  // Sprint-4: one flag per missing discipline, not one flag for both. Sprint-3
+  // collapsed them so a set with MEP but no STR (or vice versa) silently
+  // skipped the warning.
+  const missingDisciplines: Array<'STR' | 'MEP'> = []
+  if (!disciplines.has('STR')) missingDisciplines.push('STR')
+  if (!disciplines.has('MEP')) missingDisciplines.push('MEP')
+  for (const discipline of missingDisciplines) {
+    const message = `No ${discipline} sheets detected — that section will be PROVISIONAL until covered.`
     const existing = await prisma.validationFlag.findFirst({
       where: {
         organizationId: job.organizationId,
         projectId: document.projectId,
         rule: MISSING_DISCIPLINE_RULE,
         takeoffItemId: null,
+        message,
         resolved: false,
       },
+      select: { id: true },
     })
-    if (!existing) {
-      await prisma.validationFlag.create({
-        data: {
-          organizationId: job.organizationId,
-          projectId: document.projectId,
-          rule: MISSING_DISCIPLINE_RULE,
-          severity: 'WARN',
-          message:
-            'No STR or MEP sheets detected — those sections will be PROVISIONAL until covered.',
-        },
-      })
-    }
+    if (existing) continue
+    await prisma.validationFlag.create({
+      data: {
+        organizationId: job.organizationId,
+        projectId: document.projectId,
+        rule: MISSING_DISCIPLINE_RULE,
+        severity: 'WARN',
+        message,
+      },
+    })
   }
+  const missingDiscipline = missingDisciplines.length > 0
 
   // Token meter (Anthropic-side cost).
   if (tokensIn > 0 || tokensOut > 0) {

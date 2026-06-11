@@ -28,8 +28,13 @@ const SECTIONS: Record<string, SectionDef> = {
   '4.0': { code: '4.0', title: 'Provisional Sums', sortOrder: 40 },
 }
 
+/**
+ * Sprint-4 S4-4: ROOM is INTENTIONALLY ABSENT. Rooms are inputs to QUANTIFY,
+ * not BOQ line items. The Sprint-3 live run contaminated the BOQ with 154
+ * "1.0 General" room-as-line entries that priced as Provisional Sums and
+ * confused the export.
+ */
 const CATEGORY_TO_SECTION: Record<string, string> = {
-  ROOM: '1.0',
   OTHER: '1.0',
   METAL: '2.5',
   GRC: '2.5',
@@ -49,6 +54,9 @@ const CATEGORY_TO_SECTION: Record<string, string> = {
   STRUCTURE_PROV: '4.0',
   MEP_PROV: '4.0',
 }
+
+/** Categories explicitly excluded from BOQ generation. */
+const NEVER_BOQ = new Set(['ROOM'])
 
 const generateBody = z
   .object({
@@ -176,13 +184,27 @@ export function registerBoqRoutes(router: Router): void {
         )
       }
 
-      // Group by section.
+      // Group by section. S4-4: skip the categories in NEVER_BOQ (today only
+      // ROOM) — they're QUANTIFY inputs, not bill items.
       const sectionBuckets = new Map<string, typeof items>()
+      let skippedRoomItems = 0
       for (const item of items) {
+        if (NEVER_BOQ.has(item.category)) {
+          skippedRoomItems += 1
+          continue
+        }
         const sectionCode = CATEGORY_TO_SECTION[item.category] ?? '1.0'
         const bucket = sectionBuckets.get(sectionCode)
         if (bucket) bucket.push(item)
         else sectionBuckets.set(sectionCode, [item])
+      }
+      if (sectionBuckets.size === 0) {
+        return errorResponse(
+          400,
+          skippedRoomItems > 0
+            ? `Only ROOM items present (${skippedRoomItems}); run QUANTIFY first to derive billable items.`
+            : 'No billable takeoff items.',
+        )
       }
 
       // Next version for this project.
