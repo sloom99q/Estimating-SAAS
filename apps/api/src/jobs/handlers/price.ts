@@ -30,53 +30,71 @@ interface PricePayload {
 }
 
 /**
- * Category → rate-library code mapping. Best-effort heuristic until Sprint 4
- * adds a finer per-takeoff-item linkage. When the mapping returns null, the
- * waterfall falls through to P/S.
+ * Sprint-6 S6-4: category → §8 rate-code mapping. The lookup primarily uses
+ * the line's `tag` (which QUANTIFY v2 sets to the §8-family prefix, e.g.
+ * `FF-ST01`, `CL-CL02`, `WF-PAINT`) plus the `line.unit` for unit-match.
+ * Description is the last-ditch heuristic for tag-less lines.
+ *
+ * Returns `null` → waterfall falls through to the next tier and ultimately
+ * P/S. P/S is now the honest signal, not a failure mode (ADR-014).
  */
-function rateCodeFor(line: { description: string; unit: string }, category: string): string | null {
+function rateCodeFor(line: { description: string; unit: string; tag?: string | null }, category: string): string | null {
   const desc = line.description.toLowerCase()
+  const tag = (line.tag ?? '').toUpperCase()
   switch (category) {
-    case 'FLOOR_FINISH':
-      if (desc.includes('porcelain')) return 'porcelain-anti-slip'
-      if (desc.includes('marble')) return 'marble-polished'
-      return 'ceramic-tile-600'
-    case 'WALL_FINISH':
+    case 'FLOOR_FINISH': {
+      // Tag-driven: FF-<finish_code> → FLR-<finish_code>
+      if (tag.startsWith('FF-')) {
+        const code = tag.slice(3)
+        if (code === 'ST01') return 'FLR-ST01'
+        if (code === 'PR01') return 'FLR-PR01'
+        if (code === 'PR03') return 'FLR-PR03'
+        if (code === 'BATHROOM') return 'FLR-BATH'
+        if (code === 'ST03') return 'EXT-ST03'   // external porcelain pavement
+        if (code === 'ST02') return 'STAIR-LAND' // staircase floor → landing rate
+        return null // unassigned / other codes → P/S
+      }
+      return null
+    }
+    case 'WALL_FINISH': {
+      if (tag === 'WF-PAINT') return 'PAINT-INT'
+      if (tag === 'WF-WD01') return 'WALL-WOODPORC'
+      if (tag === 'WF-WD02') return 'WALL-MARBPORC'
+      // Other wall feature finishes (WD03+, FN0x, etc.) → P/S until rates land.
+      return null
+    }
     case 'PAINT':
-      return 'paint-emulsion-2coat'
-    case 'CEILING':
-      return 'gypsum-ceiling-frame'
+      return 'PAINT-INT'
+    case 'CEILING': {
+      if (tag === 'CL-CL02') return 'CEIL-CL02'
+      if (tag === 'CL-CL03') return 'CEIL-CL03'
+      if (tag === 'CL-CL01-EXT') return 'CEIL-CL01-EXT'
+      return null
+    }
     case 'SCREED':
-      // Note: QUANTIFY parks skirting in SCREED category until the enum has
-      // its own SKIRTING value. Map by unit hint.
-      if (line.unit === 'm') return 'skirting-mdf-100'
-      return 'screed-cement-25'
-    case 'PLASTER':
-      return 'plaster-internal'
-    case 'WATERPROOFING':
-      return 'waterproofing-membrane'
-    case 'BLOCKWORK':
-      return null
-    case 'DOOR':
-      return desc.includes('double') ? 'door-double-supply-install' : 'door-single-supply-install'
+      return 'SCREED-FLR'
+    case 'DOOR': {
+      // §8 has three door rates; pick by visible dimensions in the description.
+      if (desc.includes('1000') && desc.includes('3000')) return 'DOOR-1000x3000-FN01'
+      if (desc.includes('900') && desc.includes('2400')) return 'DOOR-900x2400'
+      return 'DOOR-STD-LACQ'
+    }
     case 'WINDOW':
-      return 'curtain-wall-aluminium-m2'
-    case 'METAL':
-      return 'mild-steel-handrail'
-    case 'GRC':
+      // ADR-014: no per-No glazing rate exists in §8. All windows go P/S.
       return null
-    case 'JOINERY':
-      return 'veneer-joinery-m2'
-    case 'SANITARY':
+    case 'EXTERNAL': {
+      if (line.unit === 'm²') return 'EXT-ST03'
       return null
-    case 'EXTERNAL':
-      return 'interlock-paving-60'
-    case 'STRUCTURE_PROV':
-      return 'structure-allowance-m2'
-    case 'MEP_PROV':
-      return 'mep-allowance-m2'
+    }
+    case 'OTHER': {
+      // QUANTIFY parks the staircase tread+riser line in OTHER (unit=lm).
+      if (tag === 'STAIR-TREAD') return 'STAIR-TREAD'
+      if (tag === 'THRESH') return 'THRESH'
+      if (tag === 'HANDRAIL-MDF') return 'HANDRAIL-MDF'
+      return null
+    }
     case 'ROOM':
-    case 'OTHER':
+      return null
     default:
       return null
   }
@@ -114,7 +132,7 @@ export const priceHandler: JobHandler = async (job: JobRecord) => {
     }),
     prisma.takeoffItem.findMany({
       where: { organizationId: job.organizationId, deletedAt: null },
-      select: { id: true, category: true },
+      select: { id: true, category: true, tag: true, meta: true },
     }),
     prisma.assembly.findMany({
       where: { organizationId: job.organizationId, deletedAt: null },
@@ -133,6 +151,7 @@ export const priceHandler: JobHandler = async (job: JobRecord) => {
 
   // Index the cached reference data for O(1) lookups.
   const categoryByTakeoffId = new Map(takeoffItems.map((t) => [t.id, t.category]))
+  const tagByTakeoffId = new Map(takeoffItems.map((t) => [t.id, t.tag]))
   // ADR-014: rate lookup now keys on (code, unit). Two rates with the same
   // code but different units (e.g. ceramic-tile-m2 vs ceramic-tile-nr) live
   // alongside each other. The line's `unit` must match.
@@ -153,10 +172,22 @@ export const priceHandler: JobHandler = async (job: JobRecord) => {
     if (bucket) bucket.push(a)
     else assembliesByApplies.set(k, [a])
   }
-  const unitsMatch = (a: string | null | undefined, b: string | null | undefined) => {
-    const norm = (s: string | null | undefined) => (s ?? '').trim().toLowerCase()
-    return norm(a) === norm(b)
+  // ADR-014 + S6-4 unit lexicon. The extractors emit 'nr' / 'm²' / 'm', while
+  // SPEC.md §8 writes 'No' / 'm²' / 'lm'. We canonicalise both sides so the
+  // unit-match check survives those legitimate synonyms.
+  const canonicaliseUnit = (s: string | null | undefined) => {
+    const raw = (s ?? '').trim().toLowerCase()
+    if (raw === '') return ''
+    if (raw === 'nr' || raw === 'no' || raw === 'each' || raw === 'ea') return 'nr'
+    if (raw === 'm²' || raw === 'm2' || raw === 'sqm') return 'm²'
+    if (raw === 'm' || raw === 'lm' || raw === 'linear' || raw === 'metres' || raw === 'meters') {
+      return 'lm'
+    }
+    if (raw === 'lumpsum' || raw === 'ls' || raw === 'lot') return 'lumpsum'
+    return raw
   }
+  const unitsMatch = (a: string | null | undefined, b: string | null | undefined) =>
+    canonicaliseUnit(a) === canonicaliseUnit(b)
 
   interface PendingUpdate {
     id: string
@@ -179,6 +210,9 @@ export const priceHandler: JobHandler = async (job: JobRecord) => {
       const category = line.takeoffItemId
         ? categoryByTakeoffId.get(line.takeoffItemId) ?? 'OTHER'
         : 'OTHER'
+      const sourceTag = line.takeoffItemId
+        ? tagByTakeoffId.get(line.takeoffItemId) ?? null
+        : null
 
       let rate: Prisma.Decimal | null = null
       let rateSource: string | null = null
@@ -215,7 +249,7 @@ export const priceHandler: JobHandler = async (job: JobRecord) => {
 
       // Tiers 4-5: rate library. ADR-014: found.unit must equal line.unit.
       if (rate === null) {
-        const code = rateCodeFor(line, category)
+        const code = rateCodeFor({ ...line, tag: sourceTag }, category)
         if (code) {
           const found = rateByCode.get(code)
           if (found && unitsMatch(found.unit, line.unit)) {

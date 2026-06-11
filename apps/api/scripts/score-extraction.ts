@@ -64,6 +64,12 @@ interface GroundTruth {
     floorLabelAliases: Record<string, string[]>
     items: GroundTruthRoom[]
   }
+  finishes?: {
+    legendCodesExpected: string[]
+    floorMap: Record<string, string[]>
+    floorQtyTargets_m2: Record<string, [number, number]>
+    ceilingTargets_m2: Record<string, [number, number]>
+  }
   scoring: Record<string, string>
 }
 
@@ -346,6 +352,109 @@ async function main(): Promise<void> {
     console.log(`  misses             : ${roomMisses.slice(0, 10).join(', ')}${roomMisses.length > 10 ? `, ...(+${roomMisses.length - 10})` : ''}`)
   }
   console.log()
+
+  // -------- FINISHES (Sprint 6) --------
+  if (gt.finishes) {
+    const finishes = gt.finishes
+    const legendItems = await prisma.takeoffItem.findMany({
+      where: {
+        organizationId: doc.organizationId,
+        projectId: doc.projectId,
+        deletedAt: null,
+        tag: { not: null },
+      },
+      select: { tag: true, meta: true },
+    })
+    const legendCodes = new Set<string>()
+    for (const l of legendItems) {
+      const m = (l.meta ?? {}) as Record<string, unknown>
+      if (m.kind === 'LEGEND' && l.tag) legendCodes.add(l.tag.toUpperCase())
+    }
+
+    // Reverse the floorMap: room name → expected finish_code.
+    const expectedFinishByRoom = new Map<string, string>()
+    for (const [code, names] of Object.entries(finishes.floorMap)) {
+      for (const name of names) expectedFinishByRoom.set(normalizeRoomName(name), code)
+    }
+
+    let mappedCorrect = 0
+    let mappedTotal = 0
+    const wrong: Array<{ name: string; expected: string; actual: string | null }> = []
+    for (const room of rooms) {
+      const meta = (room.meta ?? {}) as Record<string, unknown>
+      const rawName = room.description.split('—')[0]?.trim() ?? ''
+      const expected = expectedFinishByRoom.get(normalizeRoomName(rawName))
+      if (!expected) continue
+      mappedTotal += 1
+      const actual = typeof meta.finish_code === 'string' ? meta.finish_code.toUpperCase() : null
+      if (actual === expected) mappedCorrect += 1
+      else wrong.push({ name: rawName, expected, actual })
+    }
+
+    // Quantify-derived totals: FF-* / CL-CL02 / CL-CL03 by tag.
+    const derived = await prisma.takeoffItem.findMany({
+      where: {
+        organizationId: doc.organizationId,
+        projectId: doc.projectId,
+        deletedAt: null,
+        tag: { startsWith: 'FF-' },
+      },
+    })
+    const floorTotalsByCode = new Map<string, number>()
+    for (const d of derived) {
+      const code = (d.tag ?? '').slice(3)
+      const qty = d.qtyAi === null ? 0 : Number(d.qtyAi.toString())
+      floorTotalsByCode.set(code, qty)
+    }
+    const ceilingDerived = await prisma.takeoffItem.findMany({
+      where: {
+        organizationId: doc.organizationId,
+        projectId: doc.projectId,
+        deletedAt: null,
+        tag: { startsWith: 'CL-' },
+      },
+    })
+    const ceilingTotalsByCode = new Map<string, number>()
+    for (const c of ceilingDerived) {
+      const code = (c.tag ?? '').slice(3)
+      ceilingTotalsByCode.set(code, c.qtyAi === null ? 0 : Number(c.qtyAi.toString()))
+    }
+
+    // PASS conditions
+    const legendOk = legendCodes.size >= 10
+    const mappingPct = mappedTotal === 0 ? 0 : (mappedCorrect / mappedTotal) * 100
+    const mappingOk = mappingPct >= 80
+    let floorRangeOk = true
+    for (const [code, [lo, hi]] of Object.entries(finishes.floorQtyTargets_m2)) {
+      const qty = floorTotalsByCode.get(code) ?? 0
+      if (qty < lo || qty > hi) floorRangeOk = false
+    }
+    const cl02 = ceilingTotalsByCode.get('CL02') ?? 0
+    const cl03 = ceilingTotalsByCode.get('CL03') ?? 0
+    const floorGrandTotal = Array.from(floorTotalsByCode.values()).reduce((a, b) => a + b, 0)
+    const ceilingDistinctOk = cl02 !== cl03 && cl02 !== floorGrandTotal && cl03 !== floorGrandTotal
+
+    const finishesPass = legendOk && mappingOk && floorRangeOk && ceilingDistinctOk
+    verdicts.push({
+      section: 'FINISHES',
+      passed: finishesPass,
+      detail: `${legendCodes.size} legend codes, ${mappedCorrect}/${mappedTotal} rooms mapped (${mappingPct.toFixed(0)}%), floor ranges ${floorRangeOk ? 'ok' : 'OUT'}, CL02/CL03 ${ceilingDistinctOk ? 'distinct' : 'COLLISION'}`,
+    })
+    console.log(`${COLOR.bold}Finishes${COLOR.reset}`)
+    console.log(`  legend codes extracted : ${Array.from(legendCodes).sort().join(', ') || '∅'} (${legendCodes.size}/≥10)`)
+    console.log(`  room mapping accuracy  : ${mappedCorrect}/${mappedTotal} (${mappingPct.toFixed(0)}%) (target ≥80%)`)
+    if (wrong.length > 0) {
+      console.log(`  mapping errors         : ${wrong.slice(0, 5).map((w) => `${w.name} expected=${w.expected} got=${w.actual ?? '∅'}`).join('; ')}${wrong.length > 5 ? `, ...(+${wrong.length - 5})` : ''}`)
+    }
+    console.log(`  floor totals by code   :`)
+    for (const [code, [lo, hi]] of Object.entries(finishes.floorQtyTargets_m2)) {
+      const qty = floorTotalsByCode.get(code) ?? 0
+      const ok = qty >= lo && qty <= hi
+      console.log(`    ${code.padEnd(10)} ${qty.toFixed(2).padStart(8)} m²  target [${lo}, ${hi}]  ${ok ? `${COLOR.green}ok${COLOR.reset}` : `${COLOR.red}OUT${COLOR.reset}`}`)
+    }
+    console.log(`  ceiling totals         : CL02 ${cl02.toFixed(2)} m² · CL03 ${cl03.toFixed(2)} m²  ${ceilingDistinctOk ? `${COLOR.green}distinct${COLOR.reset}` : `${COLOR.red}COLLISION${COLOR.reset}`}`)
+    console.log()
+  }
 
   // -------- SCORECARD --------
   console.log(`${COLOR.dim}${'-'.repeat(78)}${COLOR.reset}`)

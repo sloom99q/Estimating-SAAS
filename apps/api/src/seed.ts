@@ -530,9 +530,8 @@ async function main(): Promise<void> {
   }
 
   // Sprint-3: seed global RateLibraryItems + the demo Jotun assembly for
-  // the org. Both are idempotent — re-running the seed updates rather than
-  // duplicates.
-  const rateCount = await seedGlobalRates(prisma)
+  // the org. Sprint-6 S6-0: the seed now also PRUNES orphan global rates.
+  const rateResult = await seedGlobalRates(prisma)
   const jotunId = await seedJotunForOrg(prisma, org.id)
 
   console.log('[seed] ok')
@@ -541,7 +540,9 @@ async function main(): Promise<void> {
   console.log(`        password      = ${adminPassword}`)
   console.log(`        suppliers     = ${suppliersToSeed.length}`)
   console.log(`        prices        = ${priceSeeds.length}`)
-  console.log(`        global rates  = ${rateCount}`)
+  console.log(
+    `        global rates  = ${rateResult.inserted} inserted, ${rateResult.updated} updated, ${rateResult.deleted} pruned`,
+  )
   console.log(`        Jotun assembly = ${jotunId}`)
 }
 

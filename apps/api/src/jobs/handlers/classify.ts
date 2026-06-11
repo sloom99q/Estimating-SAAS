@@ -14,7 +14,8 @@
  * disciplines will need to be marked PROVISIONAL in pricing later. Sprint 2's
  * acceptance fixture deliberately has no STR/MEP set, so the flag fires.
  *
- * Chains into EXTRACT_SCHEDULES on success.
+ * Chains into EXTRACT_FINISH_LEGEND on success (Sprint 6); that handler
+ * chains the rest of the takeoff pipeline.
  */
 import { STUB_SUFFIX, classifySheet } from '../../ai/anthropic'
 import { CLASSIFY_PROMPT_VERSION } from '../../ai/prompts/classify.v1'
@@ -224,12 +225,12 @@ export const classifyHandler: JobHandler = async (job: JobRecord) => {
     })
   }
 
-  // Chain → EXTRACT_SCHEDULES.
+  // Chain → EXTRACT_FINISH_LEGEND (Sprint 6 — it then chains the rest).
   await prisma.job.create({
     data: {
       organizationId: job.organizationId,
       projectId: document.projectId,
-      type: 'EXTRACT_SCHEDULES',
+      type: 'EXTRACT_FINISH_LEGEND',
       payload: { documentId: document.id } as object,
     },
   })

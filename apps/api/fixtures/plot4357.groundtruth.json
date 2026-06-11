@@ -92,10 +92,35 @@
       { "name": "STAIRCASE",      "code": "FF-04", "floor": "L1", "area_m2": 26.96 }
     ]
   },
+  "finishes": {
+    "$note": "Sprint-6 extension: legend codes the I401-I404 sheets define + the per-room finish mapping the contractor's BOQ paid against.",
+    "legendCodesExpected": ["ST01", "ST02", "ST03", "PR01", "PR03", "WD01", "FN01", "FN02", "FN03", "FN04", "LS01", "LS02"],
+    "floorMap": {
+      "ST01":     ["LIVING", "DINNING", "ENTRANCE LOBBY", "PLAY ROOM"],
+      "PR01":     ["MASTER BEDROOM", "01 BEDROOM", "02 BEDROOM", "FAMILY ROOM", "CORRIDOR"],
+      "PR03":     ["BOH KITCHEN", "LAUNDRY/LINEN", "MAID'S ROOM", "DRIVER'S ROOM"],
+      "ST02":     ["STAIRCASE"],
+      "ST03":     ["MASTER BALCONY", "FAMILY ROOM TERRACE"],
+      "BATHROOM": ["MASTER BATH", "BATH 01", "BATH 02", "BATH 03", "POWDER", "MAID'S BATH"]
+    },
+    "floorQtyTargets_m2": {
+      "ST01":     [120, 140],
+      "PR01":     [150, 190],
+      "PR03":     [50, 90],
+      "BATHROOM": [45, 60],
+      "ST03":     [40, 50]
+    },
+    "ceilingTargets_m2": {
+      "CL03": [330, 420],
+      "CL02": [70, 110]
+    },
+    "scoringRule": "PASS = >=10 legend codes; >=80% of mapped ground-truth rooms carry the correct finish_code; each floor finish total within its target range; CL03 != CL02 != floor total."
+  },
   "scoring": {
     "doors":   "PASS = 9/9 tags, exact counts, no invented D09 count.",
     "windows": "PASS = >=18/20 tags found INCLUDING CW02; counts exact on found tags (swap-trap rows CW09-CW16 weighted double).",
     "rooms":   "PASS = >=20 of the listed rooms found with area within ±2% of the printed value; unique-space count after dedup between 20 and 40.",
-    "register":"PASS = no STR/MEP disciplines asserted; glazing sheets routed to WINDOW extraction."
+    "register":"PASS = no STR/MEP disciplines asserted; glazing sheets routed to WINDOW extraction.",
+    "finishes":"PASS = >=10 legend codes; >=80% of mapped ground-truth rooms carry the correct finish_code; each floor total within target range; CL03 != CL02 != floor total."
   }
 }

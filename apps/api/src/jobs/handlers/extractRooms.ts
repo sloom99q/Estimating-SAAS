@@ -152,6 +152,32 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
   // Load the source PDF once — every plan/finish_plan sheet needs it for the
   // quadrant render.
   const sourceBytes = sheets.length > 0 ? await blob.get(document.storageKey) : Buffer.alloc(0)
+
+  // S6-2: load the legend codes EXTRACT_FINISH_LEGEND has already saved as
+  // TakeoffItems with meta.kind='LEGEND'. The list seeds the closed-vocab
+  // for finish_code on each room. 'BATHROOM' is the per-bathroom-drawings
+  // sentinel and is always offered alongside the real codes.
+  const legendItems = await prisma.takeoffItem.findMany({
+    where: {
+      organizationId: job.organizationId,
+      projectId: document.projectId,
+      deletedAt: null,
+      tag: { not: null },
+    },
+    select: { tag: true, meta: true },
+  })
+  const legendCodes = Array.from(
+    new Set(
+      legendItems
+        .filter((i) => {
+          const m = (i.meta ?? {}) as Record<string, unknown>
+          return m.kind === 'LEGEND'
+        })
+        .map((i) => i.tag!)
+        .concat(['BATHROOM']),
+    ),
+  )
+
   let tokensIn = 0
   let tokensOut = 0
   let itemsCreated = 0
@@ -186,6 +212,7 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
           pageNo: sheet.pageNo,
           jpegBase64: q.base64,
           textSnippet,
+          legendCodes,
         })
         tokensIn += r.tokensIn
         tokensOut += r.tokensOut
@@ -202,6 +229,7 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
         pageNo: sheet.pageNo,
         jpegBase64: fallback,
         textSnippet,
+        legendCodes,
       })
       tokensIn += r.tokensIn
       tokensOut += r.tokensOut
@@ -220,12 +248,31 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
 
     for (const room of reconciled) {
       const normalizedFloor = normalizeFloor(room.floor)
+      // S6-2: finish reconciliation. Vision returns finish_code from the
+      // closed vocabulary; we score the confidence — 85 when the text layer
+      // ALSO carries the same code, 70 when vision is alone, null with INFO
+      // flag when vision didn't pick a code at all.
+      let finishCode: string | null = null
+      let finishConfidence: number | null = null
+      const visionRow = merged.find(
+        (r) => r.name.trim().toUpperCase() === room.name.trim().toUpperCase(),
+      )
+      const visionCode = visionRow?.finish_code ?? null
+      const visionEvidence = visionRow?.finish_evidence ?? null
+      if (visionCode) {
+        finishCode = visionCode.trim().toUpperCase()
+        const codeRe = new RegExp(`\\b${finishCode}\\b`)
+        finishConfidence = codeRe.test(textSnippet) ? 85 : 70
+      }
+
       const meta: Record<string, unknown> = {
         code: room.code,
         floor: room.floor,
         floorNormalized: normalizedFloor,
         area_m2: room.area_m2,
-        finish_code: room.finish_code,
+        finish_code: finishCode,
+        finishConfidence,
+        finish_evidence: visionEvidence,
       }
       if (visionFromStub) meta.stub = true
       const takeoff = await prisma.takeoffItem.create({
@@ -257,6 +304,21 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
             rule: RULE_ROW_MISMATCH,
             severity: 'ERROR',
             message: `ROOM ${room.name}: ${room.mismatch.field} disagrees (vision=${room.mismatch.vision}, text=${room.mismatch.text}).`,
+          },
+        })
+      }
+
+      // S6-2: rooms the model couldn't label get an INFO flag so the human
+      // reviewer surfaces them quickly. We don't fail the run.
+      if (finishCode === null) {
+        await prisma.validationFlag.create({
+          data: {
+            organizationId: job.organizationId,
+            projectId: document.projectId,
+            takeoffItemId: takeoff.id,
+            rule: 'FINISH_UNMAPPED',
+            severity: 'INFO',
+            message: `ROOM ${room.name}${normalizedFloor ? ` (${normalizedFloor})` : ''}: no finish_code assigned. Likely needs human review.`,
           },
         })
       }

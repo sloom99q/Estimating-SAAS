@@ -25,6 +25,8 @@
 import type {
   ClassifyInput,
   ClassifyOutput,
+  ExtractFinishLegendInput,
+  ExtractFinishLegendOutput,
   ExtractRoomsInput,
   ExtractRoomsOutput,
   ExtractScheduleInput,
@@ -33,7 +35,8 @@ import type {
 } from './types'
 import { CLASSIFY_PROMPT_VERSION } from './prompts/classify.v1'
 import { EXTRACT_SCHEDULE_PROMPT_VERSION } from './prompts/extractSchedule.v2'
-import { EXTRACT_ROOMS_PROMPT_VERSION } from './prompts/extractRooms.v1'
+import { EXTRACT_FINISH_LEGEND_PROMPT_VERSION } from './prompts/extractFinishLegend.v1'
+import { EXTRACT_ROOMS_PROMPT_VERSION } from './prompts/extractRooms.v2'
 
 /**
  * Hard-coded classification map by pageNo. Built to cover the categories
@@ -224,12 +227,55 @@ export function stubExtractRooms(input: ExtractRoomsInput): ExtractRoomsOutput {
   const floor = `L${((input.pageNo - 9) % 8) + 1}`
   return {
     rows: [
-      { name: 'OPEN OFFICE', code: `${floor}-OFC-001`, floor, area_m2: 124.5, finish_code: 'F-OFC-01' },
-      { name: 'MEETING ROOM', code: `${floor}-MTG-002`, floor, area_m2: 18.25, finish_code: 'F-MTG-01' },
-      { name: 'TOILET', code: `${floor}-TLT-003`, floor, area_m2: 6.40, finish_code: 'F-TLT-01' },
+      {
+        name: 'OPEN OFFICE',
+        code: `${floor}-OFC-001`,
+        floor,
+        area_m2: 124.5,
+        finish_code: 'F-OFC-01',
+        finish_evidence: 'stub: synthesised',
+      },
+      {
+        name: 'MEETING ROOM',
+        code: `${floor}-MTG-002`,
+        floor,
+        area_m2: 18.25,
+        finish_code: 'F-MTG-01',
+        finish_evidence: 'stub: synthesised',
+      },
+      {
+        name: 'TOILET',
+        code: `${floor}-TLT-003`,
+        floor,
+        area_m2: 6.4,
+        finish_code: 'F-TLT-01',
+        finish_evidence: 'stub: synthesised',
+      },
     ],
     tokensIn: 980,
     tokensOut: 280,
     promptVersion: EXTRACT_ROOMS_PROMPT_VERSION,
+  }
+}
+
+/**
+ * Sprint-6 stub for the legend extractor. Mirrors the Plot 4357 ground truth
+ * subset so deterministic dev runs produce a sensible legend.
+ */
+export function stubExtractFinishLegend(
+  _input: ExtractFinishLegendInput,
+): ExtractFinishLegendOutput {
+  return {
+    rows: [
+      { code: 'ST01', name: 'White Marble', material: 'marble', size: '1000x1000', finish: 'honed', usage: 'interior floors — Living, Dining, Entrance Lobby, Play Room', kind: 'FLOOR' },
+      { code: 'PR01', name: 'Marble-Texture Porcelain', material: 'porcelain', size: '1000x1000', finish: 'matt', usage: 'bedrooms, family room, corridors', kind: 'FLOOR' },
+      { code: 'PR03', name: 'Service Porcelain', material: 'porcelain', size: '600x600', finish: 'matt', usage: 'BOH kitchen, laundry, maid\'s room', kind: 'FLOOR' },
+      { code: 'ST02', name: 'Stair Marble', material: 'marble', size: null, finish: 'honed', usage: 'staircase tread + landing', kind: 'FLOOR' },
+      { code: 'ST03', name: 'External Porcelain', material: 'porcelain', size: null, finish: 'matt', usage: 'balconies + external terraces', kind: 'EXTERNAL' },
+      { code: 'WD01', name: 'Wall Wood Porcelain', material: 'porcelain', size: null, finish: 'wood-look', usage: 'feature walls (living, master bath)', kind: 'WALL' },
+    ],
+    tokensIn: 800,
+    tokensOut: 250,
+    promptVersion: EXTRACT_FINISH_LEGEND_PROMPT_VERSION,
   }
 }

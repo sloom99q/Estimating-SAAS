@@ -169,6 +169,30 @@ export async function renderBoqXlsx(boq: XlsxBoq, options: XlsxOptions = {}): Pr
   summary.addRow(['Currency', '', boq.currency])
   summary.addRow([DISCLAIMER])
   summary.lastRow!.font = { italic: true, color: { argb: 'FFB00000' } }
+
+  // S6-4 priced / provisional split line. Inserted BEFORE the per-section
+  // breakdown so the reader sees the headline ratio first.
+  let pricedTotal = 0
+  let pricedCount = 0
+  let provisionalCount = 0
+  for (const section of boq.sections) {
+    for (const line of section.lines) {
+      if (line.isProvisional) provisionalCount += 1
+      else {
+        pricedTotal += num(line.amount)
+        pricedCount += 1
+      }
+    }
+  }
+  summary.addRow([])
+  const splitRow = summary.addRow([
+    'Priced / Provisional',
+    `Priced ${pricedTotal.toLocaleString('en-AE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} AED across ${pricedCount} lines · Provisional: ${provisionalCount} lines pending supplier quotes.`,
+    '',
+  ])
+  splitRow.font = { bold: true }
+  splitRow.getCell(2).alignment = { wrapText: true, vertical: 'middle' }
+
   summary.addRow([])
   summary.addRow(['Section', 'Title', 'Subtotal (AED)']).font = { bold: true }
   let runningSubtotal = 0

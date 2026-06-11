@@ -81,6 +81,31 @@ export interface ExtractScheduleOutput extends AiUsage {
   rows: ExtractScheduleRow[]
 }
 
+// --- EXTRACT_FINISH_LEGEND (Sprint 6) -----------------------------------
+
+export type LegendKind = 'FLOOR' | 'WALL' | 'CEILING' | 'EXTERNAL' | 'OTHER'
+
+export interface ExtractFinishLegendInput {
+  documentId: string
+  pageNo: number
+  jpegBase64: string | null
+  textSnippet: string
+}
+
+export interface ExtractFinishLegendRow {
+  code: string
+  name: string | null
+  material: string | null
+  size: string | null
+  finish: string | null
+  usage: string | null
+  kind: LegendKind | null
+}
+
+export interface ExtractFinishLegendOutput extends AiUsage {
+  rows: ExtractFinishLegendRow[]
+}
+
 // --- EXTRACT_ROOMS --------------------------------------------------------
 
 export interface ExtractRoomsInput {
@@ -88,6 +113,12 @@ export interface ExtractRoomsInput {
   pageNo: number
   jpegBase64: string | null
   textSnippet: string
+  /**
+   * Sprint-6 S6-2: legend codes already extracted from earlier finish-plan
+   * sheets. The model uses this as a closed vocabulary when it labels each
+   * room's finish_code.
+   */
+  legendCodes?: string[]
 }
 
 export interface ExtractRoomsRow {
@@ -96,6 +127,12 @@ export interface ExtractRoomsRow {
   floor: string | null
   area_m2: number | null
   finish_code: string | null
+  /**
+   * Sprint-6 S6-2: the model's brief justification for why this finish_code
+   * fits. The handler uses presence/absence (and the text-layer mention of
+   * the code) to score finishConfidence: 85 corroborated, 70 vision-only.
+   */
+  finish_evidence?: string | null
 }
 
 export interface ExtractRoomsOutput extends AiUsage {

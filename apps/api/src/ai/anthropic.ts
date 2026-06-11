@@ -34,14 +34,26 @@ import {
   EXTRACT_SCHEDULE_TOOL,
 } from './prompts/extractSchedule.v2'
 import {
+  EXTRACT_FINISH_LEGEND_PROMPT_VERSION,
+  EXTRACT_FINISH_LEGEND_SYSTEM_PROMPT,
+  EXTRACT_FINISH_LEGEND_TOOL,
+} from './prompts/extractFinishLegend.v1'
+import {
   EXTRACT_ROOMS_PROMPT_VERSION,
   EXTRACT_ROOMS_SYSTEM_PROMPT,
   EXTRACT_ROOMS_TOOL,
-} from './prompts/extractRooms.v1'
-import { stubClassify, stubExtractRooms, stubExtractSchedule } from './stubs'
+} from './prompts/extractRooms.v2'
+import {
+  stubClassify,
+  stubExtractFinishLegend,
+  stubExtractRooms,
+  stubExtractSchedule,
+} from './stubs'
 import type {
   ClassifyInput,
   ClassifyOutput,
+  ExtractFinishLegendInput,
+  ExtractFinishLegendOutput,
   ExtractRoomsInput,
   ExtractRoomsOutput,
   ExtractScheduleInput,
@@ -263,6 +275,10 @@ export async function extractSchedule(
 
 export async function extractRooms(input: ExtractRoomsInput): Promise<ExtractRoomsOutput> {
   if (isStubMode()) return zeroTokens(stampStub(stubExtractRooms(input)))
+  const legendBlurb =
+    input.legendCodes && input.legendCodes.length > 0
+      ? `Legend vocabulary (use ONLY these codes for finish_code; null is allowed; 'BATHROOM' is reserved for the per-bathroom-drawings hatch):\n  ${input.legendCodes.join(', ')}\n\n`
+      : 'No legend vocabulary supplied yet — return finish_code=null on every room.\n\n'
   const res = await callMessages({
     model: config.anthropicModel,
     max_tokens: 2048,
@@ -277,7 +293,7 @@ export async function extractRooms(input: ExtractRoomsInput): Promise<ExtractRoo
           ...buildImageBlock(input.jpegBase64),
           {
             type: 'text',
-            text: `Document=${input.documentId} page=${input.pageNo} (rooms)\n\nFirst 1500 chars of text layer:\n${input.textSnippet.slice(0, 1500)}`,
+            text: `Document=${input.documentId} page=${input.pageNo} (rooms)\n\n${legendBlurb}First 1500 chars of text layer:\n${input.textSnippet.slice(0, 1500)}`,
           },
         ],
       },
@@ -289,5 +305,42 @@ export async function extractRooms(input: ExtractRoomsInput): Promise<ExtractRoo
     tokensIn: res.usage?.input_tokens ?? 0,
     tokensOut: res.usage?.output_tokens ?? 0,
     promptVersion: EXTRACT_ROOMS_PROMPT_VERSION,
+  }
+}
+
+// --- EXTRACT_FINISH_LEGEND (Sprint 6) ------------------------------------
+
+export async function extractFinishLegend(
+  input: ExtractFinishLegendInput,
+): Promise<ExtractFinishLegendOutput> {
+  if (isStubMode()) return zeroTokens(stampStub(stubExtractFinishLegend(input)))
+  const res = await callMessages({
+    model: config.anthropicModel,
+    max_tokens: 2048,
+    temperature: 0,
+    system: EXTRACT_FINISH_LEGEND_SYSTEM_PROMPT,
+    tools: [EXTRACT_FINISH_LEGEND_TOOL],
+    tool_choice: { type: 'tool', name: EXTRACT_FINISH_LEGEND_TOOL.name },
+    messages: [
+      {
+        role: 'user',
+        content: [
+          ...buildImageBlock(input.jpegBase64),
+          {
+            type: 'text',
+            text: `Document=${input.documentId} page=${input.pageNo} (finish legend)\n\nFirst 2000 chars of text layer:\n${input.textSnippet.slice(0, 2000)}`,
+          },
+        ],
+      },
+    ],
+  })
+  const raw = findToolInput(res, EXTRACT_FINISH_LEGEND_TOOL.name) as {
+    rows?: ExtractFinishLegendOutput['rows']
+  }
+  return {
+    rows: Array.isArray(raw.rows) ? raw.rows : [],
+    tokensIn: res.usage?.input_tokens ?? 0,
+    tokensOut: res.usage?.output_tokens ?? 0,
+    promptVersion: EXTRACT_FINISH_LEGEND_PROMPT_VERSION,
   }
 }

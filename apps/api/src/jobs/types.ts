@@ -11,6 +11,9 @@ export const JOB_TYPES = [
   // Sprint 2+ — AI takeoff pipeline (registered as notImplemented for now)
   'INGEST',
   'CLASSIFY',
+  // Sprint 6 — runs between CLASSIFY and EXTRACT_SCHEDULES so EXTRACT_ROOMS
+  // has a legend vocabulary to label each room against.
+  'EXTRACT_FINISH_LEGEND',
   'EXTRACT_SCHEDULES',
   'EXTRACT_ROOMS',
   'QUANTIFY',
