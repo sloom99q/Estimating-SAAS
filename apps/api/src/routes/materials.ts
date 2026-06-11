@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client'
 import { z } from 'zod'
 import { prisma } from '../db'
 import { tenantDb } from '../db/tenantDb'
@@ -52,9 +53,11 @@ function material(row: {
   name: string
   category: string
   unit: string
-  unitPrice: number
-  coverage: number
-  wastePct: number
+  // Sprint-3 Decimal promotion. Wire shape: stringified decimal (same as
+  // TakeoffItem.qtyAi). SPA parses with Number(...) at consumption sites.
+  unitPrice: Prisma.Decimal
+  coverage: Prisma.Decimal
+  wastePct: Prisma.Decimal
   currency: string
   supplier: string | null
   notes: string | null
@@ -70,9 +73,9 @@ function material(row: {
     name: row.name,
     category: row.category,
     unit: row.unit,
-    unitPrice: row.unitPrice,
-    coverage: row.coverage,
-    wastePct: row.wastePct,
+    unitPrice: row.unitPrice.toString(),
+    coverage: row.coverage.toString(),
+    wastePct: row.wastePct.toString(),
     currency: row.currency,
     supplier: row.supplier,
     notes: row.notes,

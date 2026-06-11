@@ -64,7 +64,8 @@
   "workspace": {
     "back": "All projects",
     "summary": "Project summary",
-    "createdOn": "Created {{date}}"
+    "createdOn": "Created {{date}}",
+    "takeoff": "Takeoff"
   },
   "flow": {
     "project": "Project",

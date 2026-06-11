@@ -29,12 +29,34 @@ function authed<T>(path: string, init?: Omit<Parameters<typeof httpRequest>[1], 
   return httpRequest<T>(path, { ...(init ?? {}), ...(t ? { token: t } : {}) })
 }
 
+// Sprint-3: server now emits Decimal fields as strings. The procurement
+// domain expects numbers (PriceComparisonBars math, cheapest-price
+// comparator, etc.), so we coerce at the boundary.
+const num = (v: unknown): number =>
+  typeof v === 'number' ? v : typeof v === 'string' ? Number.parseFloat(v) : 0
+
+function parsePriceLink(row: unknown): MaterialSupplierPrice {
+  const r = row as MaterialSupplierPrice & Record<string, unknown>
+  return {
+    ...r,
+    unitPrice: num(r.unitPrice),
+    minimumOrderQuantity:
+      r.minimumOrderQuantity == null ? null : num(r.minimumOrderQuantity),
+  }
+}
+
+function parseSnapshot(row: unknown): PriceSnapshot {
+  const r = row as PriceSnapshot & Record<string, unknown>
+  return { ...r, price: num(r.price) }
+}
+
 export async function fetchPrices(materialId: ID): Promise<MaterialSupplierPrice[]> {
   if (!env.apiUrl) return []
-  return authed<MaterialSupplierPrice[]>(
+  const rows = await authed<unknown[]>(
     `/api/material-supplier-prices?materialId=${encodeURIComponent(materialId)}`,
     { method: 'GET' },
   )
+  return rows.map(parsePriceLink)
 }
 
 export async function fetchPriceHistory(
@@ -46,19 +68,21 @@ export async function fetchPriceHistory(
   params.set('materialId', materialId)
   if (options.supplierId) params.set('supplierId', options.supplierId)
   if (options.since) params.set('since', options.since)
-  return authed<PriceSnapshot[]>(`/api/price-snapshots?${params.toString()}`, {
+  const rows = await authed<unknown[]>(`/api/price-snapshots?${params.toString()}`, {
     method: 'GET',
   })
+  return rows.map(parseSnapshot)
 }
 
 export async function setPrice(input: SetPriceInput): Promise<MaterialSupplierPrice> {
   if (!env.apiUrl) {
     throw new Error('Setting supplier prices requires a backend (VITE_API_URL).')
   }
-  return authed<MaterialSupplierPrice>('/api/material-supplier-prices', {
+  const row = await authed<unknown>('/api/material-supplier-prices', {
     method: 'POST',
     body: JSON.stringify(input),
   })
+  return parsePriceLink(row)
 }
 
 export async function patchPriceLink(
@@ -68,13 +92,14 @@ export async function patchPriceLink(
   if (!env.apiUrl) {
     throw new Error('Patching supplier prices requires a backend (VITE_API_URL).')
   }
-  return authed<MaterialSupplierPrice>(
+  const row = await authed<unknown>(
     `/api/material-supplier-prices/${encodeURIComponent(linkId)}`,
     {
       method: 'PATCH',
       body: JSON.stringify(input),
     },
   )
+  return parsePriceLink(row)
 }
 
 export async function deletePriceLink(linkId: ID): Promise<void> {

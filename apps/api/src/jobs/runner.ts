@@ -56,29 +56,62 @@ async function reapStuckJobs(): Promise<void> {
 /**
  * One worker tick.
  *
- *   1. Atomically claim a single QUEUED job whose `scheduledFor` is in the
- *      past (or null) via `UPDATE ... FOR UPDATE SKIP LOCKED`. This is the
- *      only Postgres-specific call we make — and it's the reason SQLite is
- *      gone: SKIP LOCKED makes multiple worker processes safe with no Redis.
+ *   1. Atomically claim a single QUEUED job using the round-robin fair claim
+ *      (Sprint-3 ADR-013): pick the org with due work whose most-recent
+ *      `startedAt` is earliest (or never started), then take that org's
+ *      oldest queued job. Postgres `FOR UPDATE SKIP LOCKED` keeps multiple
+ *      workers safe.
  *   2. Run the registered handler.
  *   3. On success, mark DONE.
  *   4. On error: if we still have attempts left, reschedule with exponential
  *      backoff (2 ^ attempt × BACKOFF_BASE_SECONDS). Otherwise, terminal
  *      FAILED + bump org `Usage.jobsFailed`.
+ *
+ * Why round-robin: the Sprint-1 claim ordered ALL due jobs globally by
+ * `createdAt`. An org uploading 50 documents at 10:00:00 would freeze every
+ * other org's pipeline until its queue drained. Fair-claim serves the
+ * least-recently-served org first, so a 1-job org never waits behind a
+ * 50-job org. SaaS-fairness fix — ADR-013.
  */
 export async function tick(): Promise<JobRecord | null> {
   // Sprint-2: reap stuck RUNNING jobs before claiming a new one.
   await reapStuckJobs()
-  // Raw SQL because Prisma's typed update can't express SKIP LOCKED.
+  // ADR-013 fair claim. The CTE costs a small read per tick — cheap, indexed
+  // on (status, scheduledFor, createdAt) and (organizationId, createdAt) from
+  // Sprint-1. Postgres's `FOR UPDATE SKIP LOCKED` makes concurrent workers
+  // safe even though we resolve the org in user space.
   const rows = await prisma.$queryRawUnsafe<JobRecord[]>(`
+    WITH due_jobs AS (
+      SELECT id, "organizationId", "createdAt"
+      FROM "jobs"
+      WHERE status = 'QUEUED'
+        AND ("scheduledFor" IS NULL OR "scheduledFor" <= NOW())
+    ),
+    -- For every org with due work, find the most-recent moment it was last
+    -- served (across all of its jobs of any status). 'epoch' for orgs that
+    -- have never had a job started.
+    org_last_served AS (
+      SELECT d."organizationId",
+             COALESCE(MAX(j."startedAt"), 'epoch'::timestamptz) AS last_started
+      FROM (SELECT DISTINCT "organizationId" FROM due_jobs) d
+      LEFT JOIN "jobs" j
+        ON j."organizationId" = d."organizationId"
+       AND j."startedAt" IS NOT NULL
+      GROUP BY d."organizationId"
+    ),
+    fair_org AS (
+      SELECT "organizationId"
+      FROM org_last_served
+      ORDER BY last_started ASC
+      LIMIT 1
+    )
     UPDATE "jobs"
     SET status      = 'RUNNING',
         "startedAt" = NOW(),
         attempts    = attempts + 1
     WHERE id = (
-      SELECT id FROM "jobs"
-      WHERE status = 'QUEUED'
-        AND ("scheduledFor" IS NULL OR "scheduledFor" <= NOW())
+      SELECT id FROM due_jobs
+      WHERE "organizationId" = (SELECT "organizationId" FROM fair_org)
       ORDER BY "createdAt" ASC
       LIMIT 1
       FOR UPDATE SKIP LOCKED

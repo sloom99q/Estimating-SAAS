@@ -16,11 +16,13 @@
  *
  * Chains into EXTRACT_SCHEDULES on success.
  */
-import { classifySheet } from '../../ai/anthropic'
+import { STUB_SUFFIX, classifySheet } from '../../ai/anthropic'
 import { CLASSIFY_PROMPT_VERSION } from '../../ai/prompts/classify.v1'
 import { getBlobStore } from '../../blob/fs'
 import { prisma } from '../../db'
 import type { JobHandler, JobRecord } from '../types'
+
+const isStubResult = (promptVersion: string): boolean => promptVersion.endsWith(STUB_SUFFIX)
 
 interface ClassifyJobPayload {
   documentId: string
@@ -66,6 +68,13 @@ export const classifyHandler: JobHandler = async (job: JobRecord) => {
     tokensIn += result.tokensIn
     tokensOut += result.tokensOut
 
+    // Sprint-3 A1: stub outputs carry an unmistakable marker so fabricated
+    // data is recognisable forever — both via promptVersion (`...-stub`) and
+    // via aiJson.stub=true.
+    const aiJson: Record<string, unknown> = {
+      ...(result as unknown as Record<string, unknown>),
+    }
+    if (isStubResult(result.promptVersion)) aiJson.stub = true
     await prisma.sheet.update({
       where: { id: sheet.id },
       data: {
@@ -74,7 +83,7 @@ export const classifyHandler: JobHandler = async (job: JobRecord) => {
         discipline: result.discipline,
         sheetType: result.sheet_type,
         scaleNote: result.scale,
-        aiJson: result as unknown as object,
+        aiJson: aiJson as object,
         promptVersion: result.promptVersion,
       },
     })

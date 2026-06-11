@@ -1,24 +1,26 @@
 /**
  * Anthropic client used by the takeoff handlers (CLASSIFY, EXTRACT_*).
  *
- * The client has TWO modes selected at runtime:
+ * MODES (resolved at boot; see config.aiMode):
  *
- *   - LIVE   : `ANTHROPIC_API_KEY` is set. The methods hit /v1/messages with
- *              the versioned prompt for the call and the tool's strict JSON
- *              schema. Tokens reported back populate AiUsage.
+ *   - 'live'  → /v1/messages with the versioned prompt and the tool's strict
+ *               JSON schema. Token usage reported back through AiUsage.
+ *   - 'stub'  → deterministic stub outputs from ./stubs.ts. NEVER allowed in
+ *               production unless ALLOW_STUB_IN_PRODUCTION=true (architect
+ *               escape hatch, not for general use). Sprint-3 SaaS-fairness
+ *               rule: a paid org cannot get silently-stubbed results.
  *
- *   - STUB   : `ANTHROPIC_API_KEY` is empty (the default in dev / CI). The
- *              methods return hand-designed deterministic responses defined
- *              in `./stubs.ts`. Same shape, same prompt version field — the
- *              handlers can't tell which mode they're in.
- *
- * Sprint-2 acceptance ships with stubs because it does not require
- * Anthropic credentials. Live mode is enabled by setting the env var.
+ * Concurrency: live calls go through a global semaphore
+ * `MAX_CONCURRENT_AI_CALLS` (default 4) so multiple workers can't blow past
+ * the Anthropic org rate limit. The stub path is concurrency-free.
  *
  * Retry policy on live errors: 429 / 529 / 5xx → exponential backoff up to
- * 3 attempts (BackoffMs: 1s, 2s, 4s). Anything else is surfaced to the
- * handler — the runner converts that into a job-level retry per the
- * existing backoff policy.
+ * 3 attempts (1s, 2s, 4s). Anything else surfaces — the job runner retries
+ * the whole job under its own backoff.
+ *
+ * Stamping: every stub output has `promptVersion` suffixed with '-stub'.
+ * Handlers also stamp `meta.stub=true` on Sheet/TakeoffItem rows so
+ * fabricated data is unmistakable forever, even after migration.
  */
 import { config } from '../config'
 import {
@@ -55,8 +57,55 @@ const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages'
 const ANTHROPIC_VERSION = '2023-06-01'
 const MAX_RETRIES = 3
 
-function isStubMode(): boolean {
-  return !config.anthropicApiKey
+export const STUB_SUFFIX = '-stub'
+
+/**
+ * Resolved at boot. Architect's Sprint-2 review requires this be explicit and
+ * loud — silent fallback was the failure mode we're closing.
+ */
+function effectiveMode(): 'live' | 'stub' {
+  if (config.aiMode === 'live') {
+    if (!config.anthropicApiKey) {
+      throw new Error(
+        'AI_MODE=live but ANTHROPIC_API_KEY is empty. Refusing to fire. ' +
+          'Set the key or switch AI_MODE=stub for offline dev.',
+      )
+    }
+    return 'live'
+  }
+  if (config.isProduction && !config.allowStubInProduction) {
+    throw new Error(
+      'AI_MODE=stub is not allowed in production (ALLOW_STUB_IN_PRODUCTION=false). ' +
+        'A paying org cannot silently receive stubbed AI output.',
+    )
+  }
+  return 'stub'
+}
+
+export function isStubMode(): boolean {
+  return effectiveMode() === 'stub'
+}
+
+// ---------------------------------------------------------------------------
+// Global concurrency cap on live calls (Sprint-3 A6)
+// ---------------------------------------------------------------------------
+
+let inFlight = 0
+const waiters: Array<() => void> = []
+
+async function acquireSlot(): Promise<void> {
+  if (inFlight < config.maxConcurrentAiCalls) {
+    inFlight += 1
+    return
+  }
+  await new Promise<void>((resolve) => waiters.push(resolve))
+  inFlight += 1
+}
+
+function releaseSlot(): void {
+  inFlight -= 1
+  const next = waiters.shift()
+  if (next) next()
 }
 
 interface ContentBlock {
@@ -72,26 +121,31 @@ interface MessagesResponse {
 }
 
 async function callMessages(body: object): Promise<MessagesResponse> {
-  let attempt = 0
-  while (true) {
-    attempt += 1
-    const res = await fetch(ANTHROPIC_URL, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': config.anthropicApiKey,
-        'anthropic-version': ANTHROPIC_VERSION,
-      },
-      body: JSON.stringify(body),
-    })
-    if (res.ok) return (await res.json()) as MessagesResponse
-    const status = res.status
-    const retriable = status === 429 || status === 529 || status >= 500
-    if (!retriable || attempt >= MAX_RETRIES) {
-      const text = await res.text().catch(() => '')
-      throw new Error(`Anthropic ${status}: ${text || res.statusText}`)
+  await acquireSlot()
+  try {
+    let attempt = 0
+    while (true) {
+      attempt += 1
+      const res = await fetch(ANTHROPIC_URL, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': config.anthropicApiKey,
+          'anthropic-version': ANTHROPIC_VERSION,
+        },
+        body: JSON.stringify(body),
+      })
+      if (res.ok) return (await res.json()) as MessagesResponse
+      const status = res.status
+      const retriable = status === 429 || status === 529 || status >= 500
+      if (!retriable || attempt >= MAX_RETRIES) {
+        const text = await res.text().catch(() => '')
+        throw new Error(`Anthropic ${status}: ${text || res.statusText}`)
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000 * 2 ** (attempt - 1)))
     }
-    await new Promise((resolve) => setTimeout(resolve, 1000 * 2 ** (attempt - 1)))
+  } finally {
+    releaseSlot()
   }
 }
 
@@ -113,10 +167,24 @@ function buildImageBlock(jpegBase64: string | null): ContentBlock[] {
   ]
 }
 
+// Sprint-3 A1: every stub output is stamped so fabricated data is forever
+// distinguishable from real Anthropic output.
+function stampStub<T extends { promptVersion: string }>(out: T): T {
+  return { ...out, promptVersion: `${out.promptVersion}${STUB_SUFFIX}` }
+}
+
+// Sprint-3 A3: stub calls report zero Anthropic tokens (they didn't happen).
+// We still want a counter for "stub work done" — handlers bump a separate
+// `stubTokens` line on Usage so the bill stays honest but observability
+// isn't blind.
+function zeroTokens<T extends { tokensIn: number; tokensOut: number }>(out: T): T {
+  return { ...out, tokensIn: 0, tokensOut: 0 }
+}
+
 // --- CLASSIFY -------------------------------------------------------------
 
 export async function classifySheet(input: ClassifyInput): Promise<ClassifyOutput> {
-  if (isStubMode()) return stubClassify(input)
+  if (isStubMode()) return zeroTokens(stampStub(stubClassify(input)))
   const res = await callMessages({
     model: config.anthropicModel,
     max_tokens: 512,
@@ -157,7 +225,7 @@ export async function classifySheet(input: ClassifyInput): Promise<ClassifyOutpu
 export async function extractSchedule(
   input: ExtractScheduleInput,
 ): Promise<ExtractScheduleOutput> {
-  if (isStubMode()) return stubExtractSchedule(input)
+  if (isStubMode()) return zeroTokens(stampStub(stubExtractSchedule(input)))
   const tool = input.kind === 'DOOR' ? EXTRACT_DOORS_TOOL : EXTRACT_WINDOWS_TOOL
   const systemPrompt =
     input.kind === 'DOOR' ? EXTRACT_DOORS_SYSTEM_PROMPT : EXTRACT_WINDOWS_SYSTEM_PROMPT
@@ -197,7 +265,7 @@ export async function extractSchedule(
 // --- EXTRACT_ROOMS --------------------------------------------------------
 
 export async function extractRooms(input: ExtractRoomsInput): Promise<ExtractRoomsOutput> {
-  if (isStubMode()) return stubExtractRooms(input)
+  if (isStubMode()) return zeroTokens(stampStub(stubExtractRooms(input)))
   const res = await callMessages({
     model: config.anthropicModel,
     max_tokens: 2048,

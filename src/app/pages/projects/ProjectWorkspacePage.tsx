@@ -256,6 +256,7 @@ export function ProjectWorkspacePage() {
 
   const hasSpaces = Boolean(spaces && spaces.length > 0)
   const quotationHref = `/projects/${projectId}/quotation`
+  const takeoffHref = `/projects/${projectId}/takeoff`
 
   const progress = projectProgress({
     hasProject: true,
@@ -283,7 +284,12 @@ export function ProjectWorkspacePage() {
 
   return (
     <Stack gap={36}>
-      <ProjectWorkspaceHeader project={project} onEdit={editModal.open} onDelete={handleDelete} />
+      <ProjectWorkspaceHeader
+        project={project}
+        onEdit={editModal.open}
+        onDelete={handleDelete}
+        takeoffHref={takeoffHref}
+      />
 
       <ProjectFlowStepper progress={progress} onStepClick={handleStepClick} />
 

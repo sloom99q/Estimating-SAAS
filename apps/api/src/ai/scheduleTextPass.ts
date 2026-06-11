@@ -1,14 +1,15 @@
 /**
- * Independent text-layer parse for door / window schedules. Runs WITHOUT the
- * AI, using only regex on the per-page text snippet pdftotext produced at
- * INGEST. The schedules handler reconciles this output against the vision
- * pass — disagreement raises a ROW_MISMATCH ValidationFlag.
+ * Independent text-layer parse for door / window schedules.
  *
- * Stub mode (ANTHROPIC_API_KEY empty) substitutes a hand-designed text-pass
- * that deliberately disagrees with the vision stub on ONE row (CW09 width)
- * — the Plot 4357 lesson made manifest.
+ * Sprint-3 A2: always runs the real regex on the real pdftotext snippet,
+ * regardless of AI_MODE. The schedule handler reconciles this output against
+ * the vision pass (which IS mode-switched). Dev mode is now real-text ×
+ * stub-vision — a far better signal than the Sprint-2 dual-stub.
+ *
+ * If the regex finds nothing (the schedule sheet is a scanned image with no
+ * text layer), the reconciler will just see an empty text pass and mark each
+ * vision row as VISUAL conf 70 — no flag, no false ROW_MISMATCH.
  */
-import { config } from '../config'
 import type { ExtractScheduleRow, ScheduleKind } from './types'
 
 const DOOR_RE = /(D\d{2}(?:-[A-Z])?)\s+(\d{3,4})\s+(\d{3,4})/g
@@ -36,32 +37,6 @@ function parseFromText(text: string, kind: ScheduleKind): ExtractScheduleRow[] {
   return rows
 }
 
-/**
- * Stub text-pass for DoD 3. Matches the vision stub row-for-row EXCEPT for
- * one deliberate width disagreement on `CW09` — the Plot 4357 lesson made
- * manifest. The schedules reconciler MUST raise a ROW_MISMATCH flag on this
- * row when the pipeline runs against this stub.
- */
-function stubTextPass(kind: ScheduleKind): ExtractScheduleRow[] {
-  if (kind === 'DOOR') {
-    // Identical to the vision stub.
-    return [
-      { tag: 'D01-A', width_mm: 900, height_mm: 2100, type: 'Single Swing', finish: 'Veneer', remarks: null },
-      { tag: 'D01-B', width_mm: 900, height_mm: 2100, type: 'Single Swing', finish: 'Paint', remarks: null },
-      { tag: 'D02', width_mm: 1800, height_mm: 2100, type: 'Double Swing', finish: 'Veneer', remarks: 'Glazed' },
-      { tag: 'D03', width_mm: 900, height_mm: 2100, type: 'Single Sliding', finish: 'Glass', remarks: null },
-    ]
-  }
-  // WINDOW — note CW09 width is 2350 here vs the vision stub's 2400.
-  return [
-    { tag: 'CW02', width_mm: 1800, height_mm: 2700, type: 'Curtain Wall', finish: 'Aluminium', remarks: null },
-    { tag: 'CW09', width_mm: 2350, height_mm: 2700, type: 'Curtain Wall', finish: 'Aluminium', remarks: 'Corner unit' },
-    { tag: 'CW10', width_mm: 2100, height_mm: 2700, type: 'Curtain Wall', finish: 'Aluminium', remarks: null },
-    { tag: 'CW11', width_mm: 1800, height_mm: 2700, type: 'Curtain Wall', finish: 'Aluminium', remarks: null },
-  ]
-}
-
 export function scheduleTextPass(textSnippet: string, kind: ScheduleKind): ExtractScheduleRow[] {
-  if (!config.anthropicApiKey) return stubTextPass(kind)
   return parseFromText(textSnippet, kind)
 }

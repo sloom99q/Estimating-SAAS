@@ -1,15 +1,15 @@
 /**
- * Independent text-layer regex parse for room areas. Same dual-pass pattern
- * as schedules: the EXTRACT_ROOMS handler reconciles this against the AI
- * vision pass.
+ * Independent text-layer regex parse for room areas.
  *
- * The regex comes verbatim from the Sprint-2 spec:
+ * Sprint-3 A2: always runs the real regex from the spec on the real
+ * pdftotext snippet, regardless of AI_MODE. The room handler reconciles this
+ * against the vision pass.
+ *
  *   /([A-Z][A-Z' \/0-9-]{2,})\s+(?:[A-Z]{2}-\d+\s+)?(\d+\.\d{2})\s*m²/
  *
- * Stub mode returns deterministic rows that match the vision stub exactly so
- * DoD 4 ("±2%") is satisfied by construction.
+ * If the regex finds nothing (scanned-only sheet), the vision rows survive
+ * unflagged at VISUAL conf 70.
  */
-import { config } from '../config'
 import type { ExtractRoomsRow } from './types'
 
 const ROOM_RE = /([A-Z][A-Z' \/0-9-]{2,})\s+(?:[A-Z]{2}-\d+\s+)?(\d+\.\d{2})\s*m²/g
@@ -34,16 +34,6 @@ function parseFromText(text: string): ExtractRoomsRow[] {
   return rows
 }
 
-function stubTextPass(pageNo: number): ExtractRoomsRow[] {
-  const floor = `L${((pageNo - 9) % 8) + 1}`
-  return [
-    { name: 'OPEN OFFICE', code: `${floor}-OFC-001`, floor, area_m2: 124.5, finish_code: 'F-OFC-01' },
-    { name: 'MEETING ROOM', code: `${floor}-MTG-002`, floor, area_m2: 18.25, finish_code: 'F-MTG-01' },
-    { name: 'TOILET', code: `${floor}-TLT-003`, floor, area_m2: 6.40, finish_code: 'F-TLT-01' },
-  ]
-}
-
-export function roomsTextPass(textSnippet: string, pageNo: number): ExtractRoomsRow[] {
-  if (!config.anthropicApiKey) return stubTextPass(pageNo)
+export function roomsTextPass(textSnippet: string, _pageNo: number): ExtractRoomsRow[] {
   return parseFromText(textSnippet)
 }

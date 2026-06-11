@@ -42,9 +42,10 @@ interface PriceLinkRow {
   organizationId: string
   materialId: string
   supplierId: string
-  unitPrice: number
+  // Sprint-3 Decimal promotion. DTO emits string for wire stability.
+  unitPrice: Prisma.Decimal
   currency: string
-  minimumOrderQuantity: number | null
+  minimumOrderQuantity: Prisma.Decimal | null
   leadTimeDays: number | null
   effectiveDate: Date
   isPreferred: boolean
@@ -60,9 +61,10 @@ function priceLink(row: PriceLinkRow) {
     organizationId: row.organizationId,
     materialId: row.materialId,
     supplierId: row.supplierId,
-    unitPrice: row.unitPrice,
+    unitPrice: row.unitPrice.toString(),
     currency: row.currency,
-    minimumOrderQuantity: row.minimumOrderQuantity,
+    minimumOrderQuantity:
+      row.minimumOrderQuantity === null ? null : row.minimumOrderQuantity.toString(),
     leadTimeDays: row.leadTimeDays,
     effectiveDate: row.effectiveDate.toISOString(),
     isPreferred: row.isPreferred,
@@ -78,7 +80,7 @@ function snapshot(row: {
   organizationId: string
   materialId: string
   supplierId: string
-  price: number
+  price: Prisma.Decimal
   currency: string
   effectiveDate: Date
   createdAt: Date
@@ -88,7 +90,7 @@ function snapshot(row: {
     organizationId: row.organizationId,
     materialId: row.materialId,
     supplierId: row.supplierId,
-    price: row.price,
+    price: row.price.toString(),
     currency: row.currency,
     effectiveDate: row.effectiveDate.toISOString(),
     createdAt: row.createdAt.toISOString(),

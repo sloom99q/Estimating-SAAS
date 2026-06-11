@@ -1,7 +1,10 @@
 import { classifyHandler } from './handlers/classify'
+import { exportXlsxHandler } from './handlers/exportXlsx'
 import { extractRoomsHandler } from './handlers/extractRooms'
 import { extractSchedulesHandler } from './handlers/extractSchedules'
 import { ingestHandler } from './handlers/ingest'
+import { priceHandler } from './handlers/price'
+import { quantifyHandler } from './handlers/quantify'
 import type { JobHandler, JobType } from './types'
 
 /**
@@ -26,8 +29,8 @@ export const HANDLERS: Record<JobType, JobHandler> = {
   CLASSIFY: classifyHandler,
   EXTRACT_SCHEDULES: extractSchedulesHandler,
   EXTRACT_ROOMS: extractRoomsHandler,
-  QUANTIFY: notImplemented('QUANTIFY', 'Sprint 3'),
-  VALIDATE: notImplemented('VALIDATE', 'Sprint 3'),
-  PRICE: notImplemented('PRICE', 'Sprint 3'),
-  EXPORT_XLSX: notImplemented('EXPORT_XLSX', 'Sprint 4'),
+  QUANTIFY: quantifyHandler,
+  VALIDATE: notImplemented('VALIDATE', 'Sprint 4'),
+  PRICE: priceHandler,
+  EXPORT_XLSX: exportXlsxHandler,
 }

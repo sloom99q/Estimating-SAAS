@@ -75,13 +75,19 @@ export function createHttpRepository<
 
   const basePath = `/api/${descriptor.table}`
 
+  // Sprint-3: descriptors may declare `normaliseOnRead` for shape repair
+  // (used today to coerce server-side Decimal strings into numbers for math).
+  // Localstorage already runs this; we now run it for HTTP rows too.
+  const normalise: (row: TRow) => TRow = descriptor.normaliseOnRead ?? ((row) => row)
+
   return {
     async list(_organizationId, options = {}) {
       // organizationId is intentionally ignored: the server resolves it from
       // the JWT so a tampered client cannot read another tenant's rows.
-      return authedRequest<TRow[]>(`${basePath}${buildQueryString(options)}`, {
+      const rows = await authedRequest<TRow[]>(`${basePath}${buildQueryString(options)}`, {
         method: 'GET',
       })
+      return rows.map(normalise)
     },
 
     async findById(_organizationId, id, options = {}) {
@@ -89,9 +95,10 @@ export function createHttpRepository<
       if (options.includeDeleted) params.set('includeDeleted', 'true')
       const qs = params.toString().length === 0 ? '' : `?${params.toString()}`
       try {
-        return await authedRequest<TRow>(`${basePath}/${encodeURIComponent(id)}${qs}`, {
+        const row = await authedRequest<TRow>(`${basePath}/${encodeURIComponent(id)}${qs}`, {
           method: 'GET',
         })
+        return normalise(row)
       } catch (error) {
         if (error instanceof HttpError && error.status === 404) return null
         throw error
@@ -99,17 +106,19 @@ export function createHttpRepository<
     },
 
     async create(_organizationId, input) {
-      return authedRequest<TRow>(basePath, {
+      const row = await authedRequest<TRow>(basePath, {
         method: 'POST',
         body: JSON.stringify(input),
       })
+      return normalise(row)
     },
 
     async update(_organizationId, id, input) {
-      return authedRequest<TRow>(`${basePath}/${encodeURIComponent(id)}`, {
+      const row = await authedRequest<TRow>(`${basePath}/${encodeURIComponent(id)}`, {
         method: 'PATCH',
         body: JSON.stringify(input),
       })
+      return normalise(row)
     },
 
     async softDelete(_organizationId, id) {
@@ -119,6 +128,8 @@ export function createHttpRepository<
     },
 
     async restore(_organizationId, id) {
+      // Repository.restore is declared void — the SPA refetches the list after
+      // calling this. We deliberately drop the returned row (no normaliser pass).
       await authedRequest<TRow>(`${basePath}/${encodeURIComponent(id)}/restore`, {
         method: 'POST',
         body: JSON.stringify({}),

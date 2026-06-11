@@ -144,6 +144,14 @@ model Organization {
   takeoffItems           TakeoffItem[]
   validationFlags        ValidationFlag[]
   corrections            Correction[]
+  // Sprint-3 money path.
+  assemblies             Assembly[]
+  assemblyComponents     AssemblyComponent[]
+  rateLibraryItems       RateLibraryItem[]
+  boqs                   Boq[]
+  boqSections            BoqSection[]
+  boqLines               BoqLine[]
+  quotations             Quotation[]
 
   @@map("organizations")
 }
@@ -186,6 +194,8 @@ model Project {
   documents       Document[]
   takeoffItems    TakeoffItem[]
   validationFlags ValidationFlag[]
+  boqs            Boq[]
+  quotations      Quotation[]
 
   @@index([organizationId, status])
   @@index([organizationId, createdAt])
@@ -230,9 +240,11 @@ model Material {
   name           String
   category       String
   unit           String
-  unitPrice      Float
-  coverage       Float
-  wastePct       Float
+  // Sprint-3: promoted from Float to Decimal. Pricing math never runs on
+  // Float (no money types are allowed to be Float on the live schema).
+  unitPrice      Decimal   @db.Decimal(14, 2)
+  coverage       Decimal   @db.Decimal(10, 4)
+  wastePct       Decimal   @db.Decimal(5, 2)
   currency       String    @default("AED")
   supplier       String?
   notes          String?
@@ -242,9 +254,10 @@ model Material {
   updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
   deletedAt      DateTime? @db.Timestamptz(6)
 
-  organization   Organization            @relation(fields: [organizationId], references: [id])
-  supplierPrices MaterialSupplierPrice[]
-  priceSnapshots PriceSnapshot[]
+  organization        Organization            @relation(fields: [organizationId], references: [id])
+  supplierPrices      MaterialSupplierPrice[]
+  priceSnapshots      PriceSnapshot[]
+  assemblyComponents  AssemblyComponent[]
 
   @@index([organizationId, name])
   @@index([organizationId, category])
@@ -290,9 +303,10 @@ model MaterialSupplierPrice {
   organizationId       String
   materialId           String
   supplierId           String
-  unitPrice            Float
+  // Sprint-3: Decimal everywhere money lives.
+  unitPrice            Decimal   @db.Decimal(14, 2)
   currency             String
-  minimumOrderQuantity Float?
+  minimumOrderQuantity Decimal?  @db.Decimal(14, 4)
   leadTimeDays         Int?
   effectiveDate        DateTime  @db.Timestamptz(6)
   isPreferred          Boolean   @default(false)
@@ -316,7 +330,8 @@ model PriceSnapshot {
   organizationId String
   materialId     String
   supplierId     String
-  price          Float
+  // Sprint-3: Decimal everywhere money lives.
+  price          Decimal  @db.Decimal(14, 2)
   currency       String
   effectiveDate  DateTime @db.Timestamptz(6)
   createdAt      DateTime @default(now()) @db.Timestamptz(6)
@@ -522,4 +537,203 @@ model Correction {
   @@index([organizationId, entity, entityId])
   @@index([organizationId, createdAt])
   @@map("corrections")
+}
+
+// ===========================================================================
+// Sprint 3 — Money path (Assemblies, Rate library, BOQ, Quotation)
+// ===========================================================================
+
+/// Composable cost recipe. unitCost is computed from its components, never
+/// stored — see apps/api/src/pricing/assemblyEngine.ts. `appliesTo` tells the
+/// PRICE waterfall which BOQ line categories this assembly is eligible to
+/// match (WALL → wall finishes, FLOOR → floor finishes, etc; GENERIC = any).
+model Assembly {
+  id             String              @id @default(cuid())
+  organizationId String
+  name           String
+  /// 'WALL' | 'FLOOR' | 'CEILING' | 'GENERIC'
+  appliesTo      String
+  outputUnit     String
+  notes          String?
+  createdAt      DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime            @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime?           @db.Timestamptz(6)
+
+  organization Organization         @relation(fields: [organizationId], references: [id])
+  components   AssemblyComponent[]
+  boqLines     BoqLine[]
+
+  @@index([organizationId, name])
+  @@index([organizationId, appliesTo])
+  @@map("assemblies")
+}
+
+/// Recipe leaf. `kind` tells the engine which formula slot the row feeds:
+///   MATERIAL  : (unitPrice / coverage) × coats × (1 + wastagePct/100)
+///   LABOR     : unitPrice (per outputUnit)
+///   TOOL_FIXED: fixedCost / projectQty (amortised over the run)
+model AssemblyComponent {
+  id             String   @id @default(cuid())
+  organizationId String
+  assemblyId     String
+  /// 'MATERIAL' | 'LABOR' | 'TOOL_FIXED'
+  kind           String
+  label          String
+  unitPrice      Decimal? @db.Decimal(14, 2)
+  coverage       Decimal? @db.Decimal(14, 4)
+  coats          Int      @default(1)
+  wastagePct     Decimal  @default(0) @db.Decimal(5, 2)
+  fixedCost      Decimal? @db.Decimal(14, 2)
+  materialId     String?
+  sortOrder      Int      @default(0)
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  assembly     Assembly     @relation(fields: [assemblyId], references: [id])
+  material     Material?    @relation(fields: [materialId], references: [id])
+
+  @@index([assemblyId])
+  @@index([organizationId])
+  @@map("assembly_components")
+}
+
+/// Deterministic rate table — the final non-P/S fallback in the PRICE
+/// waterfall. `organizationId` is NULLABLE per ADR-012: NULL = global seed
+/// rate; non-null = per-org override. Excluded from `TENANT_MODELS` because
+/// blanket scoping would hide the global rows. Queries scope explicitly with
+///   WHERE organizationId = :org OR organizationId IS NULL
+/// and per-org rows win on conflict.
+model RateLibraryItem {
+  id             String    @id @default(cuid())
+  organizationId String?
+  code           String
+  description    String
+  unit           String
+  rate           Decimal   @db.Decimal(14, 2)
+  source         String
+  region         String    @default("SHJ")
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime? @db.Timestamptz(6)
+
+  organization Organization? @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId, code])
+  @@index([code, region])
+  @@unique([organizationId, code, region])
+  @@map("rate_library_items")
+}
+
+/// Bill of Quantities. One BOQ per (project, version). PRICE writes against
+/// a Boq's lines; EXPORT_XLSX reads from it.
+model Boq {
+  id                 String        @id @default(cuid())
+  organizationId     String
+  projectId          String
+  version            Int           @default(1)
+  /// 'DRAFT' | 'REVIEWED' | 'LOCKED'
+  status             String        @default("DRAFT")
+  currency           String        @default("AED")
+  subtotal           Decimal?      @db.Decimal(14, 2)
+  totalProvisional   Decimal?      @db.Decimal(14, 2)
+  generatedFromJobId String?
+  createdAt          DateTime      @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime      @updatedAt @db.Timestamptz(6)
+  deletedAt          DateTime?     @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  project      Project      @relation(fields: [projectId], references: [id])
+  sections     BoqSection[]
+  lines        BoqLine[]
+  quotations   Quotation[]
+
+  @@unique([organizationId, projectId, version])
+  @@index([organizationId, projectId])
+  @@map("boqs")
+}
+
+/// Triple-A grouping: '1.0 General', '2.5 Metal', '2.6 Wood', '2.8 Doors-
+/// Windows-Glazing', '2.9 Finishes', '3.1 External', '4.0 Provisional Sums'.
+/// `code` is the dotted prefix the export uses.
+model BoqSection {
+  id             String   @id @default(cuid())
+  organizationId String
+  boqId          String
+  code           String
+  title          String
+  sortOrder      Int      @default(0)
+  subtotal       Decimal? @db.Decimal(14, 2)
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  boq          Boq          @relation(fields: [boqId], references: [id])
+  lines        BoqLine[]
+
+  @@unique([boqId, code])
+  @@index([organizationId])
+  @@map("boq_sections")
+}
+
+/// One row per BOQ line. `rateSource` records which waterfall tier priced it.
+/// Provisional sums leave `rate` null and put the carry-amount in `psAmount`.
+model BoqLine {
+  id             String   @id @default(cuid())
+  organizationId String
+  boqId          String
+  sectionId      String
+  itemRef        String
+  description    String
+  unit           String
+  qty            Decimal? @db.Decimal(14, 4)
+  rate           Decimal? @db.Decimal(14, 2)
+  rateSource     String?
+  amount         Decimal? @db.Decimal(14, 2)
+  isProvisional  Boolean  @default(false)
+  psAmount       Decimal? @db.Decimal(14, 2)
+  confidence     Int?
+  takeoffItemId  String?
+  assemblyId     String?
+  sortOrder      Int      @default(0)
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  boq          Boq          @relation(fields: [boqId], references: [id])
+  section      BoqSection   @relation(fields: [sectionId], references: [id])
+  assembly     Assembly?    @relation(fields: [assemblyId], references: [id])
+
+  @@index([organizationId, boqId])
+  @@index([organizationId, takeoffItemId])
+  @@map("boq_lines")
+}
+
+/// Commercial wrapper around a Boq. `ref` shape: `Qo/{YYYYMM}/{serial} Rev-{NN}`.
+/// `total` = Σ BoqLine.amount − discount, then VAT applied on top.
+model Quotation {
+  id             String    @id @default(cuid())
+  organizationId String
+  projectId      String
+  boqId          String
+  ref            String
+  clientName     String
+  discount       Decimal   @default(0) @db.Decimal(14, 2)
+  vatPct         Decimal   @default(5) @db.Decimal(5, 2)
+  subtotal       Decimal?  @db.Decimal(14, 2)
+  total          Decimal?  @db.Decimal(14, 2)
+  validityDays   Int       @default(30)
+  /// 'DRAFT' | 'SENT' | 'ACCEPTED' | 'WITHDRAWN'
+  status         String    @default("DRAFT")
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime? @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  project      Project      @relation(fields: [projectId], references: [id])
+  boq          Boq          @relation(fields: [boqId], references: [id])
+
+  @@unique([organizationId, ref])
+  @@index([organizationId, projectId])
+  @@map("quotations")
 }

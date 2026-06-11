@@ -24,7 +24,7 @@
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { extractSchedule } from '../../ai/anthropic'
+import { STUB_SUFFIX, extractSchedule } from '../../ai/anthropic'
 import { scheduleTextPass } from '../../ai/scheduleTextPass'
 import type { ExtractScheduleRow, ScheduleKind } from '../../ai/types'
 import { getBlobStore } from '../../blob/fs'
@@ -218,7 +218,19 @@ export const extractSchedulesHandler: JobHandler = async (job: JobRecord) => {
     const text = scheduleTextPass(textSnippet, kind)
     const reconciled = reconcile(vision.rows, text, kind)
 
+    const visionFromStub = vision.promptVersion.endsWith(STUB_SUFFIX)
     for (const row of reconciled) {
+      const meta: Record<string, unknown> = {
+        width_mm: row.width_mm,
+        height_mm: row.height_mm,
+        finish: row.finish,
+        type: row.type,
+        remarks: row.remarks,
+      }
+      // Sprint-3 A1: mark the takeoff row when the vision pass was stubbed.
+      // The text pass is real, so the row isn't fully fabricated — we surface
+      // both facts explicitly.
+      if (visionFromStub) meta.stub = true
       const created = await prisma.takeoffItem.create({
         data: {
           organizationId: job.organizationId,
@@ -232,13 +244,7 @@ export const extractSchedulesHandler: JobHandler = async (job: JobRecord) => {
           confidence: row.confidence,
           sourceSheetId: sheet.id,
           sourceNote: `${sheet.drawingNo ?? `page ${sheet.pageNo}`}`,
-          meta: {
-            width_mm: row.width_mm,
-            height_mm: row.height_mm,
-            finish: row.finish,
-            type: row.type,
-            remarks: row.remarks,
-          } as object,
+          meta: meta as object,
           promptVersion: vision.promptVersion,
         },
       })

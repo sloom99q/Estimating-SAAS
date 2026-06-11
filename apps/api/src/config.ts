@@ -26,6 +26,27 @@ function bool(name: string, fallback: boolean): boolean {
 
 const isProduction = process.env.NODE_ENV === 'production'
 
+/**
+ * Sprint-3 explicit AI mode (architect review of Sprint 2):
+ *
+ *   - 'live'  → /v1/messages calls go out. Requires ANTHROPIC_API_KEY.
+ *   - 'stub'  → deterministic stub outputs (zero spend). Stamped '-stub' on
+ *               promptVersion + meta.stub=true. NEVER allowed in production
+ *               unless explicitly opted-in by ALLOW_STUB_IN_PRODUCTION.
+ *
+ * Default outside production is 'stub'; inside production is 'live'. If the
+ * resolved mode is 'live' but the key is missing, the AI client refuses to
+ * fire — the job fails loudly. Silent stubbing in production is a SaaS
+ * fairness violation (paying customers expect AI work).
+ */
+const rawAiMode = (process.env.AI_MODE ?? '').toLowerCase()
+const aiMode: 'live' | 'stub' =
+  rawAiMode === 'live' || rawAiMode === 'stub'
+    ? (rawAiMode as 'live' | 'stub')
+    : isProduction
+    ? 'live'
+    : 'stub'
+
 export const config = {
   port: num('PORT', 4000),
   jwtSecret: required('JWT_SECRET', 'dev-only-secret-rotate-me-before-deploy'),
@@ -43,9 +64,13 @@ export const config = {
   // Worker reaper: any RUNNING job older than this is considered stuck and
   // gets requeued (or terminal-failed if out of attempts). Default 10 min.
   jobTimeoutMs: num('JOB_TIMEOUT_MS', 10 * 60 * 1000),
-  // Anthropic. Empty key triggers the deterministic stub mode used in tests
-  // and offline dev — see apps/api/src/ai/anthropic.ts.
+  // Anthropic.
   anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? '',
   anthropicModel: process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6',
+  aiMode,
+  allowStubInProduction: bool('ALLOW_STUB_IN_PRODUCTION', false),
+  // Sprint-3 A6: global semaphore around live Anthropic calls. Default 4 keeps
+  // us well under the org's per-minute rate limit when several workers run.
+  maxConcurrentAiCalls: num('MAX_CONCURRENT_AI_CALLS', 4),
   blobRoot: process.env.BLOB_ROOT ?? './data/blobs',
 } as const

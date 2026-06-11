@@ -54,6 +54,15 @@ const TENANT_MODELS = new Set([
   'TakeoffItem',
   'ValidationFlag',
   'Correction',
+  // Sprint-3 money path. RateLibraryItem is deliberately ABSENT — see
+  // apps/api/docs/adr/012-rate-library-nullable-org-scoping.md for the
+  // explicit-scoping rule.
+  'Assembly',
+  'AssemblyComponent',
+  'Boq',
+  'BoqSection',
+  'BoqLine',
+  'Quotation',
 ])
 
 const SCOPED_READ_OPS = new Set([

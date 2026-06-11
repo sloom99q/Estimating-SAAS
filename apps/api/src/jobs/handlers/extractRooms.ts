@@ -15,7 +15,7 @@
  *
  * On completion, set Document.status = READY — the pipeline's terminal stage.
  */
-import { extractRooms } from '../../ai/anthropic'
+import { STUB_SUFFIX, extractRooms } from '../../ai/anthropic'
 import { roomsTextPass } from '../../ai/roomsTextPass'
 import type { ExtractRoomsRow } from '../../ai/types'
 import { getBlobStore } from '../../blob/fs'
@@ -141,8 +141,17 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
 
     const text = roomsTextPass(textSnippet, sheet.pageNo)
     const reconciled = reconcile(vision.rows, text)
+    const visionFromStub = vision.promptVersion.endsWith(STUB_SUFFIX)
 
     for (const room of reconciled) {
+      const meta: Record<string, unknown> = {
+        code: room.code,
+        floor: room.floor,
+        area_m2: room.area_m2,
+        finish_code: room.finish_code,
+      }
+      // Sprint-3 A1: stub vision → mark the row.
+      if (visionFromStub) meta.stub = true
       const takeoff = await prisma.takeoffItem.create({
         data: {
           organizationId: job.organizationId,
@@ -156,12 +165,7 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
           confidence: room.confidence,
           sourceSheetId: sheet.id,
           sourceNote: sheet.drawingNo ?? `page ${sheet.pageNo}`,
-          meta: {
-            code: room.code,
-            floor: room.floor,
-            area_m2: room.area_m2,
-            finish_code: room.finish_code,
-          } as object,
+          meta: meta as object,
           promptVersion: vision.promptVersion,
         },
       })
