@@ -5,15 +5,38 @@ import { prisma } from '../db'
  * extension below injects `organizationId` into every read / write filter
  * for these models, so application code physically cannot forget the scope.
  *
+ * IMPORTANT — NESTED WRITES ARE BANNED ON TENANT MODELS:
+ *
+ *   await db.project.update({
+ *     where: { id },
+ *     data: {
+ *       spaces: { create: [{ name, length, width, height }] }, // ❌ BAD
+ *     },
+ *   })
+ *
+ * Prisma's `data.<relation>.create` shortcut bypasses this extension —
+ * the child row's `organizationId` would be left to fall back to the parent
+ * relation, and a maliciously-crafted parent id could lead to cross-tenant
+ * writes. (Architect review of Sprint 1.)
+ *
+ * Instead, use explicit per-model calls in a transaction:
+ *
+ *   await db.$transaction([
+ *     db.project.update({ where: { id }, data: { ... } }),
+ *     db.space.createMany({ data: [{ projectId: id, name, ... }] }),
+ *   ])
+ *
+ * The example pattern in projects.ts (the cascade on delete) is the model to
+ * follow for all multi-row writes on tenant models.
+ *
  * Notes:
  *  - `User` is NOT here. Users are platform-wide (one person can belong to
  *    multiple orgs via `Membership`). Tenant scope on users is enforced
  *    indirectly through the `Membership` row resolved at auth time.
  *  - `Organization` is NOT here either — orgs are looked up by id during
  *    auth and never queried in bulk.
- *  - Sprint 2+ models (`Document`, `Sheet`, `TakeoffItem`, `ValidationFlag`,
- *    `BoqLine`, `Quotation`, `Correction`, `RateLibraryItem`) get added here
- *    as they land.
+ *  - Sprint-2 takeoff models (`Document`, `Sheet`, `TakeoffItem`,
+ *    `ValidationFlag`, `Correction`) are included.
  */
 const TENANT_MODELS = new Set([
   'Project',
@@ -25,6 +48,12 @@ const TENANT_MODELS = new Set([
   'Membership',
   'Job',
   'Usage',
+  // Sprint-2 takeoff models.
+  'Document',
+  'Sheet',
+  'TakeoffItem',
+  'ValidationFlag',
+  'Correction',
 ])
 
 const SCOPED_READ_OPS = new Set([

@@ -1,6 +1,7 @@
 import { config } from './config'
 import { startWorker } from './jobs/runner'
 import { registerAuthRoutes } from './routes/auth'
+import { registerDocumentRoutes } from './routes/documents'
 import { registerJobRoutes } from './routes/jobs'
 import { registerMaterialRoutes } from './routes/materials'
 import { registerPriceRoutes } from './routes/prices'
@@ -8,6 +9,7 @@ import { registerProjectRoutes } from './routes/projects'
 import { Router } from './routes/router'
 import { registerSpaceRoutes } from './routes/spaces'
 import { registerSupplierRoutes } from './routes/suppliers'
+import { registerTakeoffRoutes } from './routes/takeoff'
 import { registerUserRoutes } from './routes/users'
 import { jsonResponse } from './utils/json'
 
@@ -20,6 +22,8 @@ registerSupplierRoutes(router)
 registerPriceRoutes(router)
 registerUserRoutes(router)
 registerJobRoutes(router)
+registerDocumentRoutes(router)
+registerTakeoffRoutes(router)
 
 router.get('/health', () =>
   jsonResponse({ ok: true, name: 'estimator-api', version: '0.1.0' }),

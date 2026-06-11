@@ -288,7 +288,8 @@ export function registerPriceRoutes(router: Router): void {
       const existing = await db.materialSupplierPrice.findFirst({
         where: { id: ctx.params.id, deletedAt: null },
       })
-      if (!existing) return emptyResponse()
+      // ADR-011: DELETE matches PATCH — 404 for missing or cross-tenant.
+      if (!existing) return errorResponse(404, 'Price link not found')
       await db.materialSupplierPrice.update({
         where: { id: existing.id },
         data: { deletedAt: new Date() },

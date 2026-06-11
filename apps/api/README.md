@@ -100,7 +100,43 @@ Prisma models — only the underlying engine changed.
 | **GET**  | **`/api/usage`**                    | JWT  | **9**  | Per-org metering (`pagesProcessed`, jobs…)       |
 | GET    | `/health`                             | —    | 8A     | Liveness                                         |
 
-## Phase 9 Sprint 1 — what's new
+## Phase 9 Sprint 2 — takeoff pipeline
+
+Sprint 2 introduces the document → sheet → takeoff-item pipeline. Background
+jobs (`INGEST`, `CLASSIFY`, `EXTRACT_SCHEDULES`, `EXTRACT_ROOMS`) run inside
+the same worker, chained by enqueuing the next handler from the current one.
+
+### Prerequisites
+
+```bash
+# PDF tooling for INGEST
+brew install poppler            # pdfinfo / pdffonts / pdftotext / pdftoppm
+```
+
+Place the source drawing PDF used by acceptance at
+`apps/api/fixtures/plot4357.pdf`. **The fixture is gitignored** (see
+`.gitignore`) — the binary lives only on your machine.
+
+### AI client — live vs stub
+
+`apps/api/src/ai/anthropic.ts` is a thin client with three methods —
+`classifySheet`, `extractSchedule`, `extractRooms`. When `ANTHROPIC_API_KEY`
+is empty (the default) it returns **deterministic stub responses** keyed by
+document and sheet position, so the pipeline runs end-to-end offline. Drop
+in a real key and `ANTHROPIC_MODEL` to switch to `claude-3` /v1/messages
+calls; nothing else changes.
+
+### New routes
+
+| Method | Path                                       | Sprint | Notes                                            |
+| ------ | ------------------------------------------ | ------ | ------------------------------------------------ |
+| POST   | `/api/projects/:id/documents`              | 9.S2   | multipart upload, application/pdf only, ≤ 50 MB  |
+| GET    | `/api/documents/:id`                       | 9.S2   | Document + sheets + recent pipeline job statuses |
+| GET    | `/api/projects/:id/takeoff-items`          | 9.S2   | grouped by category; powers the review UI       |
+| PATCH  | `/api/takeoff-items/:id`                   | 9.S2   | inline edit; writes a Correction if qty changes  |
+| GET    | `/api/projects/:id/validation-flags`       | 9.S2   |                                                  |
+
+### Phase 9 Sprint 1 — what's new
 
 - **Postgres** is now the live engine. SQLite is retired; the migration
   script ports existing data.
@@ -127,6 +163,8 @@ Prisma models — only the underlying engine changed.
   add `Supplier.creditLimitAed`.
 - `docs/adr/010-schema-source-of-truth.md` — `apps/api/prisma/schema.prisma`
   is now the live schema; root is reference.
+- `docs/adr/011-delete-returns-404-for-missing-or-cross-tenant.md` —
+  DELETE matches PATCH; 204 on success, 404 otherwise (Sprint-1 review).
 
 ## Worker
 

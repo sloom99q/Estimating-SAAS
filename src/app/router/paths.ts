@@ -8,6 +8,8 @@ export const paths = {
   projectDetail: '/projects/:projectId',
   /** Quotation document route — opens a printable view of the project. */
   projectQuotation: '/projects/:projectId/quotation',
+  /** Takeoff review (Sprint 2). PDF upload + AI extraction review table. */
+  projectTakeoff: '/projects/:projectId/takeoff',
   materials: '/materials',
   /** Material detail / procurement view route pattern. */
   materialDetail: '/materials/:materialId',
@@ -25,6 +27,11 @@ export function projectPath(projectId: string): string {
 /** Build the quotation URL for a project. */
 export function projectQuotationPath(projectId: string): string {
   return `/projects/${projectId}/quotation`
+}
+
+/** Build the takeoff review URL for a project. */
+export function projectTakeoffPath(projectId: string): string {
+  return `/projects/${projectId}/takeoff`
 }
 
 /** Build the URL for a specific material's procurement workspace. */

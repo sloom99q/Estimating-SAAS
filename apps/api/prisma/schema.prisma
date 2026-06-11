@@ -27,7 +27,12 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
+  // App connections use the pooled DSN (cheap, scalable).
+  url       = env("DATABASE_URL")
+  // Migrations need session-scoped state (advisory locks) which Neon's pooler
+  // does not support. Point DIRECT_URL at the non-pooled host; the runtime
+  // never touches it. Locally this is just DATABASE_URL with "-pooler" removed.
+  directUrl = env("DIRECT_URL")
 }
 
 // ---------------------------------------------------------------------------
@@ -39,6 +44,60 @@ enum MembershipRole {
   admin
   estimator
   viewer
+}
+
+// Sprint-2 enums (takeoff pipeline).
+
+enum DocumentStatus {
+  UPLOADED
+  PROCESSING
+  READY
+  FAILED
+}
+
+// Brief lists "WIGHT" between DOOR and FLOOR_FINISH — that's a typo for
+// WINDOW (the only plausible counterpart to DOOR in a fit-out catalogue).
+// Using WINDOW; flag for architect review at sprint close.
+enum TakeoffCategory {
+  ROOM
+  DOOR
+  WINDOW
+  FLOOR_FINISH
+  WALL_FINISH
+  CEILING
+  SCREED
+  PAINT
+  PLASTER
+  BLOCKWORK
+  WATERPROOFING
+  METAL
+  GRC
+  JOINERY
+  SANITARY
+  EXTERNAL
+  STRUCTURE_PROV
+  MEP_PROV
+  OTHER
+}
+
+enum TakeoffBasis {
+  MEASURED
+  DERIVED
+  VISUAL
+  PARAMETRIC
+  PLACEHOLDER
+}
+
+enum TakeoffStatus {
+  AI
+  EDITED
+  APPROVED
+}
+
+enum ValidationSeverity {
+  ERROR
+  WARN
+  INFO
 }
 
 // ---------------------------------------------------------------------------
@@ -79,6 +138,12 @@ model Organization {
   priceSnapshots         PriceSnapshot[]
   jobs                   Job[]
   usage                  Usage?
+  // Sprint-2 takeoff pipeline.
+  documents              Document[]
+  sheets                 Sheet[]
+  takeoffItems           TakeoffItem[]
+  validationFlags        ValidationFlag[]
+  corrections            Correction[]
 
   @@map("organizations")
 }
@@ -116,8 +181,11 @@ model Project {
   updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
   deletedAt      DateTime? @db.Timestamptz(6)
 
-  organization Organization @relation(fields: [organizationId], references: [id])
-  spaces       Space[]
+  organization    Organization     @relation(fields: [organizationId], references: [id])
+  spaces          Space[]
+  documents       Document[]
+  takeoffItems    TakeoffItem[]
+  validationFlags ValidationFlag[]
 
   @@index([organizationId, status])
   @@index([organizationId, createdAt])
@@ -135,6 +203,14 @@ model Space {
   floorMaterialId   String?
   wallMaterialId    String?
   ceilingMaterialId String?
+  // Sprint-2 additive columns. Nullable / defaulted so the wire shape of the
+  // existing /api/spaces endpoint stays stable for the SPA — fields appear in
+  // responses only after EXTRACT_ROOMS has populated them.
+  code              String?
+  floor             String?
+  areaM2            Decimal?  @db.Decimal(10, 2)
+  source            String    @default("manual")  // 'manual' | 'takeoff'
+  confidence        Int?
   createdAt         DateTime  @default(now()) @db.Timestamptz(6)
   updatedAt         DateTime  @updatedAt @db.Timestamptz(6)
   deletedAt         DateTime? @db.Timestamptz(6)
@@ -144,6 +220,7 @@ model Space {
 
   @@index([projectId])
   @@index([organizationId])
+  @@index([organizationId, projectId, source])
   @@map("spaces")
 }
 
@@ -299,4 +376,150 @@ model Usage {
   organization Organization @relation(fields: [organizationId], references: [id])
 
   @@map("usages")
+}
+
+// ===========================================================================
+// Sprint 2 — Takeoff pipeline (Document → Sheet → TakeoffItem)
+// ===========================================================================
+
+/// Uploaded source drawing PDF. `storageKey` is the BlobStore key under
+/// org/{orgId}/projects/{projectId}/documents/{docId}/source.pdf — identical
+/// shape across fs and (Sprint-3+) S3 drivers, so a dev blob is portable.
+model Document {
+  id             String         @id @default(cuid())
+  organizationId String
+  projectId      String
+  filename       String
+  storageKey     String
+  pageCount      Int?
+  status         DocumentStatus @default(UPLOADED)
+  createdAt      DateTime       @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime       @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime?      @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  project      Project      @relation(fields: [projectId], references: [id])
+  sheets       Sheet[]
+
+  @@index([organizationId, projectId])
+  @@index([organizationId, status])
+  @@map("documents")
+}
+
+/// One row per PDF page. CLASSIFY writes `discipline / sheetType / drawingNo
+/// / title / scaleNote / aiJson / promptVersion`. EXTRACT_* reads them.
+model Sheet {
+  id             String   @id @default(cuid())
+  organizationId String
+  documentId     String
+  pageNo         Int
+  drawingNo      String?
+  title          String?
+  /// 'ARCH' | 'ID' | 'STR' | 'MEP' | 'UNKNOWN'
+  discipline     String?
+  /// 'cover' | 'register' | 'plan' | 'elevation' | 'section' | 'schedule' |
+  /// 'legend' | 'detail' | 'rcp' | 'finish_plan' | 'other'
+  sheetType      String?
+  scaleNote      String?
+  hasTextLayer   Boolean  @default(false)
+  /// BlobStore key for the per-page pdftotext output. Null = scanned page.
+  rawTextKey     String?
+  /// BlobStore key for the per-page jpeg render. Null until INGEST runs.
+  imageKey       String?
+  aiJson         Json?
+  promptVersion  String?
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization  @relation(fields: [organizationId], references: [id])
+  document     Document      @relation(fields: [documentId], references: [id])
+  takeoffItems TakeoffItem[]
+
+  @@unique([documentId, pageNo])
+  @@index([organizationId, documentId])
+  @@index([organizationId, discipline])
+  @@map("sheets")
+}
+
+/// The output of the extract pipeline. One row per measured / inferred item.
+/// `qtyAi` is the AI's number (never mutated after write). `qtyFinal` is the
+/// human-confirmed number; once it diverges from qtyAi a Correction row is
+/// written so we can A/B retrain prompts.
+model TakeoffItem {
+  id             String          @id @default(cuid())
+  organizationId String
+  projectId      String
+  category       TakeoffCategory
+  tag            String?
+  description    String
+  unit           String
+  qtyAi          Decimal?        @db.Decimal(14, 4)
+  qtyFinal       Decimal?        @db.Decimal(14, 4)
+  basis          TakeoffBasis
+  confidence     Int             @default(0)
+  sourceSheetId  String?
+  sourceNote     String?
+  status         TakeoffStatus   @default(AI)
+  meta           Json?
+  promptVersion  String?
+  createdAt      DateTime        @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime        @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime?       @db.Timestamptz(6)
+
+  organization    Organization     @relation(fields: [organizationId], references: [id])
+  project         Project          @relation(fields: [projectId], references: [id])
+  sourceSheet     Sheet?           @relation(fields: [sourceSheetId], references: [id])
+  validationFlags ValidationFlag[]
+
+  @@index([organizationId, projectId, category])
+  @@index([organizationId, projectId, status])
+  @@index([organizationId, projectId, confidence])
+  @@map("takeoff_items")
+}
+
+/// Surfaces a problem that needs review. Always pinned to a project; usually
+/// to a takeoff item too, but project-wide flags (MISSING_DISCIPLINE) leave
+/// `takeoffItemId` null.
+model ValidationFlag {
+  id             String             @id @default(cuid())
+  organizationId String
+  projectId      String
+  takeoffItemId  String?
+  rule           String
+  severity       ValidationSeverity
+  message        String
+  resolved       Boolean            @default(false)
+  createdAt      DateTime           @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime           @updatedAt @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  project      Project      @relation(fields: [projectId], references: [id])
+  takeoffItem  TakeoffItem? @relation(fields: [takeoffItemId], references: [id])
+
+  @@index([organizationId, projectId, resolved])
+  @@index([organizationId, projectId, severity])
+  @@map("validation_flags")
+}
+
+/// A/B record for prompt retraining. Polymorphic: `entity` + `entityId` point
+/// at any tenant-scoped row (today only TakeoffItem). `aiValue`/`humanValue`
+/// store both sides as strings (we don't need to math on them — we just need
+/// to see them).
+model Correction {
+  id             String   @id @default(cuid())
+  organizationId String
+  entity         String
+  entityId       String
+  field          String
+  aiValue        String?
+  humanValue     String?
+  reason         String?
+  userId         String?
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId, entity, entityId])
+  @@index([organizationId, createdAt])
+  @@map("corrections")
 }

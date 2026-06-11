@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { config } from '../config'
 import { tenantDb } from '../db/tenantDb'
 import { requireAuth } from '../middleware/auth'
 import { JOB_TYPES, type JobType } from '../jobs/types'
@@ -69,34 +70,39 @@ export function registerJobRoutes(router: Router): void {
    *
    * Test affordance only. Enqueues a NOOP or FORCE_FAIL job for the caller's
    * org so we can prove the runner lifecycle end-to-end without uploading a
-   * real document. Sprint 2 introduces /api/projects/:id/documents which is
-   * the real INGEST entry point.
+   * real document. Sprint 2's /api/projects/:id/documents is the real INGEST
+   * entry point.
+   *
+   * Hidden unless ENABLE_TEST_ROUTES=true (default: enabled outside
+   * production). Sprint-1 architect review fix.
    */
-  router.post(
-    '/api/jobs/_test',
-    requireAuth(async (req, ctx) => {
-      let raw: unknown
-      try {
-        raw = await req.json()
-      } catch {
-        return errorResponse(400, 'Invalid JSON body')
-      }
-      const parsed = testBody.safeParse(raw)
-      if (!parsed.success) {
-        return errorResponse(400, 'Invalid payload', parsed.error.format())
-      }
-      const db = tenantDb(ctx.organizationId)
-      const created = await db.job.create({
-        data: {
-          organizationId: ctx.organizationId,
-          projectId: parsed.data.projectId ?? null,
-          type: parsed.data.type as JobType,
-          payload: (parsed.data.payload ?? {}) as object,
-        },
-      })
-      return jsonResponse(job(created), 201)
-    }),
-  )
+  if (config.enableTestRoutes) {
+    router.post(
+      '/api/jobs/_test',
+      requireAuth(async (req, ctx) => {
+        let raw: unknown
+        try {
+          raw = await req.json()
+        } catch {
+          return errorResponse(400, 'Invalid JSON body')
+        }
+        const parsed = testBody.safeParse(raw)
+        if (!parsed.success) {
+          return errorResponse(400, 'Invalid payload', parsed.error.format())
+        }
+        const db = tenantDb(ctx.organizationId)
+        const created = await db.job.create({
+          data: {
+            organizationId: ctx.organizationId,
+            projectId: parsed.data.projectId ?? null,
+            type: parsed.data.type as JobType,
+            payload: (parsed.data.payload ?? {}) as object,
+          },
+        })
+        return jsonResponse(job(created), 201)
+      }),
+    )
+  }
 
   router.get(
     '/api/jobs/:id',

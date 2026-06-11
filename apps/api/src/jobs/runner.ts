@@ -1,3 +1,4 @@
+import { config } from '../config'
 import { prisma } from '../db'
 import { HANDLERS } from './handlers'
 import type { JobRecord } from './types'
@@ -5,6 +6,52 @@ import type { JobRecord } from './types'
 const TICK_MS = Number(process.env.WORKER_TICK_MS ?? 1500)
 const MAX_ATTEMPTS = 3
 const BACKOFF_BASE_SECONDS = 2
+
+/**
+ * Sprint-1 architect-review reaper. Any RUNNING job whose `startedAt` predates
+ * NOW() - JOB_TIMEOUT_MS is considered stuck — the worker that claimed it most
+ * likely died (crash, OOM, redeploy, Anthropic hang). We requeue it if
+ * `attempts` is still under MAX, else flip it to terminal FAILED with reason
+ * 'timeout'. Runs once per tick BEFORE the next claim.
+ */
+async function reapStuckJobs(): Promise<void> {
+  const cutoffMs = config.jobTimeoutMs
+  // Single UPDATE: any RUNNING row past the cutoff that still has attempts
+  // gets requeued; the rest get terminal-failed. We do two scoped updates
+  // (one for each branch) because Postgres doesn't have an in-place CASE
+  // UPDATE that's typesafe with Prisma. Both updates are race-free vs.
+  // healthy workers because healthy workers only ever touch QUEUED rows.
+  const requeueable = await prisma.job.findMany({
+    where: {
+      status: 'RUNNING',
+      startedAt: { lt: new Date(Date.now() - cutoffMs) },
+      attempts: { lt: MAX_ATTEMPTS },
+    },
+    select: { id: true, attempts: true },
+  })
+  if (requeueable.length > 0) {
+    await prisma.job.updateMany({
+      where: { id: { in: requeueable.map((r) => r.id) }, status: 'RUNNING' },
+      data: {
+        status: 'QUEUED',
+        error: 'reaped: previous run exceeded JOB_TIMEOUT_MS',
+        scheduledFor: new Date(),
+      },
+    })
+  }
+  await prisma.job.updateMany({
+    where: {
+      status: 'RUNNING',
+      startedAt: { lt: new Date(Date.now() - cutoffMs) },
+      attempts: { gte: MAX_ATTEMPTS },
+    },
+    data: {
+      status: 'FAILED',
+      error: 'timeout',
+      finishedAt: new Date(),
+    },
+  })
+}
 
 /**
  * One worker tick.
@@ -20,6 +67,8 @@ const BACKOFF_BASE_SECONDS = 2
  *      FAILED + bump org `Usage.jobsFailed`.
  */
 export async function tick(): Promise<JobRecord | null> {
+  // Sprint-2: reap stuck RUNNING jobs before claiming a new one.
+  await reapStuckJobs()
   // Raw SQL because Prisma's typed update can't express SKIP LOCKED.
   const rows = await prisma.$queryRawUnsafe<JobRecord[]>(`
     UPDATE "jobs"

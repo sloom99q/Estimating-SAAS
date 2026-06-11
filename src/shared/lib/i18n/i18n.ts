@@ -16,6 +16,7 @@ import arProjects from '@/locales/ar/projects.json'
 import arQuotations from '@/locales/ar/quotations.json'
 import arSpaces from '@/locales/ar/spaces.json'
 import arSuppliers from '@/locales/ar/suppliers.json'
+import arTakeoff from '@/locales/ar/takeoff.json'
 import arUsers from '@/locales/ar/users.json'
 import enAuth from '@/locales/en/auth.json'
 import enCommon from '@/locales/en/common.json'
@@ -25,6 +26,7 @@ import enProjects from '@/locales/en/projects.json'
 import enQuotations from '@/locales/en/quotations.json'
 import enSpaces from '@/locales/en/spaces.json'
 import enSuppliers from '@/locales/en/suppliers.json'
+import enTakeoff from '@/locales/en/takeoff.json'
 import enUsers from '@/locales/en/users.json'
 
 /**
@@ -42,6 +44,7 @@ export const resources = {
     materials: enMaterials,
     quotations: enQuotations,
     suppliers: enSuppliers,
+    takeoff: enTakeoff,
   },
   ar: {
     common: arCommon,
@@ -53,6 +56,7 @@ export const resources = {
     materials: arMaterials,
     quotations: arQuotations,
     suppliers: arSuppliers,
+    takeoff: arTakeoff,
   },
 }
 

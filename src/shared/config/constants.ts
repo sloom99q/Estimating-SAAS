@@ -19,6 +19,8 @@ export const I18N_NAMESPACES = [
   'materials',
   'quotations',
   'suppliers',
+  // Sprint 2.
+  'takeoff',
 ] as const
 
 /** localStorage keys. Must match index.html's pre-paint bootstrap script. */

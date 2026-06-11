@@ -135,7 +135,8 @@ export function registerProjectRoutes(router: Router): void {
       const existing = await db.project.findFirst({
         where: { id: ctx.params.id, deletedAt: null },
       })
-      if (!existing) return emptyResponse()
+      // ADR-011: DELETE matches PATCH — 404 for missing or cross-tenant.
+      if (!existing) return errorResponse(404, 'Project not found')
       const now = new Date()
       // Tenant extension scopes both calls; we batch the writes in a tx so the
       // cascade is atomic.

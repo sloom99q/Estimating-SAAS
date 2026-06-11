@@ -1,0 +1,85 @@
+{
+  "page": {
+    "title": "Takeoff",
+    "subtitle": "Upload a drawing PDF; AI extracts schedules, rooms, and finishes for review."
+  },
+  "upload": {
+    "cta": "Upload PDF",
+    "dropHere": "Drop a PDF here or click to choose",
+    "help": "application/pdf, up to 50 MB",
+    "uploading": "Uploading…",
+    "uploaded": "Uploaded. Processing in the background…"
+  },
+  "pipeline": {
+    "title": "Pipeline status",
+    "INGEST": "Reading PDF",
+    "CLASSIFY": "Classifying sheets",
+    "EXTRACT_SCHEDULES": "Extracting schedules",
+    "EXTRACT_ROOMS": "Extracting rooms",
+    "status": {
+      "QUEUED": "Queued",
+      "RUNNING": "Running",
+      "DONE": "Done",
+      "FAILED": "Failed"
+    }
+  },
+  "document": {
+    "status": {
+      "UPLOADED": "Uploaded",
+      "PROCESSING": "Processing",
+      "READY": "Ready",
+      "FAILED": "Failed"
+    }
+  },
+  "table": {
+    "empty": "No takeoff items yet — upload a drawing PDF to start.",
+    "headers": {
+      "tag": "Tag",
+      "description": "Description",
+      "unit": "Unit",
+      "qtyAi": "AI qty",
+      "qtyFinal": "Final qty",
+      "confidence": "Confidence",
+      "flags": "Flags"
+    },
+    "categoryGroup": "Category",
+    "groupNoTag": "—"
+  },
+  "filter": {
+    "all": "All",
+    "needsReview": "Needs review"
+  },
+  "category": {
+    "ROOM": "Rooms",
+    "DOOR": "Doors",
+    "WINDOW": "Windows",
+    "FLOOR_FINISH": "Floor finishes",
+    "WALL_FINISH": "Wall finishes",
+    "CEILING": "Ceilings",
+    "SCREED": "Screeds",
+    "PAINT": "Paint",
+    "PLASTER": "Plaster",
+    "BLOCKWORK": "Blockwork",
+    "WATERPROOFING": "Waterproofing",
+    "METAL": "Metalwork",
+    "GRC": "GRC",
+    "JOINERY": "Joinery",
+    "SANITARY": "Sanitary",
+    "EXTERNAL": "External works",
+    "STRUCTURE_PROV": "Structural (provisional)",
+    "MEP_PROV": "MEP (provisional)",
+    "OTHER": "Other"
+  },
+  "flagSeverity": {
+    "ERROR": "Error",
+    "WARN": "Warning",
+    "INFO": "Info"
+  },
+  "projectFlags": {
+    "title": "Project-wide flags"
+  },
+  "errors": {
+    "uploadFailed": "Upload failed: {{message}}",
+    "loadFailed": "Could not load takeoff data."
+  }
+}

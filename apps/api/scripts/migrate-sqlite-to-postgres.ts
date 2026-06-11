@@ -11,13 +11,17 @@
  * the source is `LEGACY_SQLITE_URL` (defaults to `apps/api/data/app.db`).
  */
 import { Database } from 'bun:sqlite'
+import path from 'node:path'
 import { prisma } from '../src/db'
 
 interface Row {
   [key: string]: unknown
 }
 
-const LEGACY_URL = process.env.LEGACY_SQLITE_URL ?? 'apps/api/data/app.db'
+// Default to apps/api/data/app.db resolved from this script's location, so the
+// migration runs from any cwd (repo root, apps/api, anywhere).
+const DEFAULT_SQLITE = path.resolve(import.meta.dir, '../data/app.db')
+const LEGACY_URL = process.env.LEGACY_SQLITE_URL ?? DEFAULT_SQLITE
 
 // ---------------------------------------------------------------------------
 // SQLite reader

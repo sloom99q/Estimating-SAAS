@@ -190,7 +190,8 @@ export function registerMaterialRoutes(router: Router): void {
       const existing = await db.material.findFirst({
         where: { id: ctx.params.id, deletedAt: null },
       })
-      if (!existing) return emptyResponse()
+      // ADR-011: DELETE matches PATCH — 404 for missing or cross-tenant.
+      if (!existing) return errorResponse(404, 'Material not found')
       await db.material.update({
         where: { id: existing.id },
         data: { deletedAt: new Date() },

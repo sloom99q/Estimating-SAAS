@@ -189,7 +189,8 @@ export function registerSupplierRoutes(router: Router): void {
       const existing = await db.supplier.findFirst({
         where: { id: ctx.params.id, deletedAt: null },
       })
-      if (!existing) return emptyResponse()
+      // ADR-011: DELETE matches PATCH — 404 for missing or cross-tenant.
+      if (!existing) return errorResponse(404, 'Supplier not found')
       const now = new Date()
       // Cascade: soft-delete every (material, supplier) link this supplier
       // owns. PriceSnapshots stay (immutable history) — never deleted.
