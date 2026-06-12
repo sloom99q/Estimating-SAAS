@@ -44,6 +44,8 @@ export interface JobDto {
   result: unknown
   /** Sprint-8 S8-6: 'live' / 'stub' / null (rows pre-dating the column). */
   aiMode: 'live' | 'stub' | null
+  /** Sprint-8 S8-8 R1: per-job model the worker resolved (sonnet, opus, …). */
+  aiModel: string | null
   createdAt: string
   startedAt: string | null
   finishedAt: string | null
@@ -238,6 +240,32 @@ export interface JobLite {
 }
 export async function fetchJob(jobId: string): Promise<JobLite> {
   return withAuth<JobLite>(`/api/jobs/${jobId}`)
+}
+
+/**
+ * Sprint-10 PA-2 — Retry a FAILED pipeline stage. Re-enqueues a fresh
+ * job of the same type. Idempotent — see handlers' natural-key UPSERT
+ * (Sprint-7 S7-1).
+ */
+export async function retryJob(jobId: string): Promise<{ id: string; type: string }> {
+  return withAuth<{ id: string; type: string }>(`/api/jobs/${jobId}/retry`, { method: 'POST' })
+}
+
+/**
+ * Sprint-10 PA-4 — Documents list (with FAILED visibility) per project.
+ * Returns the document row + cheap job-state aggregates so the SPA can
+ * surface failures at the list level without round-tripping each
+ * document.
+ */
+export interface DocumentListEntry extends DocumentDto {
+  jobs: { failed: number; running: number; queued: number; total: number }
+  firstFailedJob: { id: string; type: string; error: string } | null
+}
+export async function fetchProjectDocuments(projectId: string): Promise<DocumentListEntry[]> {
+  const body = await withAuth<{ documents: DocumentListEntry[] }>(
+    `/api/projects/${projectId}/documents`,
+  )
+  return body.documents
 }
 
 /**

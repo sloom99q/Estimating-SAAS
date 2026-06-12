@@ -13,6 +13,8 @@ import {
 } from '@mantine/core'
 import { useTranslation } from 'react-i18next'
 import { useParams } from 'react-router'
+import { DocumentsListCard } from '../components/DocumentsListCard'
+import { EnvBanner } from '../components/EnvBanner'
 import { GenerateBoqCard } from '../components/GenerateBoqCard'
 import { TakeoffTable } from '../components/TakeoffTable'
 import { PipelineStatus } from '../components/PipelineStatus'
@@ -75,7 +77,11 @@ export function TakeoffPage() {
         <Text c="dimmed">{t('page.subtitle')}</Text>
       </Stack>
 
+      <EnvBanner />
+
       <UploadCard projectId={projectId} onUploaded={setActiveDocumentId} />
+
+      <DocumentsListCard projectId={projectId} onSelect={setActiveDocumentId} />
 
       {docBundle.data ? <PipelineStatus bundle={docBundle.data} /> : null}
 

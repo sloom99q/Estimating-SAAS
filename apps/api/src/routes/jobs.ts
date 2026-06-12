@@ -114,6 +114,33 @@ export function registerJobRoutes(router: Router): void {
     }),
   )
 
+  /**
+   * Sprint-10 PA-2 — Retry a FAILED job. Re-enqueues a fresh job of the
+   * same type with the same payload. Idempotent: handlers UPSERT by
+   * natural key so the retried stage doesn't double-bill rows the prior
+   * (partial) run already saved.
+   */
+  router.post(
+    '/api/jobs/:id/retry',
+    requireAuth(async (_req, ctx) => {
+      const db = tenantDb(ctx.organizationId)
+      const failed = await db.job.findFirst({ where: { id: ctx.params.id } })
+      if (!failed) return errorResponse(404, 'Job not found')
+      if (failed.status !== 'FAILED') {
+        return errorResponse(409, `Cannot retry a job in status ${failed.status}`)
+      }
+      const fresh = await db.job.create({
+        data: {
+          organizationId: ctx.organizationId,
+          projectId: failed.projectId,
+          type: failed.type,
+          payload: (failed.payload ?? {}) as object,
+        },
+      })
+      return jsonResponse({ id: fresh.id, type: fresh.type }, 201)
+    }),
+  )
+
   router.get(
     '/api/jobs',
     requireAuth(async (_req, ctx) => {

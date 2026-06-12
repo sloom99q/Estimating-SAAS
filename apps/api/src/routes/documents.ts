@@ -191,6 +191,52 @@ export function registerDocumentRoutes(router: Router): void {
    * while INGEST..EXTRACT_* run; we keep the response shape stable so the
    * polling client can diff cheaply.
    */
+  /**
+   * Sprint-10 PA-4 — Documents list per project. FAILED runs need to be
+   * findable without archaeology: this returns every Document with a
+   * cheap aggregate of its pipeline jobs so the SPA can flag the
+   * problem at the LIST level.
+   */
+  router.get(
+    '/api/projects/:id/documents',
+    requireAuth(async (_req, ctx) => {
+      const db = tenantDb(ctx.organizationId)
+      const project = await db.project.findFirst({
+        where: { id: ctx.params.id, deletedAt: null },
+        select: { id: true },
+      })
+      if (!project) return errorResponse(404, 'Project not found')
+      const docs = await db.document.findMany({
+        where: { projectId: project.id, deletedAt: null },
+        orderBy: { createdAt: 'desc' },
+      })
+      const jobs = await db.job.findMany({
+        where: {
+          projectId: project.id,
+          type: { in: [...PIPELINE_TYPES] },
+        },
+        orderBy: { createdAt: 'desc' },
+      })
+      const summary = docs.map((d) => {
+        const docJobs = jobs.filter((j) => {
+          const payload = (j.payload ?? {}) as Record<string, unknown>
+          return payload.documentId === d.id
+        })
+        const failed = docJobs.filter((j) => j.status === 'FAILED')
+        const running = docJobs.filter((j) => j.status === 'RUNNING')
+        const queued = docJobs.filter((j) => j.status === 'QUEUED')
+        return {
+          ...documentDto(d),
+          jobs: { failed: failed.length, running: running.length, queued: queued.length, total: docJobs.length },
+          firstFailedJob: failed[0]
+            ? { id: failed[0].id, type: failed[0].type, error: (failed[0].error ?? '').slice(0, 280) }
+            : null,
+        }
+      })
+      return jsonResponse({ documents: summary })
+    }),
+  )
+
   router.get(
     '/api/documents/:id',
     requireAuth(async (_req, ctx) => {

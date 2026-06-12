@@ -1,6 +1,8 @@
-import { Alert, Badge, Card, Group, Progress, Stack, Text } from '@mantine/core'
+import { Alert, Badge, Button, Card, Group, Progress, Stack, Text } from '@mantine/core'
+import { notifications } from '@mantine/notifications'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
-import type { DocumentBundle, JobDto } from '../api/takeoff.api'
+import { retryJob, type DocumentBundle, type JobDto } from '../api/takeoff.api'
 
 // Sprint-8 S8-7: include EXTRACT_FINISH_LEGEND (Sprint 6 stage). The Sprint 5
 // stepper omitted it because the stage didn't exist when this list was first
@@ -32,15 +34,50 @@ function latestByType(jobs: JobDto[]): Record<string, JobDto> {
 
 export function PipelineStatus({ bundle }: { bundle: DocumentBundle }) {
   const { t } = useTranslation('takeoff')
+  const qc = useQueryClient()
+  // Sprint-10 PA-2 — Retry a FAILED pipeline stage. Re-enqueues only
+  // that stage; downstream stages chain on completion thanks to the
+  // chainGuard (idempotency standing rule).
+  const retryMutation = useMutation({
+    mutationFn: (jobId: string) => retryJob(jobId),
+    onSuccess: (j) => {
+      notifications.show({
+        color: 'green',
+        title: 'Stage re-enqueued',
+        message: `${j.type} is queued — the worker will pick it up shortly.`,
+      })
+      void qc.invalidateQueries({ queryKey: ['documents', bundle.document.id] })
+    },
+    onError: (err) => {
+      notifications.show({
+        color: 'red',
+        title: 'Retry failed',
+        message: err instanceof Error ? err.message : 'Unknown error',
+      })
+    },
+  })
   const latest = latestByType(bundle.jobs)
   const done = STAGES.filter((s) => latest[s]?.status === 'DONE').length
   const total = STAGES.length
-  // S8-7 stub banner — if any pipeline job ran in stub mode, the operator
-  // sees it loud. The S7-5 wasted run came from a stub-mode job nobody
-  // noticed; never again.
+  // P-package P-TOP — derive provenance from DATA, not from env. Show a
+  // banner for *both* sides: yellow STUB DATA when any job ran with
+  // aiMode=stub, red LIVE DATA when at least one job ran live and zero
+  // stubs. The S10 walkthrough that triggered this rewrite ran live but
+  // showed no banner at all — the asymmetry was the bug.
   const stubJobs = bundle.jobs.filter((j) => j.aiMode === 'stub')
+  const liveJobs = bundle.jobs.filter((j) => j.aiMode === 'live')
   const hasStub = stubJobs.length > 0
+  const hasLive = liveJobs.length > 0
+  const mixed = hasStub && hasLive
   const failed = bundle.jobs.find((j) => j.status === 'FAILED')
+  const liveModelCounts = new Map<string, number>()
+  for (const j of liveJobs) {
+    if (!j.aiModel) continue
+    liveModelCounts.set(j.aiModel, (liveModelCounts.get(j.aiModel) ?? 0) + 1)
+  }
+  const liveModelLabel = Array.from(liveModelCounts.entries())
+    .map(([m, n]) => `${m}×${n}`)
+    .join(' · ')
 
   return (
     <Card withBorder>
@@ -52,17 +89,65 @@ export function PipelineStatus({ bundle }: { bundle: DocumentBundle }) {
           </Badge>
         </Group>
         {hasStub ? (
-          <Alert color="yellow" variant="light" title="Stub mode">
+          <Alert
+            color="yellow"
+            variant="filled"
+            title={
+              <Group gap="xs">
+                <Badge color="yellow" variant="filled" size="lg">
+                  STUB DATA
+                </Badge>
+                <Text c="white" size="sm">
+                  {mixed ? `${stubJobs.length} stub jobs · ${liveJobs.length} live` : 'fixtures only — $0 spend'}
+                </Text>
+              </Group>
+            }
+          >
             {stubJobs.length} pipeline job{stubJobs.length === 1 ? '' : 's'} ran with
-            <code style={{ marginInline: 4 }}>AI_MODE=stub</code>
-            — deterministic stub outputs, no Anthropic calls. Restart the API with
-            <code style={{ marginInline: 4 }}>AI_MODE=live</code>
-            before a real demo or re-run.
+            <code style={{ marginInline: 4 }}>AI_MODE=stub</code>. Outputs are deterministic
+            fixtures; door/window/room rows are NOT extracted from your PDF. Restart the API
+            with <code style={{ marginInline: 4 }}>AI_MODE=live</code> for a real run.
+          </Alert>
+        ) : hasLive ? (
+          <Alert
+            color="red"
+            variant="light"
+            title={
+              <Group gap="xs">
+                <Badge color="red" variant="filled" size="lg">
+                  LIVE DATA
+                </Badge>
+                <Text size="sm" c="dimmed">
+                  {liveModelLabel || 'real Anthropic calls'}
+                </Text>
+              </Group>
+            }
+          >
+            Every row below was extracted by the real model — counts/dims/areas reflect what
+            the vision pass actually returned. This run was billed.
           </Alert>
         ) : null}
         {failed ? (
-          <Alert color="red" variant="light" title={`${failed.type} failed`}>
-            {failed.error ?? 'No error message recorded.'}
+          <Alert
+            color="red"
+            variant="light"
+            title={
+              <Group justify="space-between" wrap="nowrap">
+                <Text fw={600}>{failed.type} failed</Text>
+                <Button
+                  size="xs"
+                  color="red"
+                  variant="filled"
+                  onClick={() => retryMutation.mutate(failed.id)}
+                  loading={retryMutation.isPending}
+                >
+                  Retry stage
+                </Button>
+              </Group>
+            }
+          >
+            {failed.error ?? 'No error message recorded.'} Re-queueing just this stage is
+            idempotent — already-classified work won't double-bill.
           </Alert>
         ) : null}
         <Progress value={(done / total) * 100} />
