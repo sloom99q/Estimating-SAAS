@@ -6,16 +6,42 @@ import { requireAuth } from '../middleware/auth'
 import type { Router } from './router'
 import { errorResponse, jsonResponse } from '../utils/json'
 
+/**
+ * Sprint-9 S9-3: closed legend-code vocabulary the SPA dropdown offers
+ * for the per-room finish override. Anything outside this set is
+ * rejected at the API boundary — the human can only assign a real legend
+ * code (or the BATHROOM sentinel), not invent one.
+ */
+const FINISH_CODE_VOCAB = [
+  'ST01',
+  'ST02',
+  'ST03',
+  'PR01',
+  'PR03',
+  'WD01',
+  'FN01',
+  'FN02',
+  'FN03',
+  'FN04',
+  'LS01',
+  'LS02',
+  'BATHROOM',
+] as const
+
 const PATCH_BODY = z
   .object({
     qtyFinal: z
       .union([z.number().finite().nonnegative(), z.null()])
       .optional(),
     status: z.enum(['AI', 'EDITED', 'APPROVED']).optional(),
+    /** Sprint-9 S9-3 — per-room finish override. Null clears the code. */
+    finishCode: z
+      .union([z.enum(FINISH_CODE_VOCAB), z.null()])
+      .optional(),
   })
   .refine(
-    (b) => b.qtyFinal !== undefined || b.status !== undefined,
-    'At least one of qtyFinal / status is required',
+    (b) => b.qtyFinal !== undefined || b.status !== undefined || b.finishCode !== undefined,
+    'At least one of qtyFinal / status / finishCode is required',
   )
 
 function takeoffDto(row: {
@@ -185,16 +211,35 @@ export function registerTakeoffRoutes(router: Router): void {
         String(parsed.data.qtyFinal ?? '') !==
           String(existing.qtyAi === null ? '' : existing.qtyAi.toString())
 
+      // S9-3 finishCode change detection. The current code lives in
+      // meta.finish_code from the colour mapper / vision pass.
+      const existingMeta = (existing.meta ?? {}) as Record<string, unknown>
+      const currentFinish =
+        typeof existingMeta.finish_code === 'string' ? existingMeta.finish_code : null
+      const finishChanged =
+        parsed.data.finishCode !== undefined &&
+        (parsed.data.finishCode ?? null) !== currentFinish
+
       const data: Record<string, unknown> = {}
       if (parsed.data.qtyFinal !== undefined) data.qtyFinal = parsed.data.qtyFinal
       if (parsed.data.status !== undefined) data.status = parsed.data.status
-      // Auto-promote AI → EDITED when qty diverges and the caller did not
-      // explicitly send a status. Keeps the review table's "needs review"
-      // filter (default AI rows) honest.
-      if (qtyChanged && parsed.data.status === undefined) data.status = 'EDITED'
+      // Auto-promote AI → EDITED when qty OR finish diverges and the caller
+      // did not explicitly send a status. Keeps the review table's "needs
+      // review" filter (default AI rows) honest.
+      if ((qtyChanged || finishChanged) && parsed.data.status === undefined) data.status = 'EDITED'
+
+      // S9-3 meta write — keep every other key, set the new finish_code.
+      if (finishChanged) {
+        data.meta = {
+          ...existingMeta,
+          finish_code: parsed.data.finishCode ?? null,
+          // Stamp the override source so QUANTIFY and the BOQ know this
+          // came from the reviewer's hand, not the colour mapper.
+          finishSource: 'human-override',
+        } as Prisma.JsonObject
+      }
 
       const writes: Prisma.PrismaPromise<unknown>[] = []
-      // Sprint-1 tenant extension scopes db.* — use the same db here.
       writes.push(
         db.takeoffItem.update({
           where: { id: existing.id },
@@ -212,6 +257,25 @@ export function registerTakeoffRoutes(router: Router): void {
               aiValue: existing.qtyAi === null ? null : existing.qtyAi.toString(),
               humanValue: parsed.data.qtyFinal === null ? null : String(parsed.data.qtyFinal),
               reason: 'Inline edit from review table',
+              userId: ctx.user.id,
+            },
+          }),
+        )
+      }
+      // S9-3 Correction row for finish_code so the data-quality flow can
+      // see what the colour mapper got wrong and feed it back into the
+      // tuning loop.
+      if (finishChanged) {
+        writes.push(
+          db.correction.create({
+            data: {
+              organizationId: ctx.organizationId,
+              entity: 'TakeoffItem',
+              entityId: existing.id,
+              field: 'finish_code',
+              aiValue: currentFinish,
+              humanValue: parsed.data.finishCode ?? null,
+              reason: 'Per-room finish dropdown',
               userId: ctx.user.id,
             },
           }),

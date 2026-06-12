@@ -1,7 +1,13 @@
 import { useCallback, useMemo, useState } from 'react'
-import { Badge, Group, NumberInput, Stack, Table, Text, Tooltip } from '@mantine/core'
+import { Badge, Group, NumberInput, Select, Stack, Table, Text, Tooltip } from '@mantine/core'
 import { useTranslation } from 'react-i18next'
-import type { TakeoffBundle, TakeoffItemDto, ValidationFlagDto } from '../api/takeoff.api'
+import {
+  FINISH_CODE_VOCAB,
+  type FinishCode,
+  type TakeoffBundle,
+  type TakeoffItemDto,
+  type ValidationFlagDto,
+} from '../api/takeoff.api'
 import { usePatchTakeoffItem } from '../api/useTakeoff'
 import { ConfidenceChip } from './ConfidenceChip'
 
@@ -39,6 +45,45 @@ function flagSeverityColor(s: ValidationFlagDto['severity']): string {
   if (s === 'ERROR') return 'red'
   if (s === 'WARN') return 'yellow'
   return 'blue'
+}
+
+/**
+ * Sprint-9 S9-3 — per-room finish dropdown. Closed 12-code vocab + the
+ * BATHROOM sentinel. Edits POST to PATCH /api/takeoff-items/:id and the
+ * server writes a Correction row so the data-quality loop captures
+ * what the colour mapper got wrong.
+ */
+function FinishCodeCell({
+  item,
+  onSave,
+  saving,
+}: {
+  item: TakeoffItemDto
+  onSave: (next: FinishCode | null) => void
+  saving: boolean
+}) {
+  const meta = (item.meta ?? {}) as { finish_code?: string | null; finishSource?: string | null }
+  const current = (meta.finish_code ?? null) as FinishCode | null
+  return (
+    <Select
+      value={current ?? null}
+      onChange={(v) => onSave(v as FinishCode | null)}
+      data={FINISH_CODE_VOCAB.map((c) => ({ value: c, label: c }))}
+      placeholder="—"
+      size="xs"
+      clearable
+      searchable
+      disabled={saving}
+      style={{ maxWidth: 130 }}
+      rightSection={
+        meta.finishSource === 'human-override' ? (
+          <Tooltip label="Set by reviewer">
+            <Badge size="xs" variant="dot" color="grape" />
+          </Tooltip>
+        ) : null
+      }
+    />
+  )
 }
 
 function QtyFinalCell({
@@ -108,6 +153,22 @@ export function TakeoffTable({ projectId, bundle, needsReviewOnly }: TakeoffTabl
     [patch],
   )
 
+  // S9-3 finish-code override handler — only meaningful for ROOM rows.
+  const handleFinishSave = useCallback(
+    (item: TakeoffItemDto, next: FinishCode | null) => {
+      setSavingId(item.id)
+      patch.mutate(
+        { id: item.id, payload: { finishCode: next } },
+        {
+          onSettled: () => {
+            setSavingId((id) => (id === item.id ? null : id))
+          },
+        },
+      )
+    },
+    [patch],
+  )
+
   if (bundle.items.length === 0) {
     return <Text c="dimmed">{t('table.empty')}</Text>
   }
@@ -128,6 +189,9 @@ export function TakeoffTable({ projectId, bundle, needsReviewOnly }: TakeoffTabl
                 <Table.Th>{t('table.headers.unit')}</Table.Th>
                 <Table.Th>{t('table.headers.qtyAi')}</Table.Th>
                 <Table.Th>{t('table.headers.qtyFinal')}</Table.Th>
+                {category === 'ROOM' ? (
+                  <Table.Th>{t('table.headers.finish', { defaultValue: 'Finish' })}</Table.Th>
+                ) : null}
                 <Table.Th>{t('table.headers.confidence')}</Table.Th>
                 <Table.Th>{t('table.headers.flags')}</Table.Th>
               </Table.Tr>
@@ -157,6 +221,15 @@ export function TakeoffTable({ projectId, bundle, needsReviewOnly }: TakeoffTabl
                         onSave={(next) => handleSave(item, next)}
                       />
                     </Table.Td>
+                    {category === 'ROOM' ? (
+                      <Table.Td>
+                        <FinishCodeCell
+                          item={item}
+                          saving={saving}
+                          onSave={(next) => handleFinishSave(item, next)}
+                        />
+                      </Table.Td>
+                    ) : null}
                     <Table.Td>
                       <ConfidenceChip confidence={item.confidence} />
                     </Table.Td>

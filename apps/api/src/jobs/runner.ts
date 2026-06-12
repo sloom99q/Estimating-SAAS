@@ -3,6 +3,37 @@ import { prisma } from '../db'
 import { HANDLERS } from './handlers'
 import type { JobRecord } from './types'
 
+/**
+ * Sprint-9 S9-4 — retry wrapper for prisma.$queryRawUnsafe against transient
+ * Neon DSN drops. The S8-8 baseline run lost ~5 minutes mid-CLASSIFY to a
+ * "Server has closed the connection" error that the runner could've
+ * survived. 3 tries with linear backoff, only retries on the Prisma
+ * "connection closed" signature.
+ */
+async function queryRawWithRetry<T = unknown>(
+  sql: string,
+  maxAttempts = 3,
+): Promise<T[]> {
+  let attempt = 0
+  let lastErr: unknown
+  while (attempt < maxAttempts) {
+    attempt += 1
+    try {
+      return await prisma.$queryRawUnsafe<T[]>(sql)
+    } catch (err) {
+      lastErr = err
+      const msg = err instanceof Error ? err.message : String(err)
+      const retriable =
+        /connection|socket|closed|terminated|reset|ECONNRESET|P1001|P2024/i.test(msg)
+      if (!retriable || attempt >= maxAttempts) throw err
+      const delayMs = 250 * attempt
+      console.warn(`[worker] queryRawUnsafe retry ${attempt}/${maxAttempts} after ${delayMs} ms — ${msg.slice(0, 120)}`)
+      await new Promise((r) => setTimeout(r, delayMs))
+    }
+  }
+  throw lastErr
+}
+
 const TICK_MS = Number(process.env.WORKER_TICK_MS ?? 1500)
 const MAX_ATTEMPTS = 3
 const BACKOFF_BASE_SECONDS = 2
@@ -80,7 +111,7 @@ export async function tick(): Promise<JobRecord | null> {
   // on (status, scheduledFor, createdAt) and (organizationId, createdAt) from
   // Sprint-1. Postgres's `FOR UPDATE SKIP LOCKED` makes concurrent workers
   // safe even though we resolve the org in user space.
-  const rows = await prisma.$queryRawUnsafe<JobRecord[]>(`
+  const rows = await queryRawWithRetry<JobRecord>(`
     WITH due_jobs AS (
       SELECT id, "organizationId", "createdAt"
       FROM "jobs"

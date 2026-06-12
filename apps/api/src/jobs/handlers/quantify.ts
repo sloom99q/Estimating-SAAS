@@ -40,6 +40,7 @@
 import type { Prisma, TakeoffCategory } from '@prisma/client'
 import { prisma } from '../../db'
 import type { JobHandler, JobRecord } from '../types'
+import { isAreaStatement, selectBillableRooms } from './_roomSelector'
 
 interface QuantifyPayload {
   projectId: string
@@ -83,12 +84,18 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
   // finishes). Both live in TakeoffItem under different category + meta.kind.
   // S8-5: also look up whether ROOMS_AREA_RECONCILE fired — if so, the
   // unassigned floor bucket gets labelled SUSPECT in the BOQ.
-  const [rooms, legendItems, areaReconcileFlag] = await Promise.all([
+  //
+  // S9-0 single source of truth: we now query *both* ROOM and
+  // AREA_STATEMENT rows so the selector can drop the building-level
+  // statements consistently with the scorer. Prior Sprint-8 BOQs counted
+  // the 972 m² "Proposed Villa" row as a room and ended up with a
+  // 1,420 m² CL03 ceiling line — exactly the integrity bug S9-0 closes.
+  const [allRoomyRows, legendItems, areaReconcileFlag] = await Promise.all([
     prisma.takeoffItem.findMany({
       where: {
         organizationId: job.organizationId,
         projectId: payload.projectId,
-        category: 'ROOM',
+        category: { in: ['ROOM', 'AREA_STATEMENT'] },
         deletedAt: null,
       },
       orderBy: { createdAt: 'asc' },
@@ -124,6 +131,15 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
     excludedRooms: [],
   }
 
+  // S9-0 single-source selector: drop building-level AREA_STATEMENT rows
+  // and any legacy ROOM rows that still match the area-statement pattern
+  // (older runs persisted before S9-0). The scorer uses the same function.
+  const rooms = selectBillableRooms(allRoomyRows)
+  summary.excludedRooms.push(
+    ...allRoomyRows
+      .filter((r) => isAreaStatement(r.description) || r.category === 'AREA_STATEMENT')
+      .map((r) => r.description.split('—')[0]!.trim()),
+  )
   if (rooms.length === 0) {
     return { ok: true, derived: summary }
   }

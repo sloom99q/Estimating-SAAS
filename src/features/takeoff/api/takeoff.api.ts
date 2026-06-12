@@ -121,9 +121,33 @@ export async function fetchTakeoffBundle(projectId: string): Promise<TakeoffBund
   return withAuth<TakeoffBundle>(`/api/projects/${projectId}/takeoff-items`)
 }
 
+/**
+ * Sprint-9 S9-3: closed legend-code vocabulary the SPA dropdown offers
+ * for the per-room finish override. Mirrors the API's
+ * FINISH_CODE_VOCAB; keep these in sync.
+ */
+export const FINISH_CODE_VOCAB = [
+  'ST01',
+  'ST02',
+  'ST03',
+  'PR01',
+  'PR03',
+  'WD01',
+  'FN01',
+  'FN02',
+  'FN03',
+  'FN04',
+  'LS01',
+  'LS02',
+  'BATHROOM',
+] as const
+export type FinishCode = (typeof FINISH_CODE_VOCAB)[number]
+
 export interface PatchTakeoffPayload {
   qtyFinal?: number | null
   status?: 'AI' | 'EDITED' | 'APPROVED'
+  /** Sprint-9 S9-3 — per-room finish override. Null clears the code. */
+  finishCode?: FinishCode | null
 }
 
 export async function patchTakeoffItem(

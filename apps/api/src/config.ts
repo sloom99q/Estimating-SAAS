@@ -2,7 +2,42 @@
  * Read and validate runtime env. Bun loads `.env` automatically; we still
  * sanity-check the required values so the server fails fast at boot rather
  * than 500-ing on the first request.
+ *
+ * Sprint-9 S9-4 — `.env` is for non-secret config (AI_MODE, DATABASE_URL,
+ * model names). Secrets (ANTHROPIC_API_KEY, JWT_SECRET) live in
+ * `.env.secrets` which is gitignored and never read/printed/edited by
+ * automated sessions. We load it explicitly here so a freshly-cloned dev
+ * never has the key in their VCS-tracked file.
  */
+import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+
+function loadSecretsFile(): void {
+  const candidate = join(process.cwd(), '.env.secrets')
+  if (!existsSync(candidate)) return
+  const text = readFileSync(candidate, 'utf-8')
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith('#')) continue
+    const idx = trimmed.indexOf('=')
+    if (idx < 0) continue
+    const key = trimmed.slice(0, idx).trim()
+    let value = trimmed.slice(idx + 1).trim()
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1)
+    }
+    // Don't overwrite values already present in process.env — explicit
+    // shell exports win over the file.
+    if (process.env[key] === undefined) {
+      process.env[key] = value
+    }
+  }
+}
+loadSecretsFile()
+
 function required(name: string, fallback?: string): string {
   const value = process.env[name] ?? fallback
   if (!value) {

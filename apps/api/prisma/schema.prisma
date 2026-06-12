@@ -60,6 +60,11 @@ enum DocumentStatus {
 // Using WINDOW; flag for architect review at sprint close.
 enum TakeoffCategory {
   ROOM
+  /// Sprint-9 S9-0: building-level totals ("Proposed Villa 972 m²",
+  /// "ACCESSIBLE ROOF 74 m²", "PLAN AREA") that the upstream vision
+  /// pass keeps emitting as rooms. They are NEVER billable rooms; both
+  /// QUANTIFY and the scorer drop them via selectBillableRooms.
+  AREA_STATEMENT
   DOOR
   WINDOW
   FLOOR_FINISH
@@ -185,6 +190,12 @@ model Project {
   location       String
   type           String
   status         String    @default("lead")
+  /// Sprint-9 S9-1 — declared Built-Up Area in m². Populated from the
+  /// cover-sheet text layer ("TOTAL BUA 6,286 SQ.FT" → 584) by the
+  /// EXTRACT_ROOMS handler. Drives ROOMS_AREA_RECONCILE; null when the
+  /// document has no recognisable BUA declaration (in which case the
+  /// validator skips, not fails).
+  buaM2          Decimal?  @db.Decimal(10, 2)
   createdAt      DateTime  @default(now()) @db.Timestamptz(6)
   updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
   deletedAt      DateTime? @db.Timestamptz(6)

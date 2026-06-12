@@ -20,6 +20,7 @@ import path from 'node:path'
 import { prisma } from '../src/db'
 import { normalizeFloor, setFloorAliases } from '../src/ai/floorNormalize'
 import { normalizeRoomName as handlerNormalizeRoomName } from '../src/jobs/handlers/extractRooms'
+import { selectBillableRooms } from '../src/jobs/handlers/_roomSelector'
 
 interface GroundTruthDoor {
   tag: string
@@ -352,14 +353,18 @@ async function main(): Promise<void> {
   console.log()
 
   // -------- ROOMS --------
-  const rooms = await prisma.takeoffItem.findMany({
+  // S9-0: pull both ROOM and AREA_STATEMENT then run the same selector
+  // QUANTIFY uses, so the two can't disagree about "how many billable
+  // rooms is this set".
+  const rawRooms = await prisma.takeoffItem.findMany({
     where: {
       organizationId: doc.organizationId,
       projectId: doc.projectId,
-      category: 'ROOM',
+      category: { in: ['ROOM', 'AREA_STATEMENT'] },
       deletedAt: null,
     },
   })
+  const rooms = selectBillableRooms(rawRooms)
   // S8-2: key by name only and choose the best-scored row per name (area >
   // tag > confidence). Floor is informational on the surviving row.
   const roomsByName = new Map<string, typeof rooms[number]>()

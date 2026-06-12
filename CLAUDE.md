@@ -68,6 +68,23 @@ of Phase 1 ("so future phases don't become a mess").
   (shared) in the component — never put the resolver in `domain/`.
 - Money is a decimal **string** + currency; never `Number()` it for math.
 
+## Secrets (Sprint-9 S9-4) — HARD RULE
+
+`apps/api/.env.secrets` holds `ANTHROPIC_API_KEY` (and any future
+credentials). Loaded by `apps/api/src/config.ts` after `process.env` so
+shell exports still win. **Automated sessions never read, print, edit,
+grep, or `cat` this file** — not for "just checking", not redacted, not
+into a tmp file. The key in your context is a key in your context.
+
+The only allowed operations are:
+- Reference its existence in prose ("the key lives in `.env.secrets`")
+- Confirm whether the file is present (`ls`/`test -f`, output is
+  filename only)
+- Tell the owner to add / rotate / remove a value, by hand
+
+`AI_MODE`, model overrides, DSNs, ports, and other non-secret config
+stay in `.env` — that file is fine to read and edit.
+
 ## Future seams (don't implement unless asked)
 
 `features/ai` and `features/visualization` are typed contracts + READMEs only.

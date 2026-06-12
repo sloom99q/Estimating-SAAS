@@ -238,29 +238,69 @@ function duplicateTag(ctx: ValidatorContext): ValidationResult[] {
  * doesn't compare against the wrong total.
  */
 const BUA_LABEL_RE = /(?:BUA|BUILT[\s-]*UP\s*AREA)/i
-const BUA_NUMBER_RE = /([0-9]{2,5}(?:\.[0-9]{1,2})?)\s*(?:m\s*²|m2|sqm|m\.?\s*sq\.?)/i
+const BUA_NUMBER_M2_RE = /([0-9]{1,3}(?:[,. ][0-9]{3})*(?:\.[0-9]{1,2})?)\s*(?:m\s*²|m2|sqm|m\.?\s*sq\.?)/i
+// Sprint-9 S9-1: GCC drawing sets quote BUA in SQ.FT (e.g. Plot 4357's cover
+// prints "TOTAL BUILT-UP AREA SQ.FT 6,286"). 1 sq.ft = 0.092903 m². We
+// accept either side of the label.
+const BUA_NUMBER_SQFT_RE = /([0-9]{1,3}(?:[,. ][0-9]{3})*(?:\.[0-9]{1,2})?)\s*(?:SQ\s*\.?\s*FT|sqft)/i
+const SQFT_TO_M2 = 0.09290304
 
+function parseNumberWithSeparators(raw: string): number {
+  // Accept "6,286", "6.286", "6 286" — strip every thousands separator,
+  // keep the rightmost dot as decimal only if it leaves 1-2 digits.
+  const cleaned = raw.replace(/[,\s]/g, '')
+  const dots = (cleaned.match(/\./g) ?? []).length
+  if (dots <= 1) return Number.parseFloat(cleaned)
+  // Two dots — last one is decimal, previous ones are thousands.
+  const lastDot = cleaned.lastIndexOf('.')
+  const integerPart = cleaned.slice(0, lastDot).replace(/\./g, '')
+  const fractionPart = cleaned.slice(lastDot + 1)
+  return Number.parseFloat(`${integerPart}.${fractionPart}`)
+}
+
+// Reverse layout: "SQ.FT 6,286" — pdftotext sometimes swaps the columns.
+const BUA_SQFT_NUMBER_RE = /(?:SQ\s*\.?\s*FT|sqft)\s+([0-9]{1,3}(?:[,. ][0-9]{3})*(?:\.[0-9]{1,2})?)/i
+
+function tryMatchOnLine(line: string): number | null {
+  const m2 = line.match(BUA_NUMBER_M2_RE)
+  if (m2) return parseNumberWithSeparators(m2[1]!)
+  const sqft = line.match(BUA_NUMBER_SQFT_RE)
+  if (sqft) return parseNumberWithSeparators(sqft[1]!) * SQFT_TO_M2
+  const sqftRev = line.match(BUA_SQFT_NUMBER_RE)
+  if (sqftRev) return parseNumberWithSeparators(sqftRev[1]!) * SQFT_TO_M2
+  return null
+}
+
+/**
+ * Sprint-8 S8-5 / Sprint-9 S9-1: recover the project's declared Built-Up
+ * Area from cover/register-sheet text. Accepts m² or sq.ft (auto-converts).
+ * Returns null if the label is missing or two conflicting numbers appear
+ * — better to skip the validator than compare to the wrong total.
+ */
 export function recoverBuaFromText(text: string): number | null {
   const matches: number[] = []
   const lines = text.split(/\r?\n/)
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!
     if (!BUA_LABEL_RE.test(line)) continue
-    // Same line first
-    const sameLine = line.match(BUA_NUMBER_RE)
-    if (sameLine) {
-      matches.push(Number.parseFloat(sameLine[1]!))
+    const sameLine = tryMatchOnLine(line)
+    if (sameLine !== null) {
+      matches.push(sameLine)
       continue
     }
-    // Next line (BUA label / value can stack vertically)
     for (let j = i + 1; j <= Math.min(lines.length - 1, i + 3); j++) {
-      const peek = lines[j]!.match(BUA_NUMBER_RE)
-      if (peek) {
-        matches.push(Number.parseFloat(peek[1]!))
+      const peek = tryMatchOnLine(lines[j]!)
+      if (peek !== null) {
+        matches.push(peek)
         break
       }
     }
   }
+  // pdftotext -layout sometimes glues a label/value pair from one part of
+  // the page to a SEPARATE label/value pair from another. The result is the
+  // SAME literal number appearing several times (Plot 4357: "6,286" repeats
+  // 4 times because the cover sheet has 4 BUA rows, all 6,286 SQ.FT). Dedup
+  // by rounded value and accept the unanimous answer.
   const unique = Array.from(new Set(matches.map((n) => Math.round(n * 100) / 100)))
   if (unique.length === 1) return unique[0]!
   return null

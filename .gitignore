@@ -32,6 +32,11 @@ node_modules/.tmp/
 # Env
 .env
 .env.*.local
+# Sprint-9 S9-4 — secrets file (ANTHROPIC_API_KEY etc) lives here.
+# Never read, print, edit, or commit. Automated sessions are blocked
+# from this file in CLAUDE.md.
+.env.secrets
+.env.secrets.*
 
 # Logs
 logs/

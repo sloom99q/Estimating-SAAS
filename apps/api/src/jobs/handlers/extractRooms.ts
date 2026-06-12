@@ -819,6 +819,15 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
     coverTextBlob += `\n${t}`
   }
   const declaredBuaM2 = recoverBuaFromText(coverTextBlob)
+  // S9-1: persist the recovered BUA on the Project so downstream pages
+  // (BOQ, takeoff review) can show "584 m²" without re-reading the cover
+  // sheet. Idempotent: only writes when we have a new value AND it changed.
+  if (declaredBuaM2 !== null) {
+    await prisma.project.update({
+      where: { id: document.projectId },
+      data: { buaM2: declaredBuaM2 },
+    })
+  }
   // S8-5 unique room areas — sum of the post-dedup survivors.
   const uniqueRoomAreas: number[] = []
   for (const s of survivors) {

@@ -134,4 +134,33 @@ describe('runValidators — Sprint 4 net', () => {
   test('recoverBuaFromText returns null when no label present', () => {
     expect(recoverBuaFromText('Just some area: 584 m²')).toBeNull()
   })
+
+  // -------- Sprint 9 S9-1 — SQ.FT input + GCC cover-sheet layout --------
+
+  test('recoverBuaFromText converts "BUA - VILLA 6,286 SQ.FT" → 584 m²', () => {
+    const got = recoverBuaFromText('BUA - VILLA 6,286 SQ.FT')
+    expect(got).not.toBeNull()
+    expect(got!).toBeGreaterThan(583)
+    expect(got!).toBeLessThan(585)
+  })
+
+  test('recoverBuaFromText handles "TOTAL BUILT-UP AREA SQ.FT 6,286"', () => {
+    // pdftotext -layout reorders the label and value across columns; the
+    // S9-1 regex should still find the SQ.FT pair within the radius.
+    const got = recoverBuaFromText('TOTAL BUILT-UP AREA SQ.FT 6,286')
+    expect(got).not.toBeNull()
+    expect(got!).toBeGreaterThan(583)
+    expect(got!).toBeLessThan(585)
+  })
+
+  test('recoverBuaFromText accepts repeated unanimous values (cover sheet boilerplate)', () => {
+    const blob = `
+      BUA - VILLA  6,286 SQ.FT
+      TOTAL BUA    6,286 SQ.FT
+      TOTAL BUILT-UP AREA SQ.FT  6,286
+    `
+    const got = recoverBuaFromText(blob)
+    expect(got).not.toBeNull()
+    expect(Math.round(got!)).toBe(584)
+  })
 })
