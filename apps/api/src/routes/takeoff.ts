@@ -1,6 +1,7 @@
 import type { Prisma } from '@prisma/client'
 import { z } from 'zod'
 import { tenantDb } from '../db/tenantDb'
+import { remapFinishesForProject } from '../jobs/handlers/extractRooms'
 import { requireAuth } from '../middleware/auth'
 import type { Router } from './router'
 import { errorResponse, jsonResponse } from '../utils/json'
@@ -84,6 +85,28 @@ function flagDto(row: {
 }
 
 export function registerTakeoffRoutes(router: Router): void {
+  /**
+   * POST /api/projects/:id/remap-finishes
+   *
+   * Sprint-7 S7-3. Re-runs the deterministic finish-code assignment over
+   * every ROOM TakeoffItem in the project against the CURRENT legend
+   * vocabulary. Zero tokens, zero vision. Useful after a LEGEND re-run or
+   * groundtruth refresh.
+   */
+  router.post(
+    '/api/projects/:id/remap-finishes',
+    requireAuth(async (_req, ctx) => {
+      const db = tenantDb(ctx.organizationId)
+      const project = await db.project.findFirst({
+        where: { id: ctx.params.id, deletedAt: null },
+        select: { id: true },
+      })
+      if (!project) return errorResponse(404, 'Project not found')
+      const result = await remapFinishesForProject(ctx.organizationId, project.id)
+      return jsonResponse(result)
+    }),
+  )
+
   /**
    * GET /api/projects/:id/takeoff-items
    *

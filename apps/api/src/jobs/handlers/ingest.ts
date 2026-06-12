@@ -19,6 +19,7 @@ import path from 'node:path'
 import { prisma } from '../../db'
 import { getBlobStore } from '../../blob/fs'
 import { documentKey } from '../../blob/types'
+import { enqueueIfNotDone } from '../chainGuard'
 import type { JobHandler, JobRecord } from '../types'
 
 interface IngestPayload {
@@ -165,14 +166,15 @@ export const ingestHandler: JobHandler = async (job: JobRecord) => {
       update: { pagesProcessed: { increment: pageCount } },
     })
 
-    // Chain into CLASSIFY.
-    await prisma.job.create({
-      data: {
-        organizationId: job.organizationId,
-        projectId: document.projectId,
-        type: 'CLASSIFY',
-        payload: { documentId: document.id } as object,
-      },
+    // S7-1: chain handoff no-op guard. If CLASSIFY already DONE for this
+    // doc (re-run of INGEST), don't re-enqueue. The operator can force a
+    // re-classify by enqueueing CLASSIFY with payload.force=true directly.
+    await enqueueIfNotDone({
+      client: prisma,
+      organizationId: job.organizationId,
+      projectId: document.projectId,
+      type: 'CLASSIFY',
+      documentId: document.id,
     })
 
     return {

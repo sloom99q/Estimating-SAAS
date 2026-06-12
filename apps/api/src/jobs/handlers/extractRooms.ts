@@ -23,9 +23,12 @@
  *
  * On completion, set Document.status = READY — the pipeline's terminal stage.
  */
+import type { Prisma } from '@prisma/client'
 import { STUB_SUFFIX, extractRooms } from '../../ai/anthropic'
+import { renderPageBbox } from '../../ai/bboxRender'
 import { normalizeFloor } from '../../ai/floorNormalize'
 import { renderPageQuadrants } from '../../ai/quadrantRender'
+import { parseBboxRoomAreaPairs } from '../../ai/roomsBboxParser'
 import { roomsTextPass } from '../../ai/roomsTextPass'
 import type { ExtractRoomsRow } from '../../ai/types'
 import { getBlobStore } from '../../blob/fs'
@@ -59,6 +62,147 @@ function compareNumeric(a: number | null, b: number | null): boolean {
 }
 
 /**
+ * Sprint-7 S7-3: deterministic finish_code assignment.
+ *
+ * The vision pass stores its raw observation in meta.rawFinishObservation —
+ * vision-reported code (whether or not it's in the active legend vocabulary)
+ * plus the model's evidence sentence plus a slice of the text snippet at
+ * that moment. This function maps that raw observation to a finish_code
+ * from the CURRENT legend vocabulary, without re-billing vision. Callers
+ * (the rooms handler at extraction time, and the /remap endpoint later)
+ * use the same function so a legend update can re-key every room for $0.
+ *
+ * Priority:
+ *   1. Vision's chosen code matches a legend code exactly → 70 conf.
+ *   2. Vision's chosen code substring-appears in textSnippet → 85 conf.
+ *   3. Any legend code substring-appears in the evidence sentence → 70 conf.
+ *   4. Any legend code substring-appears in the textSnippetSlice → 70 conf.
+ *   5. None → null (FINISH_UNMAPPED flag raised by the handler).
+ */
+export interface RawFinishObservation {
+  visionCode: string | null
+  evidence: string | null
+  textSnippetSlice: string | null
+}
+
+export function assignFinishCode(
+  raw: RawFinishObservation,
+  legendCodes: string[],
+  textSnippet: string,
+): { finishCode: string | null; finishConfidence: number | null } {
+  const vocab = new Set(legendCodes.map((c) => c.toUpperCase()))
+  const visionCode = (raw.visionCode ?? '').trim().toUpperCase()
+  if (visionCode && vocab.has(visionCode)) {
+    const re = new RegExp(`\\b${visionCode}\\b`)
+    return { finishCode: visionCode, finishConfidence: re.test(textSnippet) ? 85 : 70 }
+  }
+  const evidence = (raw.evidence ?? '').toUpperCase()
+  for (const code of vocab) {
+    if (code === 'BATHROOM') continue
+    const re = new RegExp(`\\b${code}\\b`)
+    if (re.test(evidence)) return { finishCode: code, finishConfidence: 70 }
+  }
+  const slice = (raw.textSnippetSlice ?? '').toUpperCase()
+  for (const code of vocab) {
+    if (code === 'BATHROOM') continue
+    const re = new RegExp(`\\b${code}\\b`)
+    if (re.test(slice)) return { finishCode: code, finishConfidence: 70 }
+  }
+  return { finishCode: null, finishConfidence: null }
+}
+
+/**
+ * Sprint-7 S7-3: pure-function re-map driver. Loads ROOM items + LEGEND
+ * items for a project, runs assignFinishCode against the current legend
+ * vocabulary, and persists. Re-runnable for $0; called by the
+ * POST /api/projects/:id/remap-finishes endpoint.
+ */
+export interface RemapFinishesResult {
+  rooms: number
+  newlyMapped: number
+  changedCode: number
+  unchanged: number
+  stillUnmapped: number
+}
+
+export async function remapFinishesForProject(
+  organizationId: string,
+  projectId: string,
+): Promise<RemapFinishesResult> {
+  // Legend items always have a tag (the code itself). Rooms typically don't,
+  // so we have to query them separately — the old combined query with
+  // `tag: { not: null }` accidentally excluded every room.
+  const [legendItems, rooms] = await Promise.all([
+    prisma.takeoffItem.findMany({
+      where: { organizationId, projectId, deletedAt: null, tag: { not: null } },
+      select: { id: true, category: true, tag: true, meta: true },
+    }),
+    prisma.takeoffItem.findMany({
+      where: { organizationId, projectId, deletedAt: null, category: 'ROOM' },
+      select: { id: true, category: true, tag: true, meta: true },
+    }),
+  ])
+  const legendCodes = legendItems
+    .filter((i) => {
+      const m = (i.meta ?? {}) as Record<string, unknown>
+      return m.kind === 'LEGEND'
+    })
+    .map((i) => i.tag!)
+    .concat(['BATHROOM'])
+  let newlyMapped = 0
+  let changedCode = 0
+  let unchanged = 0
+  let stillUnmapped = 0
+  for (const r of rooms) {
+    const m = (r.meta ?? {}) as Record<string, unknown>
+    const raw = (m.rawFinishObservation ?? null) as RawFinishObservation | null
+    if (!raw) {
+      // Pre-Sprint-7 data lacks the raw observation; we synthesise it from
+      // whatever meta we DO have. That's enough to surface ROOMs whose
+      // evidence string happens to mention a legend code.
+      const evidence = typeof m.finish_evidence === 'string' ? m.finish_evidence : null
+      const visionCode = typeof m.finish_code === 'string' ? m.finish_code : null
+      const synth: RawFinishObservation = {
+        visionCode,
+        evidence,
+        textSnippetSlice: null,
+      }
+      const { finishCode, finishConfidence } = assignFinishCode(synth, legendCodes, '')
+      const before = m.finish_code as string | null
+      if (finishCode && finishCode !== before) {
+        if (before == null) newlyMapped += 1
+        else changedCode += 1
+        await prisma.takeoffItem.update({
+          where: { id: r.id },
+          data: {
+            meta: { ...m, finish_code: finishCode, finishConfidence } as Prisma.JsonObject,
+          },
+        })
+      } else if (finishCode == null) {
+        stillUnmapped += 1
+      } else {
+        unchanged += 1
+      }
+      continue
+    }
+    const { finishCode, finishConfidence } = assignFinishCode(raw, legendCodes, '')
+    const before = m.finish_code as string | null
+    if (finishCode === before) {
+      if (finishCode == null) stillUnmapped += 1
+      else unchanged += 1
+      continue
+    }
+    if (before == null) newlyMapped += 1
+    else changedCode += 1
+    await prisma.takeoffItem.update({
+      where: { id: r.id },
+      data: { meta: { ...m, finish_code: finishCode, finishConfidence } as Prisma.JsonObject },
+    })
+  }
+  return { rooms: rooms.length, newlyMapped, changedCode, unchanged, stillUnmapped }
+}
+
+/**
  * Sprint-4 S4-3: 4 quadrant vision passes can each return the same room
  * (overlap region). Within a SINGLE sheet, collapse rows with the same
  * normalized name. Prefer the row that has `area_m2` populated over the one
@@ -77,6 +221,38 @@ function dedupeBySheet(rows: ExtractRoomsRow[]): ExtractRoomsRow[] {
     const score = (r: ExtractRoomsRow) =>
       (r.area_m2 !== null ? 2 : 0) + (r.code !== null ? 1 : 0)
     if (score(row) > score(existing)) byName.set(key, row)
+  }
+  return Array.from(byName.values())
+}
+
+/**
+ * Sprint-7 S7-4: merge bbox-spatial pairs into the regex-text input. Spatial
+ * pairs are pixel-accurate (xMin/yMin straight from pdftotext) and outrank
+ * the line-window regex on numeric conflict. Same-name dedupe is
+ * case-insensitive; ties on identical (name, area) collapse to one row.
+ */
+function mergeSpatialIntoText(
+  regex: ExtractRoomsRow[],
+  spatial: ReturnType<typeof parseBboxRoomAreaPairs>,
+): ExtractRoomsRow[] {
+  const byName = new Map<string, ExtractRoomsRow>()
+  for (const r of regex) byName.set(r.name.trim().toUpperCase(), r)
+  for (const p of spatial) {
+    const key = p.name.trim().toUpperCase()
+    const existing = byName.get(key)
+    if (!existing) {
+      byName.set(key, {
+        name: p.name.trim(),
+        code: null,
+        floor: null,
+        area_m2: p.area_m2,
+        finish_code: null,
+        finish_evidence: null,
+      })
+      continue
+    }
+    // Spatial wins on area; preserve other fields the regex pass may have set.
+    byName.set(key, { ...existing, area_m2: p.area_m2 })
   }
   return Array.from(byName.values())
 }
@@ -185,6 +361,13 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
   let manualSkipped = 0
   let mismatches = 0
   let quadrantsRendered = 0
+  // S7-4 (the Area Gate): aggregate of name|area pairs the spatial parser
+  // recovered from pdftotext -bbox-layout. Counted per-sheet AND collated so
+  // the run report tells the reviewer how many drawn-area rooms we
+  // grounded against the architect's printed labels — a gate the prior
+  // regex-and-vision-only pipeline kept failing.
+  let bboxPairsTotal = 0
+  const bboxPairsBySheet: Array<{ pageNo: number; pairs: number }> = []
 
   for (const sheet of sheets) {
     const textSnippet = sheet.rawTextKey
@@ -242,28 +425,47 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
     // without.
     const merged = dedupeBySheet(visionRows)
 
-    const text = roomsTextPass(textSnippet, sheet.pageNo)
+    // S7-4 spatial pass. Run pdftotext -bbox-layout for this page, build
+    // name|area pairs from physical proximity, and merge them into the
+    // text-side input. Bbox pairs are pixel-accurate ground truth from the
+    // drawing — they outrank regex pairs on numeric conflict. Failures are
+    // soft (drawings without a text layer, etc.) — the regex/vision passes
+    // still run.
+    const regexText = roomsTextPass(textSnippet, sheet.pageNo)
+    let spatialPairs: ReturnType<typeof parseBboxRoomAreaPairs> = []
+    try {
+      const bbox = await renderPageBbox(sourceBytes, sheet.pageNo)
+      spatialPairs = parseBboxRoomAreaPairs(bbox)
+    } catch (err) {
+      console.error(`[extractRooms] bbox render failed for page ${sheet.pageNo}:`, err)
+    }
+    bboxPairsTotal += spatialPairs.length
+    bboxPairsBySheet.push({ pageNo: sheet.pageNo, pairs: spatialPairs.length })
+    const text = mergeSpatialIntoText(regexText, spatialPairs)
     const reconciled = reconcile(merged, text)
     const visionFromStub = promptVersion.endsWith(STUB_SUFFIX)
 
     for (const room of reconciled) {
       const normalizedFloor = normalizeFloor(room.floor)
-      // S6-2: finish reconciliation. Vision returns finish_code from the
-      // closed vocabulary; we score the confidence — 85 when the text layer
-      // ALSO carries the same code, 70 when vision is alone, null with INFO
-      // flag when vision didn't pick a code at all.
-      let finishCode: string | null = null
-      let finishConfidence: number | null = null
+      // S7-3: store the RAW observation from the vision pass — independent
+      // of whatever legend vocabulary happened to be in effect at the time.
+      // assignFinishCode() reads rawFinishObservation in a deterministic
+      // post-map; re-running the legend stage no longer requires re-running
+      // the rooms vision pass to update finish_code.
       const visionRow = merged.find(
         (r) => r.name.trim().toUpperCase() === room.name.trim().toUpperCase(),
       )
-      const visionCode = visionRow?.finish_code ?? null
-      const visionEvidence = visionRow?.finish_evidence ?? null
-      if (visionCode) {
-        finishCode = visionCode.trim().toUpperCase()
-        const codeRe = new RegExp(`\\b${finishCode}\\b`)
-        finishConfidence = codeRe.test(textSnippet) ? 85 : 70
+      const rawFinishObservation = {
+        visionCode: visionRow?.finish_code ?? null,
+        evidence: visionRow?.finish_evidence ?? null,
+        textSnippetSlice: textSnippet.slice(0, 600),
       }
+
+      const { finishCode, finishConfidence } = assignFinishCode(
+        rawFinishObservation,
+        legendCodes,
+        textSnippet,
+      )
 
       const meta: Record<string, unknown> = {
         code: room.code,
@@ -272,7 +474,8 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
         area_m2: room.area_m2,
         finish_code: finishCode,
         finishConfidence,
-        finish_evidence: visionEvidence,
+        finish_evidence: rawFinishObservation.evidence,
+        rawFinishObservation,
       }
       if (visionFromStub) meta.stub = true
       const takeoff = await prisma.takeoffItem.create({
@@ -547,6 +750,10 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
     manualSpacesSkipped: manualSkipped,
     rowMismatches: mismatches,
     quadrantsRendered,
+    /** Sprint-7 S7-4: total spatial (bbox) name|area pairs recovered. */
+    bboxPairsTotal,
+    /** Sprint-7 S7-4: per-sheet spatial pair counts (for diagnostics). */
+    bboxPairsBySheet,
     /** Sprint-4 S4-5: validation flags raised by the post-extraction net. */
     validatorFlagsRaised: validatorResults.length,
     tokensIn,

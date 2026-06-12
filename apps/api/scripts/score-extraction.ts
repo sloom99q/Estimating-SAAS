@@ -66,6 +66,7 @@ interface GroundTruth {
   }
   finishes?: {
     legendCodesExpected: string[]
+    optionalCodes?: string[]
     floorMap: Record<string, string[]>
     floorQtyTargets_m2: Record<string, [number, number]>
     ceilingTargets_m2: Record<string, [number, number]>
@@ -420,8 +421,19 @@ async function main(): Promise<void> {
       ceilingTotalsByCode.set(code, c.qtyAi === null ? 0 : Number(c.qtyAi.toString()))
     }
 
-    // PASS conditions
-    const legendOk = legendCodes.size >= 10
+    // S7-2 PASS conditions:
+    //   - core 12 (legendCodesExpected) found as a subset
+    //   - zero pattern-violating codes (regex /^[A-Z]{2}\d{2}$/; BATHROOM allowed)
+    //   - total within 8-25
+    const CODE_RE = /^[A-Z]{2}\d{2}$/
+    const coreCodes = new Set(finishes.legendCodesExpected.map((c) => c.toUpperCase()))
+    const coreFound = Array.from(coreCodes).filter((c) => legendCodes.has(c))
+    const coreSubsetOk = coreFound.length === coreCodes.size
+    const violators = Array.from(legendCodes).filter((c) => c !== 'BATHROOM' && !CODE_RE.test(c))
+    const totalRealCodes = legendCodes.size - (legendCodes.has('BATHROOM') ? 1 : 0)
+    const sanityRangeOk = totalRealCodes >= 8 && totalRealCodes <= 25
+    const legendOk = coreSubsetOk && violators.length === 0 && sanityRangeOk
+
     const mappingPct = mappedTotal === 0 ? 0 : (mappedCorrect / mappedTotal) * 100
     const mappingOk = mappingPct >= 80
     let floorRangeOk = true
@@ -438,10 +450,15 @@ async function main(): Promise<void> {
     verdicts.push({
       section: 'FINISHES',
       passed: finishesPass,
-      detail: `${legendCodes.size} legend codes, ${mappedCorrect}/${mappedTotal} rooms mapped (${mappingPct.toFixed(0)}%), floor ranges ${floorRangeOk ? 'ok' : 'OUT'}, CL02/CL03 ${ceilingDistinctOk ? 'distinct' : 'COLLISION'}`,
+      detail: `${coreFound.length}/${coreCodes.size} core codes; ${violators.length} pattern-violators; total ${totalRealCodes} ${sanityRangeOk ? '(8-25 ok)' : '(OUT of 8-25)'}; ${mappedCorrect}/${mappedTotal} rooms mapped (${mappingPct.toFixed(0)}%); floor ranges ${floorRangeOk ? 'ok' : 'OUT'}; CL02/CL03 ${ceilingDistinctOk ? 'distinct' : 'COLLISION'}`,
     })
     console.log(`${COLOR.bold}Finishes${COLOR.reset}`)
-    console.log(`  legend codes extracted : ${Array.from(legendCodes).sort().join(', ') || '∅'} (${legendCodes.size}/≥10)`)
+    console.log(`  core codes (required)  : ${coreFound.length}/${coreCodes.size} found  ${coreSubsetOk ? `${COLOR.green}subset ok${COLOR.reset}` : `${COLOR.red}MISSING: ${Array.from(coreCodes).filter((c) => !legendCodes.has(c)).join(', ')}${COLOR.reset}`}`)
+    if (violators.length > 0) {
+      console.log(`  ${COLOR.red}pattern violators${COLOR.reset}     : ${violators.slice(0, 8).join(', ')}${violators.length > 8 ? `, ...(+${violators.length - 8})` : ''}`)
+    }
+    console.log(`  total real codes       : ${totalRealCodes}  ${sanityRangeOk ? `${COLOR.green}within 8-25${COLOR.reset}` : `${COLOR.red}OUT${COLOR.reset}`}`)
+    console.log(`  legend codes extracted : ${Array.from(legendCodes).sort().join(', ') || '∅'} (${legendCodes.size} total)`)
     console.log(`  room mapping accuracy  : ${mappedCorrect}/${mappedTotal} (${mappingPct.toFixed(0)}%) (target ≥80%)`)
     if (wrong.length > 0) {
       console.log(`  mapping errors         : ${wrong.slice(0, 5).map((w) => `${w.name} expected=${w.expected} got=${w.actual ?? '∅'}`).join('; ')}${wrong.length > 5 ? `, ...(+${wrong.length - 5})` : ''}`)

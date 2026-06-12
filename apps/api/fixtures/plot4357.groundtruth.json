@@ -93,8 +93,9 @@
     ]
   },
   "finishes": {
-    "$note": "Sprint-6 extension: legend codes the I401-I404 sheets define + the per-room finish mapping the contractor's BOQ paid against.",
+    "$note": "Sprint-6 extension: legend codes the I401-I404 sheets define + the per-room finish mapping the contractor's BOQ paid against. Sprint-7 adds optionalCodes (bathroom-series) corroborated by the contractor quote per ADR-015.",
     "legendCodesExpected": ["ST01", "ST02", "ST03", "PR01", "PR03", "WD01", "FN01", "FN02", "FN03", "FN04", "LS01", "LS02"],
+    "optionalCodes": ["FN22", "FN23", "FN24", "FN31", "FN32", "FN33", "FN41", "FN42", "FN43"],
     "floorMap": {
       "ST01":     ["LIVING", "DINNING", "ENTRANCE LOBBY", "PLAY ROOM"],
       "PR01":     ["MASTER BEDROOM", "01 BEDROOM", "02 BEDROOM", "FAMILY ROOM", "CORRIDOR"],
@@ -114,13 +115,13 @@
       "CL03": [330, 420],
       "CL02": [70, 110]
     },
-    "scoringRule": "PASS = >=10 legend codes; >=80% of mapped ground-truth rooms carry the correct finish_code; each floor finish total within its target range; CL03 != CL02 != floor total."
+    "scoringRule": "PASS = core 12 found as subset; zero pattern-violating codes (regex /^[A-Z]{2}\\d{2}$/, BATHROOM allowed); total within 8-25; >=80% of mapped ground-truth rooms carry the correct finish_code; each floor finish total within its target range; CL03 != CL02 != floor total."
   },
   "scoring": {
     "doors":   "PASS = 9/9 tags, exact counts, no invented D09 count.",
     "windows": "PASS = >=18/20 tags found INCLUDING CW02; counts exact on found tags (swap-trap rows CW09-CW16 weighted double).",
     "rooms":   "PASS = >=20 of the listed rooms found with area within ±2% of the printed value; unique-space count after dedup between 20 and 40.",
     "register":"PASS = no STR/MEP disciplines asserted; glazing sheets routed to WINDOW extraction.",
-    "finishes":"PASS = >=10 legend codes; >=80% of mapped ground-truth rooms carry the correct finish_code; each floor total within target range; CL03 != CL02 != floor total."
+    "finishes":"PASS = core 12 (legendCodesExpected) found as subset; zero pattern-violating codes; total within 8-25; >=80% of mapped ground-truth rooms carry the correct finish_code; each floor total within target range; CL03 != CL02 != floor total."
   }
 }

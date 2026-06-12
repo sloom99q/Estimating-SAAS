@@ -31,6 +31,7 @@ import { scheduleTextPass } from '../../ai/scheduleTextPass'
 import type { ExtractScheduleRow, ScheduleKind } from '../../ai/types'
 import { getBlobStore } from '../../blob/fs'
 import { prisma } from '../../db'
+import { enqueueIfNotDone } from '../chainGuard'
 import type { JobHandler, JobRecord } from '../types'
 
 interface ExtractSchedulesPayload {
@@ -246,23 +247,54 @@ export const extractSchedulesHandler: JobHandler = async (job: JobRecord) => {
       // The text pass is real, so the row isn't fully fabricated — we surface
       // both facts explicitly.
       if (visionFromStub) meta.stub = true
-      const created = await prisma.takeoffItem.create({
-        data: {
+      const category = kind === 'DOOR' ? 'DOOR' : 'WINDOW'
+      // S7-1 natural-key upsert: (documentId via sourceSheet, category, tag).
+      // Re-runs of the same schedule REPLACE the existing row rather than
+      // appending — the Sprint-6 chain-retry "every door twice" failure mode
+      // is now impossible at the data layer.
+      const existing = await prisma.takeoffItem.findFirst({
+        where: {
           organizationId: job.organizationId,
           projectId: document.projectId,
-          category: kind === 'DOOR' ? 'DOOR' : 'WINDOW',
+          deletedAt: null,
+          category,
           tag: row.tag,
-          description: row.description,
-          unit: 'nr',
-          qtyAi: 1,
-          basis: row.basis,
-          confidence: row.confidence,
-          sourceSheetId: sheet.id,
-          sourceNote: `${sheet.drawingNo ?? `page ${sheet.pageNo}`}`,
-          meta: meta as object,
-          promptVersion: vision.promptVersion,
+          sourceSheet: { documentId: document.id },
         },
+        select: { id: true },
       })
+      const created = existing
+        ? await prisma.takeoffItem.update({
+            where: { id: existing.id },
+            data: {
+              description: row.description,
+              unit: 'nr',
+              qtyAi: 1,
+              basis: row.basis,
+              confidence: row.confidence,
+              sourceSheetId: sheet.id,
+              sourceNote: `${sheet.drawingNo ?? `page ${sheet.pageNo}`}`,
+              meta: meta as object,
+              promptVersion: vision.promptVersion,
+            },
+          })
+        : await prisma.takeoffItem.create({
+            data: {
+              organizationId: job.organizationId,
+              projectId: document.projectId,
+              category,
+              tag: row.tag,
+              description: row.description,
+              unit: 'nr',
+              qtyAi: 1,
+              basis: row.basis,
+              confidence: row.confidence,
+              sourceSheetId: sheet.id,
+              sourceNote: `${sheet.drawingNo ?? `page ${sheet.pageNo}`}`,
+              meta: meta as object,
+              promptVersion: vision.promptVersion,
+            },
+          })
       itemsCreated += 1
 
       if (row.mismatch) {
@@ -292,13 +324,13 @@ export const extractSchedulesHandler: JobHandler = async (job: JobRecord) => {
     })
   }
 
-  await prisma.job.create({
-    data: {
-      organizationId: job.organizationId,
-      projectId: document.projectId,
-      type: 'EXTRACT_ROOMS',
-      payload: { documentId: document.id } as object,
-    },
+  // S7-1: chain handoff no-op guard.
+  await enqueueIfNotDone({
+    client: prisma,
+    organizationId: job.organizationId,
+    projectId: document.projectId,
+    type: 'EXTRACT_ROOMS',
+    documentId: document.id,
   })
 
   return {

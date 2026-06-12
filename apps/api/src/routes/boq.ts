@@ -184,6 +184,37 @@ export function registerBoqRoutes(router: Router): void {
         )
       }
 
+      // S7-1: BOQ generation refuses with an ERROR ValidationFlag if duplicate
+      // (category, tag) pairs exist in the takeoff. Generation never launders
+      // dirty data into money. Tag-less items (tag === null) are ignored —
+      // QUANTIFY-derived rows have tags; legend items have tags; only freeform
+      // 'OTHER' rows could be tag-less, and they don't collide.
+      const seen = new Map<string, number>()
+      for (const item of items) {
+        if (!item.tag) continue
+        const key = `${item.category}:${item.tag}`
+        seen.set(key, (seen.get(key) ?? 0) + 1)
+      }
+      const dupes = Array.from(seen.entries())
+        .filter(([, n]) => n > 1)
+        .map(([k, n]) => `${k} (${n})`)
+      if (dupes.length > 0) {
+        // Raise a ValidationFlag so the SPA review surface can show it.
+        await db.validationFlag.create({
+          data: {
+            organizationId: ctx.organizationId,
+            projectId,
+            rule: 'DUPLICATE_TAG_IN_TAKEOFF',
+            severity: 'ERROR',
+            message: `BOQ generation refused: ${dupes.length} (category, tag) collision(s) in the takeoff: ${dupes.slice(0, 8).join(', ')}${dupes.length > 8 ? `, ...(+${dupes.length - 8})` : ''}. Dedupe before generating.`,
+          },
+        })
+        return errorResponse(
+          409,
+          `Duplicate (category, tag) pairs in takeoff — BOQ generation refused. Pairs: ${dupes.slice(0, 8).join(', ')}${dupes.length > 8 ? `, ...(+${dupes.length - 8})` : ''}`,
+        )
+      }
+
       // Group by section. S4-4: skip the categories in NEVER_BOQ (today only
       // ROOM) — they're QUANTIFY inputs, not bill items.
       // Sprint-6: also skip items with meta.kind='LEGEND'. Those are MATERIAL

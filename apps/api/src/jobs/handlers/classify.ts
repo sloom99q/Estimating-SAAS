@@ -21,6 +21,7 @@ import { STUB_SUFFIX, classifySheet } from '../../ai/anthropic'
 import { CLASSIFY_PROMPT_VERSION } from '../../ai/prompts/classify.v1'
 import { getBlobStore } from '../../blob/fs'
 import { prisma } from '../../db'
+import { enqueueIfNotDone } from '../chainGuard'
 import type { JobHandler, JobRecord } from '../types'
 
 const isStubResult = (promptVersion: string): boolean => promptVersion.endsWith(STUB_SUFFIX)
@@ -225,14 +226,13 @@ export const classifyHandler: JobHandler = async (job: JobRecord) => {
     })
   }
 
-  // Chain → EXTRACT_FINISH_LEGEND (Sprint 6 — it then chains the rest).
-  await prisma.job.create({
-    data: {
-      organizationId: job.organizationId,
-      projectId: document.projectId,
-      type: 'EXTRACT_FINISH_LEGEND',
-      payload: { documentId: document.id } as object,
-    },
+  // S7-1: chain handoff no-op guard. Skip if the legend stage already DONE.
+  await enqueueIfNotDone({
+    client: prisma,
+    organizationId: job.organizationId,
+    projectId: document.projectId,
+    type: 'EXTRACT_FINISH_LEGEND',
+    documentId: document.id,
   })
 
   return {

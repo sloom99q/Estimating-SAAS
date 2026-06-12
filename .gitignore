@@ -10,6 +10,9 @@ dist-ssr/
 
 # Bun
 bun.lockb
+# Stack is Bun-only — npm/yarn lockfiles are noise from accidental tool use.
+package-lock.json
+yarn.lock
 
 # Editor / OS
 .DS_Store
@@ -46,5 +49,9 @@ coverage/
 apps/api/fixtures/**
 !apps/api/fixtures/
 !apps/api/fixtures/plot4357.groundtruth.json
+# Sprint-7 S7-4: bbox-layout JSON fixtures are small (<100KB) text and
+# drive the spatial parser's TDD test. Commit them.
+!apps/api/fixtures/bbox/
+!apps/api/fixtures/bbox/*.json
 apps/api/data/
 apps/api/tmp/

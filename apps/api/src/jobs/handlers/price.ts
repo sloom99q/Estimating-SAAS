@@ -220,8 +220,17 @@ export const priceHandler: JobHandler = async (job: JobRecord) => {
       // Tier 1 — Assembly match (in-memory). ADR-014: assembly.outputUnit
       // must equal line.unit. A WALL assembly with outputUnit='m²' cannot
       // price a window line with unit='nr'.
+      // Sprint-7 S7-0: wall feature legend lines (tag pattern WF-<code>,
+      // where <code> ≠ PAINT) bypass the assembly tier — they're specific
+      // products with their own rates, not generic paint surfaces. Jotun
+      // (the only seeded wall assembly) is for paint only.
       const appliesTo = appliesToForCategory(category)
-      if (appliesTo) {
+      const isWallFeatureLine =
+        category === 'WALL_FINISH' &&
+        typeof sourceTag === 'string' &&
+        sourceTag.startsWith('WF-') &&
+        sourceTag !== 'WF-PAINT'
+      if (appliesTo && !isWallFeatureLine) {
         const candidates = (assembliesByApplies.get(appliesTo) ?? [])
           .concat(assembliesByApplies.get('GENERIC') ?? [])
           .filter((a) => unitsMatch(a.outputUnit, line.unit))
