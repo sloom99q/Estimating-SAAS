@@ -164,8 +164,17 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
   }
 
   // --- Floors ----------------------------------------------------------
+  // Sprint-10 F1 STAIR HONESTY: skip STAIRCASE rooms here so they never
+  // contribute to an m² floor-finish bucket. The dedicated staircase
+  // emitter below handles them honestly as `lm` (or P/S while pending).
+  // The colour mapper assigns STAIRCASE → ST02 for the scorer / mapping
+  // arithmetic; that doesn't mean we want to BILL the stair as 27 m² of
+  // grainy marble at 550 AED/m². Plot 4357's standing rule: stairs are
+  // lm, never plan-m².
   const floorGroups = new Map<string, { rooms: typeof rooms; totalArea: number }>()
   for (const room of rooms) {
+    const name = room.description.split('—')[0]!.trim()
+    if (isStaircaseRoom(name)) continue
     const meta = (room.meta ?? {}) as Record<string, unknown>
     const finishCode = typeof meta.finish_code === 'string' ? meta.finish_code : null
     const key = finishCode ?? 'unassigned'
@@ -293,7 +302,10 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
       tag: 'STAIR-TREAD',
       description:
         lm === null
-          ? `Stair tread + riser (lm pending — risers × width unknown)`
+          ? // Sprint-10 F1: spell the standing-rule reference into the
+            // line description so a reader of the BOQ knows the rate the
+            // line will book against once lm is measured.
+            `Grainy marble tread/riser — lm pending (ref STAIR-TREAD 800/lm + STAIR-LAND 550/m²)`
           : `Stair tread + riser — ${lm.toFixed(2)} lm`,
       unit: 'lm',
       qty: lm ?? 0,
