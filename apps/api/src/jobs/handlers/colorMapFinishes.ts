@@ -25,6 +25,20 @@ import { prisma } from '../../db'
 import { normalizeRoomName } from './extractRooms'
 
 const FINISH_PLAN_ANCHOR_RE = /^I4\d{2}\b/i
+/**
+ * Sprint-10 S10-2(d) — coordinate-carry. For room names that only
+ * appear on the architectural floor plan (A101 / A102) but not on the
+ * matching finish plan (I401 / I402), we can still classify by
+ * sampling the finish plan AT THE SAME COORDINATES as the floor plan
+ * label — provided the two sheets share the same grid. Plot 4357's
+ * A101 ↔ I401 are aligned within a few pixels.
+ *
+ * Map: floor-plan drawingNo → finish-plan drawingNo with shared grid.
+ */
+const COORDINATE_CARRY_PAIRS: Array<{ from: string; to: string }> = [
+  { from: 'A101', to: 'I401' }, // Ground floor plan → ground floor finish plan
+  { from: 'A102', to: 'I402' }, // First floor plan → first floor finish plan
+]
 
 const CORE_LEGEND_CODES = [
   'ST01',
@@ -155,6 +169,27 @@ export async function colorMapFinishesForProject(
       else result.paletteSamplesCanonical += 1
     }
     const roomBboxes = findRoomBboxes(bbox.words, roomNames)
+    // S10-2(d) coordinate-carry: union the bboxes we can read from the
+    // matching FLOOR plan (A101 ↔ I401, A102 ↔ I402) for room names
+    // missing on the finish plan. Architectural and finish plans share
+    // the same paper grid for ground/first floors on Plot 4357.
+    const carry = COORDINATE_CARRY_PAIRS.find((pair) => pair.to === sheet.drawingNo)
+    if (carry) {
+      const partner = await prisma.sheet.findFirst({
+        where: { documentId: document.id, drawingNo: carry.from },
+      })
+      if (partner) {
+        const partnerBbox = await renderPageBbox(sourceBytes, partner.pageNo)
+        const partnerRoomBboxes = findRoomBboxes(partnerBbox.words, roomNames)
+        const knownNames = new Set(roomBboxes.map((b) => normalizeRoomName(b.name)))
+        for (const candidate of partnerRoomBboxes) {
+          const key = normalizeRoomName(candidate.name)
+          if (knownNames.has(key)) continue
+          roomBboxes.push(candidate)
+          knownNames.add(key)
+        }
+      }
+    }
     if (roomBboxes.length === 0) continue
     const assignments = mapRoomsToFinishCodes(image, roomBboxes, palette)
     for (const a of assignments) {

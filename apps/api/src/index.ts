@@ -1,5 +1,6 @@
 import { config } from './config'
 import { startWorker } from './jobs/runner'
+import { registerAdminRoutes } from './routes/admin'
 import { registerAssemblyRoutes } from './routes/assemblies'
 import { registerAuthRoutes } from './routes/auth'
 import { registerBoqRoutes } from './routes/boq'
@@ -30,6 +31,7 @@ registerTakeoffRoutes(router)
 registerAssemblyRoutes(router)
 registerBoqRoutes(router)
 registerQuotationRoutes(router)
+registerAdminRoutes(router)
 
 router.get('/health', () =>
   jsonResponse({ ok: true, name: 'estimator-api', version: '0.1.0' }),

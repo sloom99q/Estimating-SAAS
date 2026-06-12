@@ -15,6 +15,8 @@ export const paths = {
   materialDetail: '/materials/:materialId',
   suppliers: '/suppliers',
   users: '/users',
+  /** Sprint-10 S10-1 — founder-only admin page. */
+  adminOrgs: '/admin/orgs',
 } as const
 
 export type AppPath = (typeof paths)[keyof typeof paths]

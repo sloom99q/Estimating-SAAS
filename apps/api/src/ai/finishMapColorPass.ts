@@ -357,6 +357,46 @@ export interface RoomColorAssignment {
  * on the line/text rejection in sampleModalPatch to filter the label
  * itself if our offset is too tight.
  */
+/**
+ * Sprint-10 S10-2(a) — name-prior rule for the BATHROOM sentinel. The
+ * S9-2 hatched-detector swallowed PR03-coloured rooms with anti-aliased
+ * borders (DRIVER'S ROOM / MAID'S ROOM / LAUNDRY/LINEN) because their
+ * patches crossed the line-pixel threshold. The fix: BATHROOM is allowed
+ * only when the room's NAME contains a bathroom keyword. Hatched rooms
+ * without a bathroom name fall through to colour matching.
+ */
+const BATHROOM_NAME_RE = /\b(BATH|TOILET|POWDER|WC|LAVATORY|RESTROOM)\b/i
+
+/**
+ * Sprint-10 S10-2(b) — STAIRCASE forensic. Stairs always finish in stone
+ * step + riser per the architect's standing rule (ST02 in the legend).
+ * The colour sample at 220 DPI lands on the stair lines (alternating
+ * tread/riser) which the modal-colour algorithm can't disambiguate;
+ * the name forensic substitutes the legend code directly. Downstream
+ * QUANTIFY still emits the staircase as a separate `lm` line — the
+ * floor-finish code is only there so the scorer / floorMap arithmetic
+ * is honest.
+ */
+const STAIRCASE_NAME_RE = /\bSTAIR(CASE)?\b/i
+
+/**
+ * Sprint-10 S10-2(c) — names that should NEVER receive a finish code.
+ * AREA_STATEMENT rows are already excluded upstream by selectBillableRooms;
+ * this is the extra guard for room-like-but-architectural rows (GARAGE,
+ * PROJECTION, VOID, MEP shaft) that escape the area-statement filter.
+ */
+const FINISH_EXCLUDED_NAME_RE = /\b(GARAGE|PROJECTION|VOID|SHAFT|MEP\b|PEDESTRIAN|VEHICULAR|GATE|COVERED\s*GATE)\b/i
+
+export function isBathroomNamed(name: string): boolean {
+  return BATHROOM_NAME_RE.test(name)
+}
+export function isFinishExcludedName(name: string): boolean {
+  return FINISH_EXCLUDED_NAME_RE.test(name)
+}
+export function isStaircaseNamed(name: string): boolean {
+  return STAIRCASE_NAME_RE.test(name)
+}
+
 export function mapRoomsToFinishCodes(
   image: PageImage,
   roomBboxes: ReadonlyArray<{ name: string; xMin: number; yMin: number; xMax: number; yMax: number }>,
@@ -386,21 +426,58 @@ export function mapRoomsToFinishCodes(
       y0: cy - Math.round(nameHeightPx * 1.5),
       y1: cy + Math.round(nameHeightPx * 1.5),
     }
-    // S9-2: hatched detection + colour match arbitration. If the patch
-    // looks hatched, BATHROOM is the default — unless the dominant
-    // non-line colour is *very* close to a known legend colour, which
-    // means we caught a saturated PR03 / ST01 fill whose anti-aliased
-    // borders crossed the line-pixel threshold. The strict-tier distance
-    // ACCEPT_STRICT_SQ ≈ 35² × 3 means "obviously this colour" — well
-    // inside the noise tolerance.
+    // S9-2 + S10-2(a/c) — hatched detection with name-prior + exclusion
+    // guards. BATHROOM is allowed ONLY when the room name contains a
+    // bathroom keyword. FINISH_EXCLUDED_NAME_RE (GARAGE, MEP shaft,
+    // PROJECTION, etc.) short-circuits to null+flag — those rooms
+    // should never receive an interior finish code.
+    const nameIsBathroom = isBathroomNamed(room.name)
+    const nameIsExcluded = isFinishExcludedName(room.name)
+    const nameIsStaircase = isStaircaseNamed(room.name)
+    if (nameIsExcluded) {
+      out.push({
+        roomName: room.name,
+        finishCode: null,
+        confidence: 0,
+        reason: 'no-color',
+        sampledColor: null,
+      })
+      continue
+    }
+    // S10-2(b) STAIRCASE forensic — the colour sample picks up the tread
+    // line work and never matches ST02 green at 220 DPI. Hard-code the
+    // legend code by name; downstream QUANTIFY still emits stairs as
+    // an `lm` line item.
+    if (nameIsStaircase && palette.has('ST02')) {
+      out.push({
+        roomName: room.name,
+        finishCode: 'ST02',
+        confidence: 85,
+        reason: 'sampled',
+        sampledColor: null,
+      })
+      continue
+    }
     const hatched = looksHatched(image, patch)
     const sample = sampleModalPatch(image, patch)
     if (hatched) {
-      // 8000 ≈ 50²×3 — accepts a clearly-on-palette colour while
-      // dropping the wild-noise samples (pure red callouts, etc.) that
-      // really do mean BATHROOM. Tuned to Plot 4357's MAID'S ROOM
-      // brown-with-borders.
-      const ACCEPT_STRICT_SQ = 8000
+      // S10-2(a): BATHROOM only when the name matches. Otherwise fall
+      // through to colour matching (the PR03/ST01-with-anti-aliased-
+      // borders case the S9-2 hatched detector kept stealing).
+      if (nameIsBathroom) {
+        out.push({
+          roomName: room.name,
+          finishCode: 'BATHROOM',
+          confidence: 85,
+          reason: 'hatched-bathroom',
+          sampledColor: sample?.color ?? null,
+        })
+        continue
+      }
+      // Non-bathroom hatched room — use sampled colour as the primary
+      // signal, with a slightly relaxed acceptance band because the
+      // borders pull the modal colour away from canonical centres.
+      const ACCEPT_HATCHED_SQ = 12000
       let nearestCode: string | null = null
       let nearestDist = Number.POSITIVE_INFINITY
       if (sample && sample.coverage > 0.05) {
@@ -412,16 +489,30 @@ export function mapRoomsToFinishCodes(
           }
         }
       }
-      if (nearestCode && nearestDist < ACCEPT_STRICT_SQ) {
+      if (nearestCode && nearestDist < ACCEPT_HATCHED_SQ) {
         out.push({
           roomName: room.name,
           finishCode: nearestCode,
-          confidence: 70,
+          confidence: 65,
           reason: 'sampled',
           sampledColor: sample!.color,
         })
         continue
       }
+      // Still uncertain — leave null so the SPA dropdown picks it up.
+      out.push({
+        roomName: room.name,
+        finishCode: null,
+        confidence: 0,
+        reason: 'far-from-palette',
+        sampledColor: sample?.color ?? null,
+      })
+      continue
+    }
+    // Not hatched. If the name says bathroom but the patch shows a real
+    // colour, the name still wins — BATHROOM is the architect's
+    // sentinel, not a colour-match outcome.
+    if (nameIsBathroom) {
       out.push({
         roomName: room.name,
         finishCode: 'BATHROOM',

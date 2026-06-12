@@ -18,6 +18,13 @@ export type Permission =
   | 'materials:write'
   | 'settings:write'
 
+/**
+ * Sprint-10 S10-1 — platform-level role for the founder admin gate.
+ * Null on every tenant user; 'founder' for the platform admin who can
+ * see /admin/orgs and provision tenants (ADR-018).
+ */
+export type PlatformRole = 'founder' | null
+
 export interface AuthUser {
   id: ID
   organizationId: ID
@@ -26,6 +33,7 @@ export interface AuthUser {
   fullName: string
   role: Role
   avatarUrl: string | null
+  platformRole: PlatformRole
 }
 
 export interface Session {

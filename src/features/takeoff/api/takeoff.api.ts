@@ -196,6 +196,34 @@ export async function priceBoq(boqId: string): Promise<PriceResult> {
   return withAuth<PriceResult>(`/api/boqs/${boqId}/price`, { method: 'POST' })
 }
 
+/**
+ * Sprint-10 S10-3 — Add a MANUAL BoqLine into a chosen section.
+ * EITHER {rate} or {isProvisional, psAmount} per the API contract.
+ */
+export interface AddBoqLinePayload {
+  description: string
+  brand?: string
+  unit: string
+  qty: number
+  rate?: number
+  isProvisional?: boolean
+  psAmount?: number
+}
+export interface AddBoqLineResult {
+  id: string
+  itemRef: string
+}
+export async function addManualBoqLine(
+  boqId: string,
+  sectionId: string,
+  payload: AddBoqLinePayload,
+): Promise<AddBoqLineResult> {
+  return withAuth<AddBoqLineResult>(`/api/boqs/${boqId}/sections/${sectionId}/lines`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
 export function xlsxDownloadUrl(boqId: string, includeInternal = false): string {
   if (!env.apiUrl) return ''
   const params = includeInternal ? '?includeInternal=1' : ''

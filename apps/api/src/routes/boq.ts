@@ -437,6 +437,122 @@ export function registerBoqRoutes(router: Router): void {
     }),
   )
 
+  /**
+   * Sprint-10 S10-3 — Add a MANUAL BoqLine to a chosen section.
+   *
+   *   POST /api/boqs/:id/sections/:sectionId/lines
+   *
+   * Used by the quotation UI's "Add line" button. Free-form line — the
+   * caller supplies description, unit, qty, plus EITHER a rate (cost
+   * line) OR a P/S flag (carry forward). Recompute happens client-side
+   * for the section sum; the PRICE job is the authoritative
+   * recomputation when the user clicks Re-price.
+   */
+  router.post(
+    '/api/boqs/:id/sections/:sectionId/lines',
+    requireAuth(async (req, ctx) => {
+      const db = tenantDb(ctx.organizationId)
+      const boq = await db.boq.findFirst({
+        where: { id: ctx.params.id, deletedAt: null },
+        select: { id: true, projectId: true },
+      })
+      if (!boq) return errorResponse(404, 'BOQ not found')
+      const section = await db.boqSection.findFirst({
+        where: { id: ctx.params.sectionId, boqId: boq.id },
+        select: { id: true, code: true },
+      })
+      if (!section) return errorResponse(404, 'BOQ section not found in this BOQ')
+      let raw: unknown
+      try {
+        raw = await req.json()
+      } catch {
+        return errorResponse(400, 'Invalid JSON body')
+      }
+      const body = z
+        .object({
+          description: z.string().min(1).max(500),
+          brand: z.string().max(120).optional(),
+          unit: z.string().min(1).max(20),
+          qty: z.number().finite().nonnegative(),
+          // EITHER rate (cost line) OR isProvisional with psAmount.
+          rate: z.number().finite().nonnegative().optional(),
+          isProvisional: z.boolean().optional(),
+          psAmount: z.number().finite().nonnegative().optional(),
+        })
+        .refine(
+          (b) =>
+            (b.rate !== undefined && b.isProvisional !== true) ||
+            (b.isProvisional === true && b.psAmount !== undefined),
+          'Provide rate for a costed line, or isProvisional=true + psAmount for a P/S carry',
+        )
+        .safeParse(raw)
+      if (!body.success) {
+        return errorResponse(400, 'Invalid payload', body.error.format())
+      }
+      const existingLines = await db.boqLine.findMany({
+        where: { boqId: boq.id, sectionId: section.id },
+        select: { sortOrder: true, itemRef: true },
+      })
+      const nextSort = existingLines.reduce((max, l) => Math.max(max, l.sortOrder), 0) + 10
+      const nextNumber = existingLines.length + 1
+      const itemRef = `${section.code}/${String(nextNumber).padStart(3, '0')}`
+      const description = body.data.brand
+        ? `${body.data.description} (${body.data.brand})`
+        : body.data.description
+      const amount =
+        body.data.rate !== undefined ? body.data.rate * body.data.qty : null
+      const created = await db.boqLine.create({
+        data: {
+          organizationId: ctx.organizationId,
+          boqId: boq.id,
+          sectionId: section.id,
+          itemRef,
+          description,
+          unit: body.data.unit,
+          qty: body.data.qty,
+          rate: body.data.rate ?? null,
+          rateSource: body.data.rate !== undefined ? 'MANUAL' : null,
+          amount,
+          isProvisional: body.data.isProvisional ?? false,
+          psAmount: body.data.psAmount ?? null,
+          sortOrder: nextSort,
+        },
+      })
+      // S10-3 MANUAL provenance — Correction-style audit row so the
+      // data-quality flow knows this line is human-supplied.
+      await db.correction.create({
+        data: {
+          organizationId: ctx.organizationId,
+          entity: 'BoqLine',
+          entityId: created.id,
+          field: 'MANUAL',
+          aiValue: null,
+          humanValue: itemRef,
+          reason: 'Add Line from quotation UI',
+          userId: ctx.user.id,
+        },
+      })
+      // Bump the BOQ subtotal optimistically; the next PRICE run owns
+      // the canonical recompute.
+      if (amount !== null) {
+        await db.boq.update({
+          where: { id: boq.id },
+          data: {
+            subtotal: { increment: amount },
+          },
+        })
+      } else if (body.data.psAmount !== undefined) {
+        await db.boq.update({
+          where: { id: boq.id },
+          data: {
+            totalProvisional: { increment: body.data.psAmount },
+          },
+        })
+      }
+      return jsonResponse({ id: created.id, itemRef }, 201)
+    }),
+  )
+
   /** Enqueue a QUANTIFY job. Stops short of automatic chain — user-triggered. */
   router.post(
     '/api/projects/:id/quantify',

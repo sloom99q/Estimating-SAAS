@@ -24,6 +24,10 @@ function buildSession(opts: {
   organizationId: string
   organizationName: string
   role: string
+  /** Sprint-10 S10-1 — platform-level role, e.g. 'founder'. Null for
+   *  every normal tenant user. The SPA shows the /admin/orgs entry
+   *  point only when this is 'founder'. */
+  platformRole: string | null
 }) {
   return {
     token: opts.token,
@@ -36,6 +40,7 @@ function buildSession(opts: {
       organizationId: opts.organizationId,
       organizationName: opts.organizationName,
       role: opts.role,
+      platformRole: opts.platformRole,
     },
   }
 }
@@ -92,6 +97,7 @@ export function registerAuthRoutes(router: Router): void {
         organizationId: membership.organizationId,
         organizationName: membership.organization.name,
         role: membership.role,
+        platformRole: user.platformRole,
       }),
     )
   })
@@ -99,6 +105,13 @@ export function registerAuthRoutes(router: Router): void {
   router.get(
     '/api/auth/me',
     requireAuth(async (_req, ctx) => {
+      // Sprint-10 S10-1 — fetch platformRole fresh so a founder who
+      // self-promotes via the database is reflected in /me without a
+      // full re-login.
+      const dbUser = await prisma.user.findUnique({
+        where: { id: ctx.user.id },
+        select: { platformRole: true },
+      })
       return jsonResponse({
         user: {
           id: ctx.user.id,
@@ -108,6 +121,7 @@ export function registerAuthRoutes(router: Router): void {
           organizationId: ctx.organizationId,
           organizationName: ctx.organizationName,
           role: ctx.role,
+          platformRole: dbUser?.platformRole ?? null,
         },
       })
     }),

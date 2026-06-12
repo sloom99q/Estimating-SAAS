@@ -116,6 +116,10 @@ model User {
   passwordHash String
   avatarUrl    String?
   isSuperAdmin Boolean   @default(false)
+  /// Sprint-10 S10-1: platform-level role for founder visibility. Null for
+  /// every tenant user; 'founder' for the platform admin who can list
+  /// orgs and provision new ones. Read+provision only — see ADR-018.
+  platformRole String?
   createdAt    DateTime  @default(now()) @db.Timestamptz(6)
   updatedAt    DateTime  @updatedAt @db.Timestamptz(6)
   deletedAt    DateTime? @db.Timestamptz(6)
