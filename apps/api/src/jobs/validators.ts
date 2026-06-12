@@ -34,6 +34,7 @@ export type ValidationRule =
   | 'TAG_COVERAGE'
   | 'UNIT_SANITY'
   | 'DUPLICATE_TAG'
+  | 'ROOMS_AREA_RECONCILE'
 
 export type ValidationSeverity = 'ERROR' | 'WARN' | 'INFO'
 
@@ -58,6 +59,14 @@ export interface ValidatorContext {
   windows: ValidatorTakeoffItem[]
   /** Concatenated text-layer blobs of all PLAN / FINISH_PLAN sheets. */
   planTextBlob: string
+  /** Sprint-8 S8-5: post-dedup unique room areas (m²). */
+  roomAreasM2?: number[]
+  /**
+   * Sprint-8 S8-5: declared Built-Up Area from the cover/register sheet.
+   * The handler ships this in if it can recover it from the text layer
+   * (e.g. "BUA: 584 m²"). If unknown we skip the rule rather than fail it.
+   */
+  declaredBuaM2?: number | null
 }
 
 // ---------- CATEGORY_SANITY ----------
@@ -215,11 +224,84 @@ function duplicateTag(ctx: ValidatorContext): ValidationResult[] {
 
 // ---------- Entry point ----------
 
+// ---------- BUA recovery helper (Sprint-8 S8-5) ----------
+
+/**
+ * Recover a Built-Up Area declaration from cover/register-sheet text. Looks
+ * for patterns like:
+ *   - "BUA: 584 m²"
+ *   - "BUA = 584 sqm"
+ *   - "Built Up Area  584.00 m2"
+ *   - "Total Built-up Area: 584 sqm"
+ * Returns null if no clean match is found. We only accept one value; multi-
+ * value matches (a basement + GF + L1 table) get skipped so the validator
+ * doesn't compare against the wrong total.
+ */
+const BUA_LABEL_RE = /(?:BUA|BUILT[\s-]*UP\s*AREA)/i
+const BUA_NUMBER_RE = /([0-9]{2,5}(?:\.[0-9]{1,2})?)\s*(?:m\s*²|m2|sqm|m\.?\s*sq\.?)/i
+
+export function recoverBuaFromText(text: string): number | null {
+  const matches: number[] = []
+  const lines = text.split(/\r?\n/)
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!
+    if (!BUA_LABEL_RE.test(line)) continue
+    // Same line first
+    const sameLine = line.match(BUA_NUMBER_RE)
+    if (sameLine) {
+      matches.push(Number.parseFloat(sameLine[1]!))
+      continue
+    }
+    // Next line (BUA label / value can stack vertically)
+    for (let j = i + 1; j <= Math.min(lines.length - 1, i + 3); j++) {
+      const peek = lines[j]!.match(BUA_NUMBER_RE)
+      if (peek) {
+        matches.push(Number.parseFloat(peek[1]!))
+        break
+      }
+    }
+  }
+  const unique = Array.from(new Set(matches.map((n) => Math.round(n * 100) / 100)))
+  if (unique.length === 1) return unique[0]!
+  return null
+}
+
+// ---------- ROOMS_AREA_RECONCILE (Sprint-8 S8-5) ----------
+
+const ROOMS_AREA_TOLERANCE = 0.2 // ±20%
+
+function roomsAreaReconcile(ctx: ValidatorContext): ValidationResult[] {
+  const areas = ctx.roomAreasM2 ?? []
+  const bua = ctx.declaredBuaM2 ?? null
+  if (bua === null || areas.length === 0) return []
+  const sum = areas.reduce((a, b) => a + b, 0)
+  const lo = bua * (1 - ROOMS_AREA_TOLERANCE)
+  const hi = bua * (1 + ROOMS_AREA_TOLERANCE)
+  if (sum >= lo && sum <= hi) return []
+  // Outside the band — WARN, not ERROR. The cause might be excluded rooms
+  // (terraces, garages, voids the BUA convention drops); BOQ will mark the
+  // unassigned bucket SUSPECT so the reviewer sees the gap immediately.
+  const drift = ((sum - bua) / bua) * 100
+  const direction = drift > 0 ? 'above' : 'below'
+  return [
+    {
+      rule: 'ROOMS_AREA_RECONCILE',
+      severity: 'WARN',
+      message:
+        `Sum of ${areas.length} unique room areas = ${sum.toFixed(2)} m², ` +
+        `declared BUA = ${bua.toFixed(2)} m². ${Math.abs(drift).toFixed(1)}% ${direction} BUA ` +
+        `(tolerance ±${(ROOMS_AREA_TOLERANCE * 100).toFixed(0)}%). ` +
+        `Unassigned-finish rooms in the BOQ are flagged SUSPECT.`,
+    },
+  ]
+}
+
 export function runValidators(ctx: ValidatorContext): ValidationResult[] {
   return [
     ...categorySanity(ctx),
     ...tagCoverage(ctx),
     ...unitSanity(ctx),
     ...duplicateTag(ctx),
+    ...roomsAreaReconcile(ctx),
   ]
 }

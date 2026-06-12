@@ -45,6 +45,14 @@ const server = Bun.serve({
 // be added later by booting this module without `Bun.serve`.
 startWorker()
 
+// Sprint-8 S8-6: log the *resolved* AI_MODE at boot. The S7-5 live run got
+// wasted because the .env had AI_MODE=live but the server had been launched
+// with AI_MODE=stub — the operator had no way to tell from a quick log
+// glance. This line ends that ambiguity.
+const aiModeBanner =
+  config.aiMode === 'live'
+    ? `AI_MODE=live (key=${config.anthropicApiKey ? 'set' : 'MISSING'}, model=${config.anthropicModel})`
+    : 'AI_MODE=stub (no Anthropic calls; deterministic stub outputs)'
 console.log(
-  `[estimator-api] listening on http://${server.hostname}:${server.port}  ·  cors=${config.corsOrigin}`,
+  `[estimator-api] listening on http://${server.hostname}:${server.port}  ·  cors=${config.corsOrigin}  ·  ${aiModeBanner}`,
 )

@@ -365,6 +365,12 @@ model Job {
   result         Json?
   /// When the row should next become eligible for claim. Null = immediately.
   scheduledFor   DateTime? @db.Timestamptz(6)
+  /// Sprint-8 S8-6: the AI_MODE the worker resolved when it claimed this job.
+  /// 'live' = real Anthropic calls; 'stub' = deterministic stub output.
+  /// Lets ops tell at a glance whether a job that "worked" actually billed
+  /// tokens or returned canned data (the S7-5 stub-run papercut). Null
+  /// only for very-old rows from before the column existed.
+  aiMode         String?
   createdAt      DateTime  @default(now()) @db.Timestamptz(6)
   startedAt      DateTime? @db.Timestamptz(6)
   finishedAt     DateTime? @db.Timestamptz(6)

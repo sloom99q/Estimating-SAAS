@@ -108,7 +108,8 @@ export async function tick(): Promise<JobRecord | null> {
     UPDATE "jobs"
     SET status      = 'RUNNING',
         "startedAt" = NOW(),
-        attempts    = attempts + 1
+        attempts    = attempts + 1,
+        "aiMode"    = ${config.aiMode}
     WHERE id = (
       SELECT id FROM due_jobs
       WHERE "organizationId" = (SELECT "organizationId" FROM fair_org)

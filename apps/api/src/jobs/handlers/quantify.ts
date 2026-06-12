@@ -81,7 +81,9 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
 
   // S6-3: load ROOM items (real takeoff) and LEGEND items (for wall feature
   // finishes). Both live in TakeoffItem under different category + meta.kind.
-  const [rooms, legendItems] = await Promise.all([
+  // S8-5: also look up whether ROOMS_AREA_RECONCILE fired — if so, the
+  // unassigned floor bucket gets labelled SUSPECT in the BOQ.
+  const [rooms, legendItems, areaReconcileFlag] = await Promise.all([
     prisma.takeoffItem.findMany({
       where: {
         organizationId: job.organizationId,
@@ -99,7 +101,17 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
         tag: { not: null },
       },
     }),
+    prisma.validationFlag.findFirst({
+      where: {
+        organizationId: job.organizationId,
+        projectId: payload.projectId,
+        rule: 'ROOMS_AREA_RECONCILE',
+        resolved: false,
+      },
+      select: { id: true },
+    }),
   ])
+  const roomsAreaSuspect = areaReconcileFlag !== null
 
   const summary: DerivedSummary = {
     created: 0,
@@ -162,7 +174,7 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
       category: 'FLOOR_FINISH',
       tag,
       description: isUnassigned
-        ? `Floor finish — UNASSIGNED rooms (${bucket.rooms.length})`
+        ? `Floor finish — UNASSIGNED rooms (${bucket.rooms.length})${roomsAreaSuspect ? ' [SUSPECT — area vs BUA mismatch]' : ''}`
         : `${describeLegend(finishCode)} — interior floors (${roomNames.slice(0, 4).join(', ')}${roomNames.length > 4 ? `, …+${bucket.rooms.length - 4}` : ''})`,
       unit: 'm²',
       qty: bucket.totalArea,
@@ -174,6 +186,11 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
         roomIds: bucket.rooms.map((r) => r.id),
         totalAreaM2: bucket.totalArea,
         derivedKey: `floor:${finishCode}`,
+        // S8-5: when the validator fired, mark the unassigned bucket SUSPECT
+        // so downstream BOQ/PRICE/XLSX render it with a clear caveat. The
+        // human reviewer sees both the validator flag AND the line itself
+        // saying "trust this less".
+        suspect: isUnassigned && roomsAreaSuspect ? true : undefined,
       },
       summary,
     })

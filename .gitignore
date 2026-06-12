@@ -53,5 +53,12 @@ apps/api/fixtures/**
 # drive the spatial parser's TDD test. Commit them.
 !apps/api/fixtures/bbox/
 !apps/api/fixtures/bbox/*.json
+# Sprint-8 S8-1: I4xx text-layer fixtures for the legend text-pass tests.
+!apps/api/fixtures/text-layer/
+!apps/api/fixtures/text-layer/*.txt
 apps/api/data/
 apps/api/tmp/
+
+# Sprint-8 S8-6: Claude harness state (scheduled-tasks lock, transcripts,
+# memory snapshots) is per-machine session state, not source.
+.claude/

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { runValidators, type ValidatorContext } from './validators'
+import { recoverBuaFromText, runValidators, type ValidatorContext } from './validators'
 
 const baseCtx: ValidatorContext = {
   projectType: 'residential',
@@ -89,5 +89,49 @@ describe('runValidators — Sprint 4 net', () => {
       planTextBlob: 'plan mentions D01-A and D01-B',
     }
     expect(runValidators(ctx).filter((f) => f.rule === 'DUPLICATE_TAG')).toEqual([])
+  })
+
+  // -------- Sprint 8 S8-5 ROOMS_AREA_RECONCILE --------
+
+  test('ROOMS_AREA_RECONCILE skipped without BUA', () => {
+    const ctx: ValidatorContext = { ...baseCtx, roomAreasM2: [10, 20, 30], declaredBuaM2: null }
+    expect(runValidators(ctx).find((f) => f.rule === 'ROOMS_AREA_RECONCILE')).toBeUndefined()
+  })
+
+  test('ROOMS_AREA_RECONCILE passes when sum is within ±20% of BUA', () => {
+    const ctx: ValidatorContext = { ...baseCtx, roomAreasM2: [200, 200, 200], declaredBuaM2: 584 }
+    expect(runValidators(ctx).find((f) => f.rule === 'ROOMS_AREA_RECONCILE')).toBeUndefined()
+  })
+
+  test('ROOMS_AREA_RECONCILE fires WARN when sum drifts beyond ±20%', () => {
+    const ctx: ValidatorContext = { ...baseCtx, roomAreasM2: [50, 50, 50], declaredBuaM2: 584 }
+    const flag = runValidators(ctx).find((f) => f.rule === 'ROOMS_AREA_RECONCILE')
+    expect(flag).toBeDefined()
+    expect(flag!.severity).toBe('WARN')
+    expect(flag!.message).toMatch(/150/)
+    expect(flag!.message).toMatch(/584/)
+    expect(flag!.message).toMatch(/below BUA/i)
+  })
+
+  // -------- Sprint 8 S8-5 BUA recovery --------
+
+  test('recoverBuaFromText finds "BUA: 584 m²"', () => {
+    expect(recoverBuaFromText('Notes\nBUA: 584 m²\n')).toBe(584)
+  })
+
+  test('recoverBuaFromText finds "Built Up Area = 584 sqm"', () => {
+    expect(recoverBuaFromText('Built Up Area = 584 sqm')).toBe(584)
+  })
+
+  test('recoverBuaFromText handles the label/value on adjacent lines', () => {
+    expect(recoverBuaFromText('BUA\n584.00 m²')).toBe(584)
+  })
+
+  test('recoverBuaFromText returns null on ambiguous multi-value blobs', () => {
+    expect(recoverBuaFromText('BUA: 100 m²\nBUA: 250 m²')).toBeNull()
+  })
+
+  test('recoverBuaFromText returns null when no label present', () => {
+    expect(recoverBuaFromText('Just some area: 584 m²')).toBeNull()
   })
 })

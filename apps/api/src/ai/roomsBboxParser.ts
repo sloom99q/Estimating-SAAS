@@ -125,6 +125,14 @@ interface NameBlock {
 
 function isNameToken(tok: Token): boolean {
   const t = tok.text.trim()
+  // S8-2: room labels like "01 BEDROOM" and "02 BEDROOM" land in the bbox
+  // output as TWO tokens, the leading "01" / "02" being a standalone
+  // 2-digit token that the original parser rejected because it didn't
+  // match NAME_TOKEN_RE. We now treat short numeric tokens as name
+  // candidates so the stacker can join them onto the BEDROOM line
+  // immediately below. AREA_RE (with the required decimal) rules out
+  // confusion with measured values.
+  if (/^\d{1,2}$/.test(t)) return true
   if (t.length < 3) return false
   if (!NAME_TOKEN_RE.test(t)) return false
   // Reject schedule tags like 'D05', 'CW09', 'W14', 'A301'.

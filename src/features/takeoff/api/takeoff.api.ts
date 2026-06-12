@@ -42,6 +42,8 @@ export interface JobDto {
   attempts: number
   error: string | null
   result: unknown
+  /** Sprint-8 S8-6: 'live' / 'stub' / null (rows pre-dating the column). */
+  aiMode: 'live' | 'stub' | null
   createdAt: string
   startedAt: string | null
   finishedAt: string | null
@@ -132,6 +134,58 @@ export async function patchTakeoffItem(
     method: 'PATCH',
     body: JSON.stringify(payload),
   })
+}
+
+/**
+ * Sprint-8 S8-7 — owner-runnable BOQ flow from the SPA.
+ *
+ *   1. quantify  — derives FLOOR/WALL/CEILING totals from rooms+legend
+ *   2. boq       — assembles BOQ from quantified takeoff items
+ *   3. price     — runs the pricing waterfall against the BOQ
+ *   4. XLSX URL  — link the user can click to download the rendered file
+ */
+export interface QuantifyResult {
+  jobId: string
+}
+export async function startQuantify(projectId: string): Promise<QuantifyResult> {
+  return withAuth<QuantifyResult>(`/api/projects/${projectId}/quantify`, { method: 'POST' })
+}
+
+export interface BoqCreateResult {
+  id: string
+  version: number
+  status: string
+  subtotal: string | null
+  totalProvisional: string | null
+}
+export async function generateBoq(projectId: string): Promise<BoqCreateResult> {
+  return withAuth<BoqCreateResult>(`/api/projects/${projectId}/boq`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  })
+}
+
+export interface PriceResult {
+  jobId: string
+}
+export async function priceBoq(boqId: string): Promise<PriceResult> {
+  return withAuth<PriceResult>(`/api/boqs/${boqId}/price`, { method: 'POST' })
+}
+
+export function xlsxDownloadUrl(boqId: string, includeInternal = false): string {
+  if (!env.apiUrl) return ''
+  const params = includeInternal ? '?includeInternal=1' : ''
+  return `${env.apiUrl}/api/boqs/${boqId}/export.xlsx${params}`
+}
+
+export interface JobLite {
+  id: string
+  status: 'QUEUED' | 'RUNNING' | 'DONE' | 'FAILED'
+  result: unknown
+  error: string | null
+}
+export async function fetchJob(jobId: string): Promise<JobLite> {
+  return withAuth<JobLite>(`/api/jobs/${jobId}`)
 }
 
 /**

@@ -19,6 +19,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { prisma } from '../src/db'
 import { normalizeFloor, setFloorAliases } from '../src/ai/floorNormalize'
+import { normalizeRoomName as handlerNormalizeRoomName } from '../src/jobs/handlers/extractRooms'
 
 interface GroundTruthDoor {
   tag: string
@@ -123,12 +124,14 @@ function dimsAcceptable(
   return direct || swapped
 }
 
+/**
+ * Sprint-8 S8-2: import the SAME normaliser the handler uses for dedup. The
+ * scorer's old version casefolded only — letting "MASTER BATH FF-10" and
+ * "MASTER BATH" land as two different rooms, which was the silent contributor
+ * to "found by name+floor = 21/22" looking fine while the area count was 12/22.
+ */
 function normalizeRoomName(s: string): string {
-  return s
-    .toUpperCase()
-    .replace(/[^\w']+/g, ' ')
-    .trim()
-    .replace(/\s+/g, ' ')
+  return handlerNormalizeRoomName(s)
 }
 
 async function main(): Promise<void> {
@@ -204,22 +207,61 @@ async function main(): Promise<void> {
   let doorTP = 0
   let doorInventedD09 = 0
   const doorMisses: string[] = []
+  // S8-4: collect a row-level audit so the scorer's "8/9" answer is
+  // diagnosable at a glance. Every door is reported with both expected
+  // and extracted (width, height, count); failing rows are flagged.
+  interface DoorRowReport {
+    tag: string
+    expected: { width_mm: number; height_mm: number; count: number }
+    actual: { width_mm: number | null; height_mm: number | null; count: number | null }
+    acceptAlternates: Array<{ width_mm?: number; height_mm?: number; count?: number }>
+    status: 'OK' | 'DIMS' | 'COUNT' | 'MISS'
+  }
+  const doorRows: DoorRowReport[] = []
   for (const expected of gt.doors.items) {
     const actual = doorByTag.get(expected.tag)
     if (!actual) {
       doorMisses.push(expected.tag)
+      doorRows.push({
+        tag: expected.tag,
+        expected: { width_mm: expected.width_mm, height_mm: expected.height_mm, count: expected.count },
+        actual: { width_mm: null, height_mm: null, count: null },
+        acceptAlternates: (expected as { acceptAlternates?: DoorRowReport['acceptAlternates'] }).acceptAlternates ?? [],
+        status: 'MISS',
+      })
       continue
     }
     const meta = (actual.meta ?? {}) as Record<string, unknown>
     const actualW = typeof meta.width_mm === 'number' ? meta.width_mm : null
     const actualH = typeof meta.height_mm === 'number' ? meta.height_mm : null
     const actualCount = typeof meta.count === 'number' ? meta.count : null
-    const dimsOk = dimsAcceptable(
+    const acceptAlternates =
+      ((expected as { acceptAlternates?: DoorRowReport['acceptAlternates'] }).acceptAlternates ?? []) as DoorRowReport['acceptAlternates']
+    const dimsOkPrimary = dimsAcceptable(
       { width_mm: expected.width_mm, height_mm: expected.height_mm },
       { width_mm: actualW, height_mm: actualH },
     )
-    const countOk = actualCount === null || actualCount === expected.count
+    const dimsOkAlt = acceptAlternates.some((alt) =>
+      dimsAcceptable(
+        {
+          width_mm: alt.width_mm ?? expected.width_mm,
+          height_mm: alt.height_mm ?? expected.height_mm,
+        },
+        { width_mm: actualW, height_mm: actualH },
+      ),
+    )
+    const dimsOk = dimsOkPrimary || dimsOkAlt
+    const countOkPrimary = actualCount === null || actualCount === expected.count
+    const countOkAlt = acceptAlternates.some((alt) => alt.count !== undefined && actualCount === alt.count)
+    const countOk = countOkPrimary || countOkAlt
     if (dimsOk && countOk) doorTP += 1
+    doorRows.push({
+      tag: expected.tag,
+      expected: { width_mm: expected.width_mm, height_mm: expected.height_mm, count: expected.count },
+      actual: { width_mm: actualW, height_mm: actualH, count: actualCount },
+      acceptAlternates,
+      status: dimsOk && countOk ? 'OK' : !dimsOk ? 'DIMS' : 'COUNT',
+    })
   }
   if (doorByTag.has('D09')) doorInventedD09 = 1
   const extraDoors = doors.filter((d) => !gt.doors.items.some((g) => g.tag === d.tag))
@@ -236,6 +278,26 @@ async function main(): Promise<void> {
   console.log(`  invented D09      : ${doorInventedD09 === 0 ? `${COLOR.green}no${COLOR.reset}` : `${COLOR.red}YES (FAIL)${COLOR.reset}`}`)
   if (extraDoors.length > 0) {
     console.log(`  unexpected extras : ${extraDoors.map((d) => d.tag ?? '?').join(', ')}`)
+  }
+  // S8-4 raw values per door — the diagnostic the architect asked for. This
+  // makes every failure show its drift in the scorer output, removing the
+  // "8/9 — but which one?" guess and surfacing source-conflict candidates
+  // for the ADR-015 acceptAlternates list.
+  console.log(`  per-row values    :`)
+  for (const r of doorRows) {
+    const exp = `w=${r.expected.width_mm}  h=${r.expected.height_mm}  n=${r.expected.count}`
+    const got =
+      r.status === 'MISS'
+        ? '(not extracted)'
+        : `w=${r.actual.width_mm ?? '?'}  h=${r.actual.height_mm ?? '?'}  n=${r.actual.count ?? '?'}`
+    const flag =
+      r.status === 'OK'
+        ? `${COLOR.green}OK${COLOR.reset}`
+        : `${COLOR.red}${r.status}${COLOR.reset}`
+    const alt = r.acceptAlternates.length
+      ? `  ${COLOR.dim}(accepts ${r.acceptAlternates.map((a) => Object.entries(a).map(([k, v]) => `${k}=${v}`).join(',')).join(' | ')})${COLOR.reset}`
+      : ''
+    console.log(`    ${r.tag.padEnd(4)} ${flag.padEnd(15)}  expected: ${exp}   got: ${got}${alt}`)
   }
   console.log()
 
@@ -298,23 +360,22 @@ async function main(): Promise<void> {
       deletedAt: null,
     },
   })
-  const roomsByKey = new Map<string, typeof rooms[number]>()
+  // S8-2: key by name only and choose the best-scored row per name (area >
+  // tag > confidence). Floor is informational on the surviving row.
+  const roomsByName = new Map<string, typeof rooms[number]>()
+  const scoreRoom = (i: (typeof rooms)[number]) =>
+    (i.qtyAi !== null ? 4 : 0) + (i.tag !== null ? 2 : 0) + i.confidence / 100
   for (const r of rooms) {
-    const m = (r.meta ?? {}) as Record<string, unknown>
-    const rawName = r.description.split('—')[0]?.trim() ?? ''
-    const floor =
-      (typeof m.floorNormalized === 'string' && m.floorNormalized) ||
-      normalizeFloor(typeof m.floor === 'string' ? m.floor : null) ||
-      ''
-    const key = `${normalizeRoomName(rawName)}|${floor.toUpperCase()}`
-    if (!roomsByKey.has(key)) roomsByKey.set(key, r)
+    const key = normalizeRoomName(r.description)
+    const existing = roomsByName.get(key)
+    if (!existing || scoreRoom(r) > scoreRoom(existing)) roomsByName.set(key, r)
   }
   let roomFound = 0
   let roomWithinTolerance = 0
   const roomMisses: string[] = []
   for (const expected of gt.rooms.items) {
-    const expectedKey = `${normalizeRoomName(expected.name)}|${normalizeFloor(expected.floor)?.toUpperCase() ?? ''}`
-    const actual = roomsByKey.get(expectedKey)
+    const expectedKey = normalizeRoomName(expected.name)
+    const actual = roomsByName.get(expectedKey)
     if (!actual) {
       roomMisses.push(expected.name)
       continue
@@ -345,7 +406,7 @@ async function main(): Promise<void> {
   console.log(`${COLOR.bold}Rooms${COLOR.reset}`)
   console.log(`  ground truth rooms : ${gt.rooms.items.length}`)
   console.log(`  extracted rooms    : ${rooms.length}`)
-  console.log(`  deduped to unique  : ${roomsByKey.size}`)
+  console.log(`  deduped to unique  : ${roomsByName.size}`)
   console.log(`  found by name+floor: ${roomFound}/${gt.rooms.items.length}`)
   console.log(`  within ±2% area    : ${roomWithinTolerance}/${gt.rooms.items.length}  (target ≥${gt.rooms.minNamedRoomsWithArea})`)
   console.log(`  takeoff Spaces     : ${dedupedSpaces}  (target 20-40)`)

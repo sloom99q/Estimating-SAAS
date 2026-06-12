@@ -33,7 +33,7 @@ import { roomsTextPass } from '../../ai/roomsTextPass'
 import type { ExtractRoomsRow } from '../../ai/types'
 import { getBlobStore } from '../../blob/fs'
 import { prisma } from '../../db'
-import { runValidators, type ValidatorContext } from '../validators'
+import { recoverBuaFromText, runValidators, type ValidatorContext } from '../validators'
 import type { JobHandler, JobRecord } from '../types'
 
 interface ExtractRoomsPayload {
@@ -52,6 +52,35 @@ interface ReconciledRoom {
   basis: 'MEASURED' | 'VISUAL' | 'PARAMETRIC'
   confidence: number
   mismatch: null | { field: string; vision: unknown; text: unknown }
+}
+
+/**
+ * Sprint-8 S8-2 — canonical key for room name dedup.
+ *
+ * The same room appears across plan / finish_plan / RCP sheets, often with
+ * different decorations: a floor-code suffix ("MASTER BATH FF-10"), a case
+ * mismatch ("BOH KITCHEN" vs "BOH Kitchen"), or curly-vs-straight quotes
+ * ("MAID'S ROOM" vs "MAID'S ROOM"). S7's deduper used a naive
+ * `.split('—')[0].trim().toUpperCase()` that collapsed none of these, so
+ * 22 ground-truth rooms ended up as 73 unique Spaces.
+ *
+ * Steps, in order:
+ *   1. cut off everything after the em-dash decorator the handler adds
+ *   2. casefold to upper
+ *   3. normalise curly/typographic apostrophes → straight '
+ *   4. drop floor-code suffixes (GF-08 / FF-10 / RF-02) so the same room
+ *      named with / without its code lands in one bucket
+ *   5. collapse internal whitespace and strip stray punctuation noise
+ */
+export function normalizeRoomName(raw: string): string {
+  return raw
+    .split('—')[0]!
+    .toUpperCase()
+    .replace(/[‘’ʼ]/g, "'")
+    .replace(/\b(GF|FF|RF|L1|L2|B1|B2|BF)[\s-]?\d{1,3}\b/g, '')
+    .replace(/[.,;:()]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
 }
 
 function compareNumeric(a: number | null, b: number | null): boolean {
@@ -85,10 +114,26 @@ export interface RawFinishObservation {
   textSnippetSlice: string | null
 }
 
+/**
+ * Sprint-8 S8-3 extension. When the caller has the actual legend ITEMS
+ * (not just the code list) we can do semantic matching from the room's
+ * evidence/name to the legend's material/usage description. E.g. vision
+ * says "white marble floor" → matches the legend item whose name is
+ * "WHITE MARBLE" → returns ST01.
+ */
+export interface LegendItemHint {
+  code: string
+  name: string | null
+  material: string | null
+  usage: string | null
+  kind: string | null
+}
+
 export function assignFinishCode(
   raw: RawFinishObservation,
   legendCodes: string[],
   textSnippet: string,
+  legendItems: LegendItemHint[] = [],
 ): { finishCode: string | null; finishConfidence: number | null } {
   const vocab = new Set(legendCodes.map((c) => c.toUpperCase()))
   const visionCode = (raw.visionCode ?? '').trim().toUpperCase()
@@ -108,6 +153,35 @@ export function assignFinishCode(
     const re = new RegExp(`\\b${code}\\b`)
     if (re.test(slice)) return { finishCode: code, finishConfidence: 70 }
   }
+
+  // S8-3 semantic match. Vision often returns evidence like "white marble
+  // floor in the living room" without naming the code. Walk the legend
+  // items and find ones whose NAME or MATERIAL appears in the evidence.
+  // Single-hit ⇒ assign; multi-hit ⇒ ambiguous, skip.
+  if (legendItems.length > 0 && evidence.length > 0) {
+    const hits = new Set<string>()
+    for (const item of legendItems) {
+      if (!vocab.has(item.code.toUpperCase())) continue
+      const keywords = [item.name, item.material, item.usage]
+        .filter((s): s is string => typeof s === 'string' && s.trim().length > 3)
+        .map((s) => s.toUpperCase())
+      for (const kw of keywords) {
+        // Match on phrase boundaries; "MARBLE" inside "MARBLEHEAD" doesn't
+        // count. Stripping common-noise tail words keeps phrases like
+        // "WHITE MARBLE" from being too long to match.
+        const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        const re = new RegExp(`\\b${escaped}\\b`)
+        if (re.test(evidence)) {
+          hits.add(item.code.toUpperCase())
+          break
+        }
+      }
+    }
+    if (hits.size === 1) {
+      return { finishCode: [...hits][0]!, finishConfidence: 65 }
+    }
+  }
+
   return { finishCode: null, finishConfidence: null }
 }
 
@@ -142,13 +216,21 @@ export async function remapFinishesForProject(
       select: { id: true, category: true, tag: true, meta: true },
     }),
   ])
-  const legendCodes = legendItems
-    .filter((i) => {
-      const m = (i.meta ?? {}) as Record<string, unknown>
-      return m.kind === 'LEGEND'
-    })
-    .map((i) => i.tag!)
-    .concat(['BATHROOM'])
+  const legendLookup = legendItems.filter((i) => {
+    const m = (i.meta ?? {}) as Record<string, unknown>
+    return m.kind === 'LEGEND'
+  })
+  const legendCodes = legendLookup.map((i) => i.tag!).concat(['BATHROOM'])
+  const legendHints: LegendItemHint[] = legendLookup.map((i) => {
+    const m = (i.meta ?? {}) as Record<string, unknown>
+    return {
+      code: i.tag!,
+      name: typeof m.name === 'string' ? m.name : null,
+      material: typeof m.material === 'string' ? m.material : null,
+      usage: typeof m.usage === 'string' ? m.usage : null,
+      kind: typeof m.legendKind === 'string' ? m.legendKind : null,
+    }
+  })
   let newlyMapped = 0
   let changedCode = 0
   let unchanged = 0
@@ -167,7 +249,7 @@ export async function remapFinishesForProject(
         evidence,
         textSnippetSlice: null,
       }
-      const { finishCode, finishConfidence } = assignFinishCode(synth, legendCodes, '')
+      const { finishCode, finishConfidence } = assignFinishCode(synth, legendCodes, '', legendHints)
       const before = m.finish_code as string | null
       if (finishCode && finishCode !== before) {
         if (before == null) newlyMapped += 1
@@ -185,7 +267,7 @@ export async function remapFinishesForProject(
       }
       continue
     }
-    const { finishCode, finishConfidence } = assignFinishCode(raw, legendCodes, '')
+    const { finishCode, finishConfidence } = assignFinishCode(raw, legendCodes, '', legendHints)
     const before = m.finish_code as string | null
     if (finishCode === before) {
       if (finishCode == null) stillUnmapped += 1
@@ -342,16 +424,12 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
     },
     select: { tag: true, meta: true },
   })
+  const legendLookup = legendItems.filter((i) => {
+    const m = (i.meta ?? {}) as Record<string, unknown>
+    return m.kind === 'LEGEND'
+  })
   const legendCodes = Array.from(
-    new Set(
-      legendItems
-        .filter((i) => {
-          const m = (i.meta ?? {}) as Record<string, unknown>
-          return m.kind === 'LEGEND'
-        })
-        .map((i) => i.tag!)
-        .concat(['BATHROOM']),
-    ),
+    new Set(legendLookup.map((i) => i.tag!).concat(['BATHROOM'])),
   )
 
   let tokensIn = 0
@@ -458,13 +536,32 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
       const rawFinishObservation = {
         visionCode: visionRow?.finish_code ?? null,
         evidence: visionRow?.finish_evidence ?? null,
-        textSnippetSlice: textSnippet.slice(0, 600),
+        // S8-3: was 600 chars — too tight for assignFinishCode's last-resort
+        // textSnippetSlice scan to find legend codes on busy I401-style sheets.
+        // 2000 is comfortably inside the per-sheet text we already loaded.
+        textSnippetSlice: textSnippet.slice(0, 2000),
       }
+
+      // Build the legend-hint set once per project. Each iteration calls
+      // assignFinishCode with the same hint list — Sprint-8 S8-3 semantic
+      // fallback uses the legend item's name/material/usage to match against
+      // the room's evidence.
+      const legendHintsLocal: LegendItemHint[] = legendLookup.map((i) => {
+        const m = (i.meta ?? {}) as Record<string, unknown>
+        return {
+          code: i.tag!,
+          name: typeof m.name === 'string' ? m.name : null,
+          material: typeof m.material === 'string' ? m.material : null,
+          usage: typeof m.usage === 'string' ? m.usage : null,
+          kind: typeof m.legendKind === 'string' ? m.legendKind : null,
+        }
+      })
 
       const { finishCode, finishConfidence } = assignFinishCode(
         rawFinishObservation,
         legendCodes,
         textSnippet,
+        legendHintsLocal,
       )
 
       const meta: Record<string, unknown> = {
@@ -545,18 +642,21 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
     },
     orderBy: { createdAt: 'asc' },
   })
+  // S8-2: dedup by normalised name only. Floor stays informational; the
+  // surviving row's floor is preserved as the bucket's floor. The live
+  // S7-5 data shows the same physical room landing on multiple floors only
+  // because of vision-side misclassification (BATH 02 emitted on GF and L1
+  // and ∅ for the same L1 bathroom); collapsing across floors lets the
+  // best-scored row win and drops the duplicate noise. Real same-named
+  // rooms across floors (rare in this fixture) are still distinguishable
+  // via their tag (FF-NN / GF-NN) on the surviving row.
   const groups = new Map<string, typeof allRoomItems>()
   for (const item of allRoomItems) {
-    const m = (item.meta ?? {}) as Record<string, unknown>
-    const name = item.description.split('—')[0]!.trim().toUpperCase()
-    const floor =
-      (typeof m.floorNormalized === 'string' && m.floorNormalized) ||
-      normalizeFloor(typeof m.floor === 'string' ? m.floor : null) ||
-      '∅'
-    const key = `${name}|${floor}`
-    const bucket = groups.get(key)
+    const name = normalizeRoomName(item.description)
+    if (!name) continue
+    const bucket = groups.get(name)
     if (bucket) bucket.push(item)
-    else groups.set(key, [item])
+    else groups.set(name, [item])
   }
   const survivors: typeof allRoomItems = []
   let collapsedRoomDuplicates = 0
@@ -579,8 +679,19 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
     }
   }
 
-  // Spaces sync — runs ONLY over the survivors. Manual-source Spaces win.
+  // S8-2: Spaces sync only over survivors WITH measured area. Vision-noise
+  // titles ("PROPOSED VILLA", "PLAN AREA", "GARDEN", "MAIN VILLA") drift
+  // through the per-sheet pass as "rooms" — they have no area and end up
+  // padding the Spaces count well past the 20–40 target. The takeoff row
+  // still exists so a human reviewer can promote it if it's actually a
+  // missed measurement, but the Space is only created when the area was
+  // recovered (text-layer, bbox-spatial, or vision-confirmed).
+  let unmeasuredSurvivors = 0
   for (const survivor of survivors) {
+    if (survivor.qtyAi === null) {
+      unmeasuredSurvivors += 1
+      continue
+    }
     const m = (survivor.meta ?? {}) as Record<string, unknown>
     const name = survivor.description.split('—')[0]!.trim()
     const areaM2 = survivor.qtyAi === null ? null : Number(survivor.qtyAi.toString())
@@ -688,11 +799,38 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
     const t = await blob.get(s.rawTextKey).then((b) => b.toString('utf-8')).catch(() => '')
     planTextBlob += `\n${t}`
   }
+  // S8-5 BUA recovery — look at the cover / register / setting-out sheets,
+  // which usually carry the project's Built-Up Area declaration. Plan
+  // sheets sometimes carry it too (A101 setting-out plan), so we widen the
+  // search to those text blobs plus a dedicated cover-sheet pull.
+  const coverSheets = await prisma.sheet.findMany({
+    where: {
+      documentId: document.id,
+      organizationId: job.organizationId,
+      sheetType: { in: ['cover', 'register', 'plan'] },
+      rawTextKey: { not: null },
+    },
+    select: { rawTextKey: true },
+  })
+  let coverTextBlob = ''
+  for (const s of coverSheets) {
+    if (!s.rawTextKey) continue
+    const t = await blob.get(s.rawTextKey).then((b) => b.toString('utf-8')).catch(() => '')
+    coverTextBlob += `\n${t}`
+  }
+  const declaredBuaM2 = recoverBuaFromText(coverTextBlob)
+  // S8-5 unique room areas — sum of the post-dedup survivors.
+  const uniqueRoomAreas: number[] = []
+  for (const s of survivors) {
+    if (s.qtyAi !== null) uniqueRoomAreas.push(Number(s.qtyAi.toString()))
+  }
   const validatorCtx: ValidatorContext = {
     projectType: project?.type ?? null,
     doors,
     windows,
     planTextBlob,
+    roomAreasM2: uniqueRoomAreas,
+    declaredBuaM2,
   }
   const validatorResults = runValidators(validatorCtx)
   for (const r of validatorResults) {
@@ -754,6 +892,8 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
     bboxPairsTotal,
     /** Sprint-7 S7-4: per-sheet spatial pair counts (for diagnostics). */
     bboxPairsBySheet,
+    /** Sprint-8 S8-2: survivors skipped from Spaces because no area. */
+    unmeasuredSurvivors,
     /** Sprint-4 S4-5: validation flags raised by the post-extraction net. */
     validatorFlagsRaised: validatorResults.length,
     tokensIn,

@@ -73,6 +73,7 @@ function jobDto(row: {
   attempts: number
   error: string | null
   result: Prisma.JsonValue
+  aiMode: string | null
   createdAt: Date
   startedAt: Date | null
   finishedAt: Date | null
@@ -84,6 +85,9 @@ function jobDto(row: {
     attempts: row.attempts,
     error: row.error,
     result: row.result,
+    // Sprint-8 S8-6: surface the resolved AI mode the worker used for this
+    // job so the SPA can flag a stub-banner per pipeline run.
+    aiMode: row.aiMode,
     createdAt: row.createdAt.toISOString(),
     startedAt: row.startedAt ? row.startedAt.toISOString() : null,
     finishedAt: row.finishedAt ? row.finishedAt.toISOString() : null,

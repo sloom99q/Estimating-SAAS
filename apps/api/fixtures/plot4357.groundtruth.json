@@ -25,7 +25,7 @@
       { "tag": "D05", "count": 1, "width_mm": 800,  "height_mm": 3000 },
       { "tag": "D06", "count": 2, "width_mm": 900,  "height_mm": 2400 },
       { "tag": "D07", "count": 1, "width_mm": 500,  "height_mm": 3000 },
-      { "tag": "D08", "count": 4, "width_mm": 900,  "height_mm": 2400 },
+      { "tag": "D08", "count": 4, "width_mm": 900,  "height_mm": 2400, "acceptAlternates": [{ "height_mm": 2100 }], "$note": "ADR-015 clause 3 source conflict on A551: the schedule's dim column prints 2.40 m, but the same row's elevation note prints 'D08 900 x 2100mm'. Extraction reading either height passes." },
       { "tag": "D10", "count": 2, "width_mm": 900,  "height_mm": 3000 }
     ],
     "knownTraps": [

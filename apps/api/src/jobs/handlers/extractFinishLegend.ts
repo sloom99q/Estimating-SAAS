@@ -22,6 +22,7 @@
  */
 import type { Prisma } from '@prisma/client'
 import { STUB_SUFFIX, extractFinishLegend } from '../../ai/anthropic'
+import { parseLegendTextLayer, type LegendTextRow } from '../../ai/legendTextPass'
 import { renderPageQuadrants } from '../../ai/quadrantRender'
 import { getBlobStore } from '../../blob/fs'
 import { prisma } from '../../db'
@@ -124,19 +125,82 @@ export const extractFinishLegendHandler: JobHandler = async (job: JobRecord) => 
   let tokensOut = 0
   let legendRowsCreated = 0
   let codesDroppedByRegex = 0
+  let textLayerHits = 0
+  let visionHits = 0
+  let visionEnrichedRows = 0
   const allCodes = new Set<string>()
 
+  /**
+   * Sprint-8 S8-1 (ADR-016): text-layer-first. For each anchored I4xx
+   * sheet we read its `pdftotext -layout` output, extract legend codes
+   * deterministically, and persist them as LEGEND TakeoffItems with
+   * provenance='text-layer'. Vision still runs as an *enricher* (and as
+   * scanned-set fallback) but the *code set itself* is now $0.
+   */
+  interface PendingRow {
+    code: string
+    name: string | null
+    description: string | null
+    detail: string | null
+    legendKind: 'FLOOR' | 'WALL' | 'CEILING' | 'EXTERNAL' | 'OTHER' | null
+    material: string | null
+    size: string | null
+    finish: string | null
+    usage: string | null
+    sheetId: string
+    sourceNote: string
+    sourceDrawingNo: string | null
+    provenance: { code: 'text-layer' | 'vision'; name: 'text-layer' | 'vision' | null; description: 'text-layer' | 'vision' | null }
+    stubVision: boolean
+  }
+  const pendingByCode = new Map<string, PendingRow>()
+
   for (const sheet of sheets) {
+    const rawText = sheet.rawTextKey
+      ? await blob.get(sheet.rawTextKey).then((b) => b.toString('utf-8')).catch(() => '')
+      : ''
+    const textSnippet = rawText.slice(0, 4000)
+
+    // 1) TEXT-LAYER PRIMARY. Deterministic, $0.
+    const textPass = rawText.length > 0 ? parseLegendTextLayer(rawText) : { rows: [] as LegendTextRow[], bathroomSentinelSeen: false }
+    for (const row of textPass.rows) {
+      const code = row.code
+      if (code !== BATHROOM_SENTINEL && !LEGEND_CODE_RE.test(code)) continue
+      if (!pendingByCode.has(code)) {
+        pendingByCode.set(code, {
+          code,
+          name: row.name,
+          description: row.description,
+          detail: row.detail,
+          legendKind: null,
+          material: null,
+          size: null,
+          finish: null,
+          usage: null,
+          sheetId: sheet.id,
+          sourceNote: `${sheet.drawingNo ?? `page ${sheet.pageNo}`} (legend, text layer)`,
+          sourceDrawingNo: sheet.drawingNo,
+          provenance: { code: 'text-layer', name: row.name ? 'text-layer' : null, description: row.description ? 'text-layer' : null },
+          stubVision: false,
+        })
+        textLayerHits += 1
+      }
+    }
+
+    // 2) VISION SECONDARY. Two roles on this stage:
+    //    a) Scanned-set fallback when text layer is empty/garbled.
+    //    b) Enricher of missing description / material / size / finish on
+    //       codes the text layer already gave us.
+    const needsVisionFallback = textPass.rows.length === 0
+    // Optionally we could disable vision entirely once text-pass produces
+    // ≥8 codes (the sanity floor); we keep one enrichment call per sheet so
+    // the descriptions get fleshed out for the demo artifact.
     const jpegBase64 = await renderFullPageJpegBase64(
       sourceBytes,
       sheet.pageNo,
       sheet.imageKey,
       blob,
     )
-    const textSnippet = sheet.rawTextKey
-      ? (await blob.get(sheet.rawTextKey).then((b) => b.toString('utf-8')).catch(() => '')).slice(0, 4000)
-      : ''
-
     const result = await extractFinishLegend({
       documentId: document.id,
       pageNo: sheet.pageNo,
@@ -150,72 +214,142 @@ export const extractFinishLegendHandler: JobHandler = async (job: JobRecord) => 
     for (const row of result.rows) {
       if (!row.code) continue
       const code = row.code.trim().toUpperCase()
-      // S7-2 code regex. Drop section headings, room names, etc.
       if (code !== BATHROOM_SENTINEL && !LEGEND_CODE_RE.test(code)) {
         codesDroppedByRegex += 1
         continue
       }
-      if (allCodes.has(code)) continue
-      allCodes.add(code)
 
-      // Idempotent: a previous pipeline run on the same project may have
-      // already persisted this legend code. Update in place, don't duplicate.
-      const existing = await prisma.takeoffItem.findFirst({
-        where: {
+      const existing = pendingByCode.get(code)
+      if (existing) {
+        // ENRICHER. Fill in fields the text pass left blank.
+        let touched = false
+        if (existing.material === null && row.material) {
+          existing.material = row.material
+          touched = true
+        }
+        if (existing.size === null && row.size) {
+          existing.size = row.size
+          touched = true
+        }
+        if (existing.finish === null && row.finish) {
+          existing.finish = row.finish
+          touched = true
+        }
+        if (existing.usage === null && row.usage) {
+          existing.usage = row.usage
+          touched = true
+        }
+        if (existing.legendKind === null && row.kind) {
+          existing.legendKind = row.kind
+          touched = true
+        }
+        if (existing.name === null && row.name) {
+          existing.name = row.name
+          existing.provenance.name = 'vision'
+          touched = true
+        }
+        if (existing.description === null && row.name) {
+          // Vision returns the *label* in `name`; the text-layer's
+          // "description" column is sometimes blank on FN0x codes. Use
+          // vision's name as a fallback description rather than leaving
+          // both empty.
+          existing.description = row.name
+          existing.provenance.description = 'vision'
+          touched = true
+        }
+        if (touched) visionEnrichedRows += 1
+      } else if (needsVisionFallback) {
+        // FALLBACK. The text layer was empty — accept vision's row as
+        // primary and tag it appropriately.
+        pendingByCode.set(code, {
+          code,
+          name: row.name ?? null,
+          description: row.name ?? null,
+          detail: null,
+          legendKind: row.kind ?? null,
+          material: row.material ?? null,
+          size: row.size ?? null,
+          finish: row.finish ?? null,
+          usage: row.usage ?? null,
+          sheetId: sheet.id,
+          sourceNote: `${sheet.drawingNo ?? `page ${sheet.pageNo}`} (legend, vision fallback)`,
+          sourceDrawingNo: sheet.drawingNo,
+          provenance: { code: 'vision', name: row.name ? 'vision' : null, description: row.name ? 'vision' : null },
+          stubVision: visionFromStub,
+        })
+        visionHits += 1
+      } else {
+        // Vision saw a code the text layer didn't — usually a hallucination
+        // on a vector PDF. We ignore it but count it so the run report
+        // reflects the gap.
+        visionHits += 1
+      }
+    }
+  }
+
+  // PERSIST PHASE. One DB write per unique code, with idempotency.
+  for (const row of pendingByCode.values()) {
+    allCodes.add(row.code)
+
+    const existing = await prisma.takeoffItem.findFirst({
+      where: {
+        organizationId: job.organizationId,
+        projectId: document.projectId,
+        deletedAt: null,
+        tag: row.code,
+      },
+      select: { id: true },
+    })
+
+    const meta: Record<string, unknown> = {
+      kind: 'LEGEND',
+      code: row.code,
+      name: row.name,
+      material: row.material,
+      size: row.size,
+      finish: row.finish,
+      usage: row.usage,
+      legendKind: row.legendKind,
+      detail: row.detail,
+      provenance: row.provenance,
+    }
+    if (row.stubVision) meta.stub = true
+
+    const category = categoryFor(row.legendKind)
+    const description = `${row.code} — ${row.name ?? row.description ?? ''}${row.material ? `, ${row.material}` : ''}${row.size ? `, ${row.size}` : ''}${row.finish ? `, ${row.finish}` : ''}`
+      .replace(/, +$/, '')
+
+    if (existing) {
+      await prisma.takeoffItem.update({
+        where: { id: existing.id },
+        data: {
+          category,
+          description,
+          meta: meta as Prisma.JsonObject,
+          promptVersion: 'extractFinishLegend.text-first.v1',
+          sourceSheetId: row.sheetId,
+          sourceNote: row.sourceNote,
+        },
+      })
+    } else {
+      await prisma.takeoffItem.create({
+        data: {
           organizationId: job.organizationId,
           projectId: document.projectId,
-          deletedAt: null,
-          tag: code,
+          category,
+          tag: row.code,
+          description,
+          unit: 'm²',
+          basis: 'PLACEHOLDER',
+          confidence: row.provenance.code === 'text-layer' ? 95 : 80,
+          sourceSheetId: row.sheetId,
+          sourceNote: row.sourceNote,
+          meta: meta as Prisma.JsonObject,
+          promptVersion: 'extractFinishLegend.text-first.v1',
+          status: 'EDITED',
         },
-        select: { id: true, meta: true },
       })
-
-      const meta: Record<string, unknown> = {
-        kind: 'LEGEND',
-        code,
-        name: row.name,
-        material: row.material,
-        size: row.size,
-        finish: row.finish,
-        usage: row.usage,
-        legendKind: row.kind,
-      }
-      if (visionFromStub) meta.stub = true
-
-      const category = categoryFor(row.kind)
-      const description = `${code} — ${row.name ?? ''}${row.material ? `, ${row.material}` : ''}${row.size ? `, ${row.size}` : ''}${row.finish ? `, ${row.finish}` : ''}`
-        .replace(/, +$/, '')
-
-      if (existing) {
-        await prisma.takeoffItem.update({
-          where: { id: existing.id },
-          data: {
-            category,
-            description,
-            meta: meta as Prisma.JsonObject,
-            promptVersion: result.promptVersion,
-          },
-        })
-      } else {
-        await prisma.takeoffItem.create({
-          data: {
-            organizationId: job.organizationId,
-            projectId: document.projectId,
-            category,
-            tag: code,
-            description,
-            unit: 'm²', // legend rows are reference-only; unit is informational
-            basis: 'PLACEHOLDER',
-            confidence: 80,
-            sourceSheetId: sheet.id,
-            sourceNote: `${sheet.drawingNo ?? `page ${sheet.pageNo}`} (legend)`,
-            meta: meta as Prisma.JsonObject,
-            promptVersion: result.promptVersion,
-            status: 'EDITED',
-          },
-        })
-        legendRowsCreated += 1
-      }
+      legendRowsCreated += 1
     }
   }
 
@@ -274,6 +408,12 @@ export const extractFinishLegendHandler: JobHandler = async (job: JobRecord) => 
     legendRowsCreated,
     legendCodes: Array.from(allCodes).sort(),
     codesDroppedByRegex,
+    /** S8-1: codes sourced from the text-layer pass. */
+    textLayerHits,
+    /** S8-1: codes vision newly contributed (fallback path). */
+    visionHits,
+    /** S8-1: rows where vision filled in missing name/material/etc. */
+    visionEnrichedRows,
     sanityWithinRange: realCodes >= LEGEND_MIN_CODES && realCodes <= LEGEND_MAX_CODES,
     tokensIn,
     tokensOut,

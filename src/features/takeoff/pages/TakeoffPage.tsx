@@ -13,6 +13,7 @@ import {
 } from '@mantine/core'
 import { useTranslation } from 'react-i18next'
 import { useParams } from 'react-router'
+import { GenerateBoqCard } from '../components/GenerateBoqCard'
 import { TakeoffTable } from '../components/TakeoffTable'
 import { PipelineStatus } from '../components/PipelineStatus'
 import { UploadCard } from '../components/UploadCard'
@@ -77,6 +78,11 @@ export function TakeoffPage() {
       <UploadCard projectId={projectId} onUploaded={setActiveDocumentId} />
 
       {docBundle.data ? <PipelineStatus bundle={docBundle.data} /> : null}
+
+      <GenerateBoqCard
+        projectId={projectId}
+        ready={docBundle.data?.document.status === 'READY'}
+      />
 
       {projectFlags.length > 0 ? (
         <Card withBorder>
