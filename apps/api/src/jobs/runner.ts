@@ -109,7 +109,7 @@ export async function tick(): Promise<JobRecord | null> {
     SET status      = 'RUNNING',
         "startedAt" = NOW(),
         attempts    = attempts + 1,
-        "aiMode"    = ${config.aiMode}
+        "aiMode"    = '${config.aiMode}'
     WHERE id = (
       SELECT id FROM due_jobs
       WHERE "organizationId" = (SELECT "organizationId" FROM fair_org)
@@ -121,6 +121,24 @@ export async function tick(): Promise<JobRecord | null> {
   `)
   const job = rows[0]
   if (!job) return null
+
+  // S8-8 R1: stamp the resolved model based on the job type. CLASSIFY uses
+  // the cheap tier; everything that does vision (LEGEND / SCHEDULES / ROOMS)
+  // uses the vision tier. Non-AI jobs (INGEST, QUANTIFY, BOQ, PRICE, etc.)
+  // get the default so the column still shows what the worker WOULD have
+  // used if it had needed AI — easier for ops to grep than NULLs.
+  const aiModelForJob =
+    job.type === 'CLASSIFY'
+      ? config.anthropicModels.classify
+      : job.type === 'EXTRACT_FINISH_LEGEND' ||
+          job.type === 'EXTRACT_SCHEDULES' ||
+          job.type === 'EXTRACT_ROOMS'
+        ? config.anthropicModels.vision
+        : config.anthropicModels.default
+  await prisma.job.update({
+    where: { id: job.id },
+    data: { aiModel: aiModelForJob },
+  })
 
   const handler = HANDLERS[job.type as keyof typeof HANDLERS]
   if (!handler) {

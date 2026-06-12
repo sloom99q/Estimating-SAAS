@@ -49,9 +49,17 @@ startWorker()
 // wasted because the .env had AI_MODE=live but the server had been launched
 // with AI_MODE=stub — the operator had no way to tell from a quick log
 // glance. This line ends that ambiguity.
+// S8-8 R1: also surface the per-stage model map so the A/B harness reads
+// "vision=claude-opus-4-8" at a glance during a run.
+const m = config.anthropicModels
+const sameModel = m.classify === m.vision && m.vision === m.default
 const aiModeBanner =
   config.aiMode === 'live'
-    ? `AI_MODE=live (key=${config.anthropicApiKey ? 'set' : 'MISSING'}, model=${config.anthropicModel})`
+    ? `AI_MODE=live (key=${config.anthropicApiKey ? 'set' : 'MISSING'}, ${
+        sameModel
+          ? `model=${m.default}`
+          : `classify=${m.classify}, vision=${m.vision}, default=${m.default}`
+      })`
     : 'AI_MODE=stub (no Anthropic calls; deterministic stub outputs)'
 console.log(
   `[estimator-api] listening on http://${server.hostname}:${server.port}  ·  cors=${config.corsOrigin}  ·  ${aiModeBanner}`,

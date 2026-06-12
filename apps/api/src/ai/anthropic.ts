@@ -127,6 +127,26 @@ interface MessagesResponse {
   usage?: { input_tokens?: number; output_tokens?: number }
 }
 
+/**
+ * Sprint-8 S8-8 R1 A/B: opus-4-8 dropped support for `temperature` (the API
+ * returns 400 "temperature is deprecated for this model" if it's set). Strip
+ * the field when the resolved model is in the no-temperature family before
+ * we POST. Sonnet-4-6 (and earlier opus tiers) still accept it.
+ */
+const NO_TEMPERATURE_MODELS = /^claude-opus-4-([89]|\d{2,})$|^claude-opus-5/i
+
+function sanitizeRequestBody(body: object): object {
+  const b = body as Record<string, unknown>
+  const model = typeof b.model === 'string' ? b.model : ''
+  if (model && NO_TEMPERATURE_MODELS.test(model)) {
+    if ('temperature' in b) {
+      const { temperature: _t, ...rest } = b
+      return rest
+    }
+  }
+  return b
+}
+
 async function callMessages(body: object): Promise<MessagesResponse> {
   await acquireSlot()
   try {
@@ -140,7 +160,7 @@ async function callMessages(body: object): Promise<MessagesResponse> {
           'x-api-key': config.anthropicApiKey,
           'anthropic-version': ANTHROPIC_VERSION,
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify(sanitizeRequestBody(body)),
       })
       if (res.ok) return (await res.json()) as MessagesResponse
       const status = res.status
@@ -193,7 +213,8 @@ function zeroTokens<T extends { tokensIn: number; tokensOut: number }>(out: T): 
 export async function classifySheet(input: ClassifyInput): Promise<ClassifyOutput> {
   if (isStubMode()) return zeroTokens(stampStub(stubClassify(input)))
   const res = await callMessages({
-    model: config.anthropicModel,
+    // Sprint-8 S8-8 R1 — CLASSIFY uses the cheap-tier model.
+    model: config.anthropicModels.classify,
     max_tokens: 512,
     temperature: 0,
     system: CLASSIFY_SYSTEM_PROMPT,
@@ -239,7 +260,8 @@ export async function extractSchedule(
     : 'The title heuristic is inconclusive — decide for yourself.'
 
   const res = await callMessages({
-    model: config.anthropicModel,
+    // S8-8 R1 — schedules are vision work (CW table photos).
+    model: config.anthropicModels.vision,
     max_tokens: 4096,
     temperature: 0,
     system: EXTRACT_SCHEDULE_SYSTEM_PROMPT,
@@ -280,7 +302,8 @@ export async function extractRooms(input: ExtractRoomsInput): Promise<ExtractRoo
       ? `Legend vocabulary (use ONLY these codes for finish_code; null is allowed; 'BATHROOM' is reserved for the per-bathroom-drawings hatch):\n  ${input.legendCodes.join(', ')}\n\n`
       : 'No legend vocabulary supplied yet — return finish_code=null on every room.\n\n'
   const res = await callMessages({
-    model: config.anthropicModel,
+    // S8-8 R1 — rooms vision is the bulk of the spend; A/B target.
+    model: config.anthropicModels.vision,
     max_tokens: 2048,
     temperature: 0,
     system: EXTRACT_ROOMS_SYSTEM_PROMPT,
@@ -315,7 +338,9 @@ export async function extractFinishLegend(
 ): Promise<ExtractFinishLegendOutput> {
   if (isStubMode()) return zeroTokens(stampStub(stubExtractFinishLegend(input)))
   const res = await callMessages({
-    model: config.anthropicModel,
+    // S8-8 R1 — legend is now text-first (S8-1); this vision call is the
+    // enricher path only. Still on the vision-tier model.
+    model: config.anthropicModels.vision,
     max_tokens: 2048,
     temperature: 0,
     system: EXTRACT_FINISH_LEGEND_SYSTEM_PROMPT,

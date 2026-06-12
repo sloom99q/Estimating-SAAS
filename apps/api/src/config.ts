@@ -66,7 +66,23 @@ export const config = {
   jobTimeoutMs: num('JOB_TIMEOUT_MS', 10 * 60 * 1000),
   // Anthropic.
   anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? '',
+  /**
+   * Default model. Set via ANTHROPIC_MODEL. Used for any handler that
+   * doesn't have a stage-specific override.
+   */
   anthropicModel: process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6',
+  /**
+   * Sprint-8 S8-8 R1 — per-stage model map. CLASSIFY is the cheap routing
+   * pass; VISION covers the heavier quadrant work on plan / finish-plan /
+   * schedule sheets and the legend pass; DEFAULT is the fallback for
+   * anything that hasn't been routed yet. Each falls back to
+   * `anthropicModel` when its specific env is unset.
+   */
+  anthropicModels: {
+    classify: process.env.ANTHROPIC_MODEL_CLASSIFY ?? process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6',
+    vision: process.env.ANTHROPIC_MODEL_VISION ?? process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6',
+    default: process.env.ANTHROPIC_MODEL_DEFAULT ?? process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6',
+  },
   aiMode,
   allowStubInProduction: bool('ALLOW_STUB_IN_PRODUCTION', false),
   // Sprint-3 A6: global semaphore around live Anthropic calls. Default 4 keeps

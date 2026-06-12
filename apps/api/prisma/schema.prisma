@@ -371,6 +371,12 @@ model Job {
   /// tokens or returned canned data (the S7-5 stub-run papercut). Null
   /// only for very-old rows from before the column existed.
   aiMode         String?
+  /// Sprint-8 S8-8 R1: the Anthropic model the worker would route this
+  /// job's vision calls through. Per-stage config (classify / vision /
+  /// default) is resolved at boot; the runner picks the right tier based on
+  /// the job type at claim time. Lets the A/B harness diff model verdicts
+  /// without re-reading the workers' environment.
+  aiModel        String?
   createdAt      DateTime  @default(now()) @db.Timestamptz(6)
   startedAt      DateTime? @db.Timestamptz(6)
   finishedAt     DateTime? @db.Timestamptz(6)
