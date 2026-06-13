@@ -45,6 +45,13 @@ const RULE_ROW_MISMATCH = 'ROW_MISMATCH'
 interface ReconciledRow {
   tag: string
   description: string
+  /**
+   * Sprint-10 PB-4 — the schedule's count column ("D01 6 1.00 3.00" =
+   * 6 copies). Was being silently dropped at the handler boundary; both
+   * SPRINT10 and S8-8 runs ended up with qtyAi=1 across the board.
+   * Counts now flow into meta.count AND become qtyAi when known.
+   */
+  count: number | null
   width_mm: number | null
   height_mm: number | null
   finish: string | null
@@ -80,8 +87,14 @@ function reconcile(
     const t = textMap.get(tag)
     if (v && t) {
       // Compare every column. First mismatched column wins the flag message.
+      // PB-4: count drift is the swap-trap canary on door/window schedules.
+      // Check it first so a count mismatch surfaces ahead of dim drift.
+      const visionCount = typeof v.count === 'number' ? v.count : null
+      const textCount = typeof t.count === 'number' ? t.count : null
       const mismatchedField =
-        !compareNumeric(v.width_mm, t.width_mm)
+        visionCount !== null && textCount !== null && visionCount !== textCount
+          ? { field: 'count', vision: visionCount, text: textCount }
+          : !compareNumeric(v.width_mm, t.width_mm)
           ? { field: 'width_mm', vision: v.width_mm, text: t.width_mm }
           : !compareNumeric(v.height_mm, t.height_mm)
           ? { field: 'height_mm', vision: v.height_mm, text: t.height_mm }
@@ -91,6 +104,7 @@ function reconcile(
       return {
         tag,
         description: `${kind === 'DOOR' ? 'Door' : 'Window'} ${tag}${v.finish ? ` (${v.finish})` : ''}`,
+        count: visionCount ?? textCount,
         width_mm: v.width_mm,
         height_mm: v.height_mm,
         finish: v.finish,
@@ -105,6 +119,7 @@ function reconcile(
       return {
         tag,
         description: `${kind === 'DOOR' ? 'Door' : 'Window'} ${tag} (vision-only)`,
+        count: typeof v.count === 'number' ? v.count : null,
         width_mm: v.width_mm,
         height_mm: v.height_mm,
         finish: v.finish,
@@ -115,10 +130,10 @@ function reconcile(
         mismatch: null,
       }
     }
-    // t is defined here (the tag came from textMap).
     return {
       tag,
       description: `${kind === 'DOOR' ? 'Door' : 'Window'} ${tag} (text-only)`,
+      count: typeof t!.count === 'number' ? t!.count : null,
       width_mm: t!.width_mm,
       height_mm: t!.height_mm,
       finish: t!.finish,
@@ -213,9 +228,16 @@ export const extractSchedulesHandler: JobHandler = async (job: JobRecord) => {
     const kindHint = decideKind({ title: sheet.title, drawingNo: sheet.drawingNo })
 
     const jpegBase64 = await renderHighRes(sourceBytes, sheet.pageNo)
-    const textSnippet = sheet.rawTextKey
-      ? (await blob.get(sheet.rawTextKey).then((b) => b.toString('utf-8')).catch(() => '')).slice(0, 4000)
+    // PB-4: load the FULL text-layer of the schedule sheet for the
+    // text-pass — A551's body sits past 4 KB on Plot 4357, so the
+    // prior 4 KB slice was guaranteeing a zero-row text pass and
+    // forcing every row to vision-only basis with qtyAi=1. Vision
+    // still gets a slice (token budget) but the text-side parser
+    // sees everything.
+    const rawText = sheet.rawTextKey
+      ? await blob.get(sheet.rawTextKey).then((b) => b.toString('utf-8')).catch(() => '')
       : ''
+    const textSnippet = rawText.slice(0, 4000)
 
     const vision = await extractSchedule({
       documentId: document.id,
@@ -231,12 +253,16 @@ export const extractSchedulesHandler: JobHandler = async (job: JobRecord) => {
     if (vision.kind === null) continue
     const kind: ScheduleKind = vision.kind
 
-    const text = scheduleTextPass(textSnippet, kind)
+    const text = scheduleTextPass(rawText, kind)
     const reconciled = reconcile(vision.rows, text, kind)
 
     const visionFromStub = vision.promptVersion.endsWith(STUB_SUFFIX)
     for (const row of reconciled) {
       const meta: Record<string, unknown> = {
+        // PB-4: count was being dropped here. Both SPRINT10 and S8-8 ran
+        // qty=1 across the board because of this. Counts now persist;
+        // qtyAi uses them when known so QUANTIFY / BOQ see real totals.
+        count: row.count,
         width_mm: row.width_mm,
         height_mm: row.height_mm,
         finish: row.finish,
@@ -269,7 +295,7 @@ export const extractSchedulesHandler: JobHandler = async (job: JobRecord) => {
             data: {
               description: row.description,
               unit: 'nr',
-              qtyAi: 1,
+              qtyAi: row.count ?? 1,
               basis: row.basis,
               confidence: row.confidence,
               sourceSheetId: sheet.id,
@@ -286,7 +312,7 @@ export const extractSchedulesHandler: JobHandler = async (job: JobRecord) => {
               tag: row.tag,
               description: row.description,
               unit: 'nr',
-              qtyAi: 1,
+              qtyAi: row.count ?? 1,
               basis: row.basis,
               confidence: row.confidence,
               sourceSheetId: sheet.id,

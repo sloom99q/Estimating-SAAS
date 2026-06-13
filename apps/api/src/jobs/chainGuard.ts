@@ -26,23 +26,44 @@ export interface ChainEnqueueArgs {
 
 export interface ChainEnqueueResult {
   enqueued: boolean
-  reason: 'skipped-already-done' | 'enqueued' | 'enqueued-forced'
+  reason:
+    | 'skipped-already-done'
+    | 'skipped-already-active'
+    | 'enqueued'
+    | 'enqueued-forced'
   jobId?: string
 }
 
+export type ChainSkipReason =
+  | 'skipped-already-done'
+  | 'skipped-already-active'
+  | 'enqueued'
+  | 'enqueued-forced'
+
 export async function enqueueIfNotDone(args: ChainEnqueueArgs): Promise<ChainEnqueueResult> {
   if (!args.force) {
-    const existingDone = await args.client.job.findFirst({
+    // PB-3: an existing DONE job blocks re-enqueue. So does an existing
+    // QUEUED or RUNNING peer — the prior implementation checked DONE
+    // only, which let two CLASSIFY jobs both enqueue LEGEND when they
+    // finished within ~1 s of each other (the doc=cmqbjk… double-chain).
+    // Now any active or completed peer of the same (documentId, type)
+    // shuts the chain handoff down.
+    const peer = await args.client.job.findFirst({
       where: {
         organizationId: args.organizationId,
         projectId: args.projectId,
         type: args.type,
-        status: 'DONE',
+        status: { in: ['DONE', 'QUEUED', 'RUNNING'] },
         payload: { path: ['documentId'], equals: args.documentId },
       },
-      select: { id: true },
+      select: { id: true, status: true },
     })
-    if (existingDone) return { enqueued: false, reason: 'skipped-already-done' }
+    if (peer) {
+      return {
+        enqueued: false,
+        reason: peer.status === 'DONE' ? 'skipped-already-done' : 'skipped-already-active',
+      }
+    }
   }
   const payload: Prisma.JsonObject = {
     documentId: args.documentId,
