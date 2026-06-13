@@ -246,6 +246,63 @@ export function xlsxDownloadUrl(boqId: string, includeInternal = false): string 
   return `${env.apiUrl}/api/boqs/${boqId}/export.xlsx${params}`
 }
 
+/**
+ * PE-2 follow-up — the XLSX endpoint requires a Bearer token. A bare
+ * `<a href>` opens the URL in a new tab without auth and the API
+ * answers "Missing access token" as JSON. This helper does the
+ * authenticated fetch, reads the response as a Blob, and triggers a
+ * proper file-save in the browser. The filename comes from the API's
+ * Content-Disposition header (e.g. "boq-S8_8_Baseline-v6.xlsx"); we
+ * fall back to a synthesised name if the header is missing.
+ */
+function parseContentDispositionFilename(value: string | null): string | null {
+  if (!value) return null
+  const utf8 = value.match(/filename\*\s*=\s*UTF-8''([^;]+)/i)
+  if (utf8) return decodeURIComponent(utf8[1]!.trim().replace(/^"|"$/g, ''))
+  const plain = value.match(/filename\s*=\s*"?([^";]+)"?/i)
+  return plain ? plain[1]!.trim() : null
+}
+
+export async function downloadBoqXlsx(boqId: string, includeInternal = false): Promise<void> {
+  if (!env.apiUrl) throw new Error('VITE_API_URL is not set')
+  const token = currentToken()
+  if (!token) {
+    sessionActions.clearSession()
+    throw new Error('Not signed in')
+  }
+  const url = xlsxDownloadUrl(boqId, includeInternal)
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  if (res.status === 401) {
+    sessionActions.clearSession()
+    throw new HttpError(401, 'Session expired — please sign in again', null)
+  }
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new HttpError(res.status, body || res.statusText, null)
+  }
+  const blob = await res.blob()
+  const filename =
+    parseContentDispositionFilename(res.headers.get('Content-Disposition')) ??
+    `boq-${boqId}${includeInternal ? '-internal' : ''}.xlsx`
+  const blobUrl = URL.createObjectURL(blob)
+  try {
+    const a = document.createElement('a')
+    a.href = blobUrl
+    a.download = filename
+    a.style.display = 'none'
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+  } finally {
+    // Defer revocation slightly so the browser actually starts the
+    // download before the URL becomes invalid.
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 1_000)
+  }
+}
+
 export interface JobLite {
   id: string
   status: 'QUEUED' | 'RUNNING' | 'DONE' | 'FAILED'

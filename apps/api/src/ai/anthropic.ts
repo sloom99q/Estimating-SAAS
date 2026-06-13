@@ -133,7 +133,22 @@ interface MessagesResponse {
  * the field when the resolved model is in the no-temperature family before
  * we POST. Sonnet-4-6 (and earlier opus tiers) still accept it.
  */
-const NO_TEMPERATURE_MODELS = /^claude-opus-4-([89]|\d{2,})$|^claude-opus-5/i
+/**
+ * Models that REJECT a `temperature` param outright with HTTP 400. The
+ * original Sprint-8 anchor matched only `claude-opus-4-8` / `4-9` /
+ * `4-1x+` / `5-*`, but model IDs sometimes carry a date suffix
+ * (`claude-opus-4-8-20260612`) and that anchor's trailing `$` caused
+ * the strip to no-op. The new rule:
+ *
+ *   - opus-4-8 and newer (any -minor where -minor >= 8) → strip
+ *   - opus-5+ → strip
+ *   - any future opus tier we don't know about → strip (safer default
+ *     because temperature became "deprecated" not "ignored")
+ *
+ * Sonnet / Haiku stay sensitive to temperature and continue to receive
+ * it; deterministic 0 is still load-bearing for the extraction stages.
+ */
+const NO_TEMPERATURE_MODELS = /^claude-opus-(4-([89]|\d{2,})|[5-9]|\d{2,})/i
 
 function sanitizeRequestBody(body: object): object {
   const b = body as Record<string, unknown>

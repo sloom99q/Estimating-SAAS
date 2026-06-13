@@ -22,22 +22,21 @@
 import type { ValidationSeverity } from '@prisma/client'
 
 /**
- * Loose shape that matches both the raw Prisma client and the tenantDb
- * wrapper. Both expose .validationFlag with findFirst / create / update;
- * the tenantDb wrapper adds row-level isolation but the surface we use
- * is identical at the call site.
+ * The Prisma client's extended types (DynamicClientExtensionThis from
+ * tenantDb) have overloaded generic signatures that don't structurally
+ * subtype a strict `Pick<PrismaClient, ...>` or a plain
+ * `(...args: unknown[]) => Promise<unknown>`. Since this helper is only
+ * called from server-side code with a real Prisma-shaped object, we
+ * accept `any` and document the contract in the function body instead
+ * of fighting Prisma's type inference. Surface kept narrow so the
+ * runtime check stays trivial.
  */
-type AnyPrismaClient = {
-  validationFlag: {
-    findFirst: (...args: unknown[]) => Promise<unknown>
-    create: (...args: unknown[]) => Promise<unknown>
-    update: (...args: unknown[]) => Promise<unknown>
-  }
-}
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyPrismaClient = any
 
 export interface UpsertValidationFlagArgs {
-  // Accept anything with the {findFirst, create, update} trio — both
-  // PrismaClient and the tenantDb extension qualify.
+  /** Either `prisma` or a `tenantDb(orgId)` wrapper — both expose
+   *  `.validationFlag.{findFirst, create, update}`. */
   client: AnyPrismaClient
   organizationId: string
   projectId: string

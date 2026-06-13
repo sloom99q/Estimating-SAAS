@@ -1,14 +1,15 @@
 import { useEffect, useState } from 'react'
-import { Alert, Anchor, Badge, Button, Card, Group, List, Stack, Text } from '@mantine/core'
+import { Alert, Badge, Button, Card, Group, List, Stack, Text } from '@mantine/core'
+import { notifications } from '@mantine/notifications'
 import { useQuery } from '@tanstack/react-query'
 import { HttpError } from '@/shared/lib/http/client'
 import {
+  downloadBoqXlsx,
   fetchJob,
   fetchLatestBoq,
   generateBoq,
   priceBoq,
   startQuantify,
-  xlsxDownloadUrl,
   type BoqCreateResult,
 } from '../api/takeoff.api'
 
@@ -105,8 +106,27 @@ export function GenerateBoqCard({ projectId, ready }: { projectId: string; ready
     }
   }
 
-  const downloadUrl = boq ? xlsxDownloadUrl(boq.id) : null
-  const internalUrl = boq ? xlsxDownloadUrl(boq.id, true) : null
+  // PE-2 follow-up — the anchor approach failed because /export.xlsx
+  // requires a Bearer token; a bare href opened the URL without auth
+  // and the API returned "Missing access token" as JSON. We replace the
+  // anchors with buttons that authenticate via fetch and save the
+  // returned blob to the user's disk.
+  const [downloadingKind, setDownloadingKind] = useState<'client' | 'internal' | null>(null)
+  const download = async (kind: 'client' | 'internal') => {
+    if (!boq) return
+    setDownloadingKind(kind)
+    try {
+      await downloadBoqXlsx(boq.id, kind === 'internal')
+    } catch (err) {
+      notifications.show({
+        color: 'red',
+        title: 'Download failed',
+        message: err instanceof Error ? err.message : 'Unknown error',
+      })
+    } finally {
+      setDownloadingKind(null)
+    }
+  }
 
   const label =
     phase === 'idle'
@@ -134,15 +154,25 @@ export function GenerateBoqCard({ projectId, ready }: { projectId: string; ready
             <Button onClick={run} loading={phase !== 'idle' && phase !== 'ready' && phase !== 'error'}>
               {label}
             </Button>
-            {downloadUrl && phase === 'ready' ? (
-              <Anchor href={downloadUrl} target="_blank" rel="noreferrer">
-                Download client XLSX
-              </Anchor>
-            ) : null}
-            {internalUrl && phase === 'ready' ? (
-              <Anchor href={internalUrl} target="_blank" rel="noreferrer">
-                Internal-view XLSX
-              </Anchor>
+            {boq && phase === 'ready' ? (
+              <>
+                <Button
+                  variant="light"
+                  onClick={() => download('client')}
+                  loading={downloadingKind === 'client'}
+                  disabled={downloadingKind === 'internal'}
+                >
+                  Download client XLSX
+                </Button>
+                <Button
+                  variant="subtle"
+                  onClick={() => download('internal')}
+                  loading={downloadingKind === 'internal'}
+                  disabled={downloadingKind === 'client'}
+                >
+                  Internal-view XLSX
+                </Button>
+              </>
             ) : null}
           </Group>
         )}
