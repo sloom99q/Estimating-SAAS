@@ -136,6 +136,13 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
   // and any legacy ROOM rows that still match the area-statement pattern
   // (older runs persisted before S9-0). The scorer uses the same function.
   const rooms = selectBillableRooms(allRoomyRows)
+
+  // PF-3 — track every derived tag QUANTIFY emits this run so a later
+  // sweep can soft-delete derived rows from previous runs that no
+  // longer correspond to a real bucket. (Example: STAIRCASE used to
+  // emit an FF-ST02 row; after PB-4 the staircase emitter owns it and
+  // the FF-ST02 line should disappear.)
+  const emittedDerivedTags = new Set<string>()
   summary.excludedRooms.push(
     ...allRoomyRows
       .filter((r) => isAreaStatement(r.description) || r.category === 'AREA_STATEMENT')
@@ -194,6 +201,7 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
     const roomNames = bucket.rooms.slice(0, 8).map((r) => r.description.split('—')[0]!.trim())
     const sourceNote = `Σ floor area over ${bucket.rooms.length} room${bucket.rooms.length === 1 ? '' : 's'} with finish_code=${finishCode}; rooms: ${roomNames.join(', ')}${bucket.rooms.length > 8 ? `, …(+${bucket.rooms.length - 8})` : ''}`
     const tag = `FF-${finishCode}`
+    emittedDerivedTags.add(tag)
     const item = await upsertDerived({
       organizationId: job.organizationId,
       projectId: payload.projectId,
@@ -262,6 +270,7 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
   for (const [ceilingCode, bucket] of ceilingGroups) {
     const roomNames = bucket.rooms.slice(0, 8).map((r) => r.description.split('—')[0]!.trim())
     const ceilingLabel = ceilingCode === 'CL02' ? 'moisture-resistant gypsum (CL02)' : 'gypsum plain (CL03)'
+    emittedDerivedTags.add(`CL-${ceilingCode}`)
     await upsertDerived({
       organizationId: job.organizationId,
       projectId: payload.projectId,
@@ -371,7 +380,7 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
       organizationId: job.organizationId,
       projectId: payload.projectId,
       category: 'WALL_FINISH',
-      tag: `WF-${code}`,
+      tag: (() => { const t = `WF-${code}`; emittedDerivedTags.add(t); return t })(),
       description: desc,
       unit: 'm²',
       qty: 0,
@@ -382,6 +391,34 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
       summary,
     })
     summary.wallFeatures.push({ code, description: name })
+  }
+
+  // PF-3 housekeeping — soft-delete any derived FF-*/CL-*/WF-* rows that
+  // were emitted by a PRIOR quantify run but no longer correspond to a
+  // bucket this run. Without this, BOQ generation picks up the stale
+  // row (e.g. yesterday's FF-ST02 staircase line) and prices it even
+  // though QUANTIFY skipped that bucket today.
+  const staleDerived = await prisma.takeoffItem.findMany({
+    where: {
+      organizationId: job.organizationId,
+      projectId: payload.projectId,
+      deletedAt: null,
+      basis: { in: ['DERIVED', 'PARAMETRIC'] },
+      OR: [
+        { tag: { startsWith: 'FF-' } },
+        { tag: { startsWith: 'CL-' } },
+        { tag: { startsWith: 'WF-' } },
+      ],
+    },
+    select: { id: true, tag: true },
+  })
+  const stale = staleDerived.filter((i) => i.tag !== null && !emittedDerivedTags.has(i.tag))
+  if (stale.length > 0) {
+    await prisma.takeoffItem.updateMany({
+      where: { id: { in: stale.map((i) => i.id) } },
+      data: { deletedAt: new Date() },
+    })
+    console.log(`[quantify] soft-deleted ${stale.length} stale derived rows: ${stale.map((i) => i.tag).join(', ')}`)
   }
 
   return { ok: true, derived: summary }

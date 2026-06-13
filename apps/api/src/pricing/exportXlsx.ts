@@ -142,13 +142,23 @@ export async function renderBoqXlsx(boq: XlsxBoq, options: XlsxOptions = {}): Pr
       xlsRow.getCell(6).numFmt = AED_FORMAT
     }
     sheet.addRow([])
+    // PF-1 — derive the section subtotal from the line data instead of
+    // trusting section.subtotal. The pre-gate F1 patch (marking the
+    // stair line P/S in-place) decremented boq.subtotal but missed
+    // section.subtotal, so the existing v6 had a stale 170,874.70 in
+    // the section row that doubled into the GRAND TOTAL. Computing
+    // from lines on render keeps the AMOUNT total honest no matter
+    // what state the section row is in.
+    const sectionPriced = section.lines
+      .filter((l) => !l.isProvisional)
+      .reduce((sum, l) => sum + num(l.amount), 0)
     const subtotalRow = sheet.addRow([
       '',
       '',
       '',
       '',
-      `Subtotal — ${section.code}`,
-      num(section.subtotal),
+      `Subtotal — ${section.code} (priced only)`,
+      sectionPriced,
     ])
     subtotalRow.getCell(5).font = { bold: true }
     subtotalRow.getCell(6).font = { bold: true }
@@ -167,6 +177,23 @@ export async function renderBoqXlsx(boq: XlsxBoq, options: XlsxOptions = {}): Pr
     summary.addRow(['Client', '', options.clientName])
   }
   summary.addRow(['Currency', '', boq.currency])
+  // PF-2 — explicit scope label so a finishes-only export isn't mistaken
+  // for a complete quote. We detect "completeness" by looking for the
+  // doors/windows section (2.8); if missing, the file is Finishes-only.
+  const sectionCodes = new Set(boq.sections.map((s) => s.code))
+  const hasDoorsWindows = Array.from(sectionCodes).some((c) => c.startsWith('2.8'))
+  if (!hasDoorsWindows) {
+    summary.addRow([
+      'Scope',
+      'FINISHES-ONLY EXPORT — Section 2.8 (Doors / Windows) is not yet priced. ' +
+        'Door + window schedules return without counts on the current build (P4 schedule ' +
+        'text-pass fix pending). This file shows the Finishes (2.9) + General (1.0) sections ' +
+        'and should not be presented as a complete quote.',
+      '',
+    ])
+    summary.lastRow!.font = { bold: true, color: { argb: 'FFB00000' } }
+    summary.lastRow!.getCell(2).alignment = { wrapText: true, vertical: 'middle' }
+  }
   summary.addRow([DISCLAIMER])
   summary.lastRow!.font = { italic: true, color: { argb: 'FFB00000' } }
 
@@ -194,15 +221,19 @@ export async function renderBoqXlsx(boq: XlsxBoq, options: XlsxOptions = {}): Pr
   splitRow.getCell(2).alignment = { wrapText: true, vertical: 'middle' }
 
   summary.addRow([])
-  summary.addRow(['Section', 'Title', 'Subtotal (AED)']).font = { bold: true }
+  summary.addRow(['Section', 'Title', 'Subtotal — priced (AED)']).font = { bold: true }
   let runningSubtotal = 0
   for (const section of boq.sections) {
-    const sub = num(section.subtotal)
+    // PF-1: compute from priced lines, not from section.subtotal which
+    // can drift from line state after manual patches.
+    const sub = section.lines
+      .filter((l) => !l.isProvisional)
+      .reduce((sum, l) => sum + num(l.amount), 0)
     summary.addRow([section.code, section.title, sub]).getCell(3).numFmt = AED_FORMAT
     runningSubtotal += sub
   }
   summary.addRow([])
-  summary.addRow(['', 'Subtotal', runningSubtotal]).getCell(3).numFmt = AED_FORMAT
+  summary.addRow(['', 'Subtotal (priced only)', runningSubtotal]).getCell(3).numFmt = AED_FORMAT
   const discount = num(options.discount)
   if (discount > 0) {
     summary.addRow(['', 'Discount', -discount]).getCell(3).numFmt = AED_FORMAT
