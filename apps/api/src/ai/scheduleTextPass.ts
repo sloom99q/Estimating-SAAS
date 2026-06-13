@@ -38,8 +38,25 @@ function looksLikeIntegerCount(value: number): boolean {
   return Number.isInteger(value) && value > 0 && value < 200
 }
 
+/**
+ * PB-4 / P4 — true if `rest` looks like a *data* row for the tag at the
+ * start: a small integer count followed by a decimal width-in-metres.
+ * Rejects header rows like "D01 D02 D03 D04" where the next "number"
+ * is the digit pair of an adjacent tag.
+ *
+ * The architect's A551 layout reads:
+ *     "D01    6    1.00    3.00    3.00    D01 1000 X 3000"
+ * — the gating signature is the count + decimal-with-dot width.
+ */
+function isLikelyDataRowRest(rest: string): boolean {
+  return /^\s+\d{1,3}\s+\d+(?:\.\d+)/.test(rest)
+}
+
 function parseDoorLine(line: string, tag: string): ExtractScheduleRow {
   const rest = line.slice(line.indexOf(tag) + tag.length)
+  if (!isLikelyDataRowRest(rest)) {
+    return { tag, count: null, width_mm: null, height_mm: null, type: null, finish: null, remarks: null }
+  }
   const nums = (rest.match(NUMBER_RE) ?? []).map(Number).filter((n) => !Number.isNaN(n))
   // Expected order: count, widthM, heightM, panelHeightM, [trailing description numbers]
   let count: number | null = null
@@ -93,27 +110,40 @@ function parseWindowLine(line: string, tag: string): ExtractScheduleRow {
   }
 }
 
+/** A row is "blank" if the parser couldn't recover anything useful — keep
+ * scanning later lines for a richer occurrence of the same tag. */
+function isBlankRow(row: ExtractScheduleRow): boolean {
+  return row.count === null && row.width_mm === null && row.height_mm === null
+}
+
 function parseFromText(text: string, kind: ScheduleKind): ExtractScheduleRow[] {
-  const rows: ExtractScheduleRow[] = []
-  const seen = new Set<string>()
+  const collected = new Map<string, ExtractScheduleRow>()
   for (const line of text.split('\n')) {
     if (kind === 'DOOR') {
       const m = DOOR_TAG_RE.exec(line)
       if (!m) continue
       const tag = m[1]!
-      if (seen.has(tag)) continue
-      seen.add(tag)
-      rows.push(parseDoorLine(line, tag))
+      const existing = collected.get(tag)
+      // PB-4 — header rows ("D01    D02    D03 …") used to win the
+      // race because we keyed on first-occurrence. Now we keep the
+      // FIRST row that returns real values (count or dims); a richer
+      // later occurrence replaces a blank earlier one.
+      if (existing && !isBlankRow(existing)) continue
+      const row = parseDoorLine(line, tag)
+      if (existing && isBlankRow(row)) continue
+      collected.set(tag, row)
     } else {
       const m = WINDOW_TAG_RE.exec(line)
       if (!m) continue
       const tag = m[1]!
-      if (seen.has(tag)) continue
-      seen.add(tag)
-      rows.push(parseWindowLine(line, tag))
+      const existing = collected.get(tag)
+      if (existing && !isBlankRow(existing)) continue
+      const row = parseWindowLine(line, tag)
+      if (existing && isBlankRow(row)) continue
+      collected.set(tag, row)
     }
   }
-  return rows
+  return Array.from(collected.values())
 }
 
 export function scheduleTextPass(textSnippet: string, kind: ScheduleKind): ExtractScheduleRow[] {

@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react'
 import { Alert, Anchor, Badge, Button, Card, Group, List, Stack, Text } from '@mantine/core'
+import { useQuery } from '@tanstack/react-query'
 import { HttpError } from '@/shared/lib/http/client'
 import {
   fetchJob,
+  fetchLatestBoq,
   generateBoq,
   priceBoq,
   startQuantify,
@@ -44,11 +46,19 @@ async function waitForJobDone(jobId: string, pollMs = 1_000, maxTries = 240): Pr
 export function GenerateBoqCard({ projectId, ready }: { projectId: string; ready: boolean }) {
   const [phase, setPhase] = useState<Phase>('idle')
   const [error, setError] = useState<string | null>(null)
-  // PB-1 — when the BOQ POST returns 409 with the duplicate-rows shape, we
-  // render a structured alert with the offending (category, tag) groups
-  // plus copy-paste-able row IDs. No more raw "status 409".
   const [duplicates, setDuplicates] = useState<DuplicateTakeoffDetails | null>(null)
   const [boq, setBoq] = useState<BoqCreateResult | null>(null)
+
+  // PE-3 — fetch the project's latest BOQ on mount. If one already exists,
+  // show the download anchors immediately so the owner can grab the file
+  // without re-running Quantify / Price / etc. The existing BOQ is what
+  // 6 minutes of tokens already paid for — surfacing it is the right move.
+  const existingBoq = useQuery({
+    queryKey: ['projects', projectId, 'boq', 'latest'],
+    queryFn: () => fetchLatestBoq(projectId),
+    enabled: ready && !boq,
+    refetchOnWindowFocus: false,
+  })
 
   useEffect(() => {
     if (!ready) {
@@ -56,8 +66,16 @@ export function GenerateBoqCard({ projectId, ready }: { projectId: string; ready
       setBoq(null)
       setError(null)
       setDuplicates(null)
+      return
     }
-  }, [ready, projectId])
+    // PE-3: as soon as the existing-BOQ query lands, bind to it. The
+    // "Generate BOQ + Price" button becomes "Re-run BOQ" and the
+    // download anchors appear next to it.
+    if (existingBoq.data && !boq) {
+      setBoq(existingBoq.data)
+      setPhase('ready')
+    }
+  }, [ready, projectId, existingBoq.data, boq])
 
   const run = async () => {
     setError(null)

@@ -191,6 +191,20 @@ export async function generateBoq(projectId: string): Promise<BoqCreateResult> {
   })
 }
 
+/**
+ * PE-3 — fetch the project's latest BOQ (descending version). Returns
+ * null when the project has no BOQ yet so the SPA can fall into the
+ * generate flow instead of throwing.
+ */
+export async function fetchLatestBoq(projectId: string): Promise<BoqCreateResult | null> {
+  try {
+    return await withAuth<BoqCreateResult>(`/api/projects/${projectId}/boq`)
+  } catch (err) {
+    if (err instanceof HttpError && err.status === 404) return null
+    throw err
+  }
+}
+
 export interface PriceResult {
   jobId: string
 }

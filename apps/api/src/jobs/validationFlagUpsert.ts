@@ -19,10 +19,26 @@
  * migration adds a unique index on (organizationId, projectId, rule,
  * subject_hash) — left as a follow-up.
  */
-import type { PrismaClient, ValidationSeverity } from '@prisma/client'
+import type { ValidationSeverity } from '@prisma/client'
+
+/**
+ * Loose shape that matches both the raw Prisma client and the tenantDb
+ * wrapper. Both expose .validationFlag with findFirst / create / update;
+ * the tenantDb wrapper adds row-level isolation but the surface we use
+ * is identical at the call site.
+ */
+type AnyPrismaClient = {
+  validationFlag: {
+    findFirst: (...args: unknown[]) => Promise<unknown>
+    create: (...args: unknown[]) => Promise<unknown>
+    update: (...args: unknown[]) => Promise<unknown>
+  }
+}
 
 export interface UpsertValidationFlagArgs {
-  client: Pick<PrismaClient, 'validationFlag'>
+  // Accept anything with the {findFirst, create, update} trio — both
+  // PrismaClient and the tenantDb extension qualify.
+  client: AnyPrismaClient
   organizationId: string
   projectId: string
   takeoffItemId?: string | null
@@ -40,7 +56,7 @@ export async function upsertValidationFlag(
   args: UpsertValidationFlagArgs,
 ): Promise<UpsertValidationFlagResult> {
   const takeoffItemId = args.takeoffItemId ?? null
-  const existing = await args.client.validationFlag.findFirst({
+  const existing = (await args.client.validationFlag.findFirst({
     where: {
       organizationId: args.organizationId,
       projectId: args.projectId,
@@ -54,7 +70,7 @@ export async function upsertValidationFlag(
       resolved: false,
     },
     select: { id: true, severity: true, message: true },
-  })
+  })) as { id: string; severity: ValidationSeverity; message: string } | null
   if (existing) {
     if (existing.severity !== args.severity || existing.message !== args.message) {
       await args.client.validationFlag.update({
@@ -64,7 +80,7 @@ export async function upsertValidationFlag(
     }
     return { id: existing.id, created: false }
   }
-  const created = await args.client.validationFlag.create({
+  const created = (await args.client.validationFlag.create({
     data: {
       organizationId: args.organizationId,
       projectId: args.projectId,
@@ -73,6 +89,6 @@ export async function upsertValidationFlag(
       severity: args.severity,
       message: args.message,
     },
-  })
+  })) as { id: string }
   return { id: created.id, created: true }
 }

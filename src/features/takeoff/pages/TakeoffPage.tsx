@@ -19,7 +19,9 @@ import { GenerateBoqCard } from '../components/GenerateBoqCard'
 import { TakeoffTable } from '../components/TakeoffTable'
 import { PipelineStatus } from '../components/PipelineStatus'
 import { UploadCard } from '../components/UploadCard'
+import { fetchProjectDocuments } from '../api/takeoff.api'
 import { useDocumentBundle, useTakeoffBundle } from '../api/useTakeoff'
+import { useQuery } from '@tanstack/react-query'
 
 /**
  * Sprint-2 Review UI entry point. Three sections stacked vertically:
@@ -36,17 +38,35 @@ export function TakeoffPage() {
   const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null)
   const [filter, setFilter] = useState<'all' | 'needsReview'>('all')
 
+  // PE-1 bootstrap — when the page loads with no upload context, fetch the
+  // project's documents and auto-select the most recent READY one. Without
+  // this, GenerateBoqCard never renders, owners can't reach existing BOQs,
+  // and the only way to get the button was to re-upload the PDF (paying
+  // tokens for nothing).
+  const documents = useQuery({
+    queryKey: ['documents', 'list', projectId],
+    queryFn: () => fetchProjectDocuments(projectId!),
+    enabled: !!projectId,
+  })
+  useEffect(() => {
+    if (activeDocumentId) return
+    const docs = documents.data
+    if (!docs || docs.length === 0) return
+    const ready = docs.find((d) => d.status === 'READY')
+    const fallback = ready ?? docs[0]
+    if (fallback) setActiveDocumentId(fallback.id)
+  }, [activeDocumentId, documents.data])
+
   const docBundle = useDocumentBundle(activeDocumentId)
   const documentInFlight =
     docBundle.data && docBundle.data.document.status !== 'READY' && docBundle.data.document.status !== 'FAILED'
   const takeoff = useTakeoffBundle(projectId, documentInFlight ? { pollMs: 3_000 } : {})
 
-  // When the pipeline lands READY, drop the active-document state so the
-  // pipeline card stops showing once the review table is fresh.
+  // When the pipeline lands READY, refresh the takeoff table — useful proof
+  // for the user that processing finished. Kept here for the upload flow;
+  // the takeoff table also polls on its own when a doc is in flight.
   useEffect(() => {
     if (docBundle.data?.document.status === 'READY' || docBundle.data?.document.status === 'FAILED') {
-      // Refresh the takeoff table one more time, then keep the pipeline card
-      // visible — useful proof for the user that processing finished.
       void takeoff.refetch()
     }
   }, [docBundle.data?.document.status, takeoff])
@@ -87,7 +107,14 @@ export function TakeoffPage() {
 
       <GenerateBoqCard
         projectId={projectId}
-        ready={docBundle.data?.document.status === 'READY'}
+        // PE-1 — render whenever the project has either a READY document
+        // OR an existing takeoff (a previous run's data carries through
+        // even if the doc selection is stale). The card itself shows the
+        // existing-BOQ download path so this is the right gate.
+        ready={
+          docBundle.data?.document.status === 'READY' ||
+          (takeoff.data?.items.length ?? 0) > 0
+        }
       />
 
       {projectFlags.length > 0 ? (
