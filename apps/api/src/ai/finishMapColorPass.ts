@@ -385,7 +385,11 @@ const STAIRCASE_NAME_RE = /\bSTAIR(CASE)?\b/i
  * this is the extra guard for room-like-but-architectural rows (GARAGE,
  * PROJECTION, VOID, MEP shaft) that escape the area-statement filter.
  */
-const FINISH_EXCLUDED_NAME_RE = /\b(GARAGE|PROJECTION|VOID|SHAFT|MEP\b|PEDESTRIAN|VEHICULAR|GATE|COVERED\s*GATE)\b/i
+// PB-5 — "UP (Stair)" is a stair-direction CALLOUT, not a billable room.
+// It recurred on the SPRINT10 walkthrough as the source of a phantom
+// FN01 mapping. The staircase ITSELF still goes through STAIRCASE_NAME_RE
+// → ST02 above; the callout text gets dropped entirely here.
+const FINISH_EXCLUDED_NAME_RE = /\b(GARAGE|PROJECTION|VOID|SHAFT|MEP\b|PEDESTRIAN|VEHICULAR|GATE|COVERED\s*GATE|^UP\s*\(?STAIR\b|UP\s*\(STAIR\))/i
 
 export function isBathroomNamed(name: string): boolean {
   return BATHROOM_NAME_RE.test(name)

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { Anchor, Button, Card, Group, Stack, Text } from '@mantine/core'
+import { Alert, Anchor, Badge, Button, Card, Group, List, Stack, Text } from '@mantine/core'
+import { HttpError } from '@/shared/lib/http/client'
 import {
   fetchJob,
   generateBoq,
@@ -8,6 +9,18 @@ import {
   xlsxDownloadUrl,
   type BoqCreateResult,
 } from '../api/takeoff.api'
+
+interface DuplicateTakeoffDetails {
+  kind: 'duplicate_takeoff_rows'
+  dupGroups: Array<{ category: string; tag: string; count: number; takeoffItemIds: string[] }>
+  totalGroups: number
+}
+
+function isDuplicateTakeoffError(d: unknown): d is DuplicateTakeoffDetails {
+  if (!d || typeof d !== 'object') return false
+  const obj = d as Record<string, unknown>
+  return obj.kind === 'duplicate_takeoff_rows' && Array.isArray(obj.dupGroups)
+}
 
 /**
  * Sprint-8 S8-7 — owner-runnable BOQ flow. Quantify → BOQ → Price → XLSX.
@@ -31,6 +44,10 @@ async function waitForJobDone(jobId: string, pollMs = 1_000, maxTries = 240): Pr
 export function GenerateBoqCard({ projectId, ready }: { projectId: string; ready: boolean }) {
   const [phase, setPhase] = useState<Phase>('idle')
   const [error, setError] = useState<string | null>(null)
+  // PB-1 — when the BOQ POST returns 409 with the duplicate-rows shape, we
+  // render a structured alert with the offending (category, tag) groups
+  // plus copy-paste-able row IDs. No more raw "status 409".
+  const [duplicates, setDuplicates] = useState<DuplicateTakeoffDetails | null>(null)
   const [boq, setBoq] = useState<BoqCreateResult | null>(null)
 
   useEffect(() => {
@@ -38,11 +55,13 @@ export function GenerateBoqCard({ projectId, ready }: { projectId: string; ready
       setPhase('idle')
       setBoq(null)
       setError(null)
+      setDuplicates(null)
     }
   }, [ready, projectId])
 
   const run = async () => {
     setError(null)
+    setDuplicates(null)
     try {
       setPhase('quantifying')
       const { jobId: quantJob } = await startQuantify(projectId)
@@ -55,6 +74,14 @@ export function GenerateBoqCard({ projectId, ready }: { projectId: string; ready
       await waitForJobDone(priceJob)
       setPhase('ready')
     } catch (err) {
+      if (err instanceof HttpError && err.status === 409) {
+        const details = (err.body as { details?: unknown })?.details
+        if (isDuplicateTakeoffError(details)) {
+          setDuplicates(details)
+          setPhase('error')
+          return
+        }
+      }
       setError(err instanceof Error ? err.message : String(err))
       setPhase('error')
     }
@@ -105,6 +132,39 @@ export function GenerateBoqCard({ projectId, ready }: { projectId: string; ready
           <Text size="sm" c="dimmed">
             BOQ v{boq.version} ready. Subtotal {boq.subtotal ?? '—'} AED · P/S {boq.totalProvisional ?? '—'}.
           </Text>
+        ) : null}
+        {duplicates ? (
+          <Alert color="red" variant="light" title="Duplicate takeoff rows detected — resolve before generating">
+            <Stack gap="xs">
+              <Text size="sm">
+                {duplicates.totalGroups} (category, tag) collision
+                {duplicates.totalGroups === 1 ? '' : 's'}. Each takeoff row should be unique —
+                edit or soft-delete the duplicates in the review table, then re-try.
+              </Text>
+              <List size="sm" spacing="xs">
+                {duplicates.dupGroups.slice(0, 10).map((g) => (
+                  <List.Item key={`${g.category}:${g.tag}`}>
+                    <Group gap="xs" wrap="nowrap">
+                      <Badge variant="filled" color="red">
+                        {g.category}:{g.tag}
+                      </Badge>
+                      <Text size="sm" c="dimmed">
+                        ×{g.count} —
+                      </Text>
+                      <Text size="xs" c="dimmed" style={{ wordBreak: 'break-all' }}>
+                        {g.takeoffItemIds.join(', ')}
+                      </Text>
+                    </Group>
+                  </List.Item>
+                ))}
+              </List>
+              {duplicates.totalGroups > 10 ? (
+                <Text size="xs" c="dimmed">
+                  …+{duplicates.totalGroups - 10} more
+                </Text>
+              ) : null}
+            </Stack>
+          </Alert>
         ) : null}
         {error ? (
           <Text size="sm" c="red">

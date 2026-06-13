@@ -32,6 +32,7 @@ import type { ExtractScheduleRow, ScheduleKind } from '../../ai/types'
 import { getBlobStore } from '../../blob/fs'
 import { prisma } from '../../db'
 import { enqueueIfNotDone } from '../chainGuard'
+import { upsertValidationFlag } from '../validationFlagUpsert'
 import type { JobHandler, JobRecord } from '../types'
 
 interface ExtractSchedulesPayload {
@@ -325,15 +326,14 @@ export const extractSchedulesHandler: JobHandler = async (job: JobRecord) => {
 
       if (row.mismatch) {
         mismatches += 1
-        await prisma.validationFlag.create({
-          data: {
-            organizationId: job.organizationId,
-            projectId: document.projectId,
-            takeoffItemId: created.id,
-            rule: RULE_ROW_MISMATCH,
-            severity: 'ERROR',
-            message: `${kind} ${row.tag}: ${row.mismatch.field} disagrees (vision=${row.mismatch.vision}, text=${row.mismatch.text}).`,
-          },
+        await upsertValidationFlag({
+          client: prisma,
+          organizationId: job.organizationId,
+          projectId: document.projectId,
+          takeoffItemId: created.id,
+          rule: RULE_ROW_MISMATCH,
+          severity: 'ERROR',
+          message: `${kind} ${row.tag}: ${row.mismatch.field} disagrees (vision=${row.mismatch.vision}, text=${row.mismatch.text}).`,
         })
       }
     }

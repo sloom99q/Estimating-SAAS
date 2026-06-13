@@ -22,6 +22,7 @@ import { CLASSIFY_PROMPT_VERSION } from '../../ai/prompts/classify.v1'
 import { getBlobStore } from '../../blob/fs'
 import { prisma } from '../../db'
 import { enqueueIfNotDone } from '../chainGuard'
+import { upsertValidationFlag } from '../validationFlagUpsert'
 import type { JobHandler, JobRecord } from '../types'
 
 const isStubResult = (promptVersion: string): boolean => promptVersion.endsWith(STUB_SUFFIX)
@@ -149,27 +150,14 @@ export const classifyHandler: JobHandler = async (job: JobRecord) => {
       },
     })
     if (prefixMismatch) {
-      const existing = await prisma.validationFlag.findFirst({
-        where: {
-          organizationId: job.organizationId,
-          projectId: document.projectId,
-          rule: 'DISCIPLINE_PREFIX_MISMATCH',
-          message: { contains: sheet.id },
-          resolved: false,
-        },
-        select: { id: true },
+      await upsertValidationFlag({
+        client: prisma,
+        organizationId: job.organizationId,
+        projectId: document.projectId,
+        rule: 'DISCIPLINE_PREFIX_MISMATCH',
+        severity: 'INFO',
+        message: `Sheet ${sheet.id} drawing_no=${result.drawing_no ?? '?'} (page ${sheet.pageNo}): AI asserted discipline=${result.discipline} but the drawing-no prefix doesn't match UAE convention (M/E for MEP, S for STR). Downgraded to UNKNOWN.`,
       })
-      if (!existing) {
-        await prisma.validationFlag.create({
-          data: {
-            organizationId: job.organizationId,
-            projectId: document.projectId,
-            rule: 'DISCIPLINE_PREFIX_MISMATCH',
-            severity: 'INFO',
-            message: `Sheet ${sheet.id} drawing_no=${result.drawing_no ?? '?'} (page ${sheet.pageNo}): AI asserted discipline=${result.discipline} but the drawing-no prefix doesn't match UAE convention (M/E for MEP, S for STR). Downgraded to UNKNOWN.`,
-          },
-        })
-      }
     }
   }
 
@@ -190,26 +178,13 @@ export const classifyHandler: JobHandler = async (job: JobRecord) => {
   if (!disciplines.has('MEP')) missingDisciplines.push('MEP')
   for (const discipline of missingDisciplines) {
     const message = `No ${discipline} sheets detected — that section will be PROVISIONAL until covered.`
-    const existing = await prisma.validationFlag.findFirst({
-      where: {
-        organizationId: job.organizationId,
-        projectId: document.projectId,
-        rule: MISSING_DISCIPLINE_RULE,
-        takeoffItemId: null,
-        message,
-        resolved: false,
-      },
-      select: { id: true },
-    })
-    if (existing) continue
-    await prisma.validationFlag.create({
-      data: {
-        organizationId: job.organizationId,
-        projectId: document.projectId,
-        rule: MISSING_DISCIPLINE_RULE,
-        severity: 'WARN',
-        message,
-      },
+    await upsertValidationFlag({
+      client: prisma,
+      organizationId: job.organizationId,
+      projectId: document.projectId,
+      rule: MISSING_DISCIPLINE_RULE,
+      severity: 'WARN',
+      message,
     })
   }
   const missingDiscipline = missingDisciplines.length > 0

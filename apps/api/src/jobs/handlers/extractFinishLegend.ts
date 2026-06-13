@@ -27,6 +27,7 @@ import { renderPageQuadrants } from '../../ai/quadrantRender'
 import { getBlobStore } from '../../blob/fs'
 import { prisma } from '../../db'
 import { enqueueIfNotDone } from '../chainGuard'
+import { upsertValidationFlag } from '../validationFlagUpsert'
 import type { JobHandler, JobRecord } from '../types'
 
 interface ExtractFinishLegendPayload {
@@ -358,26 +359,14 @@ export const extractFinishLegendHandler: JobHandler = async (job: JobRecord) => 
   const realCodes = allCodes.size - (allCodes.has(BATHROOM_SENTINEL) ? 1 : 0)
   if (realCodes < LEGEND_MIN_CODES || realCodes > LEGEND_MAX_CODES) {
     const message = `Legend extraction returned ${realCodes} codes — outside sanity range ${LEGEND_MIN_CODES}-${LEGEND_MAX_CODES}. Likely an extraction quality miss; review the I4xx sheets.`
-    const existing = await prisma.validationFlag.findFirst({
-      where: {
-        organizationId: job.organizationId,
-        projectId: document.projectId,
-        rule: 'LEGEND_SANITY',
-        resolved: false,
-      },
-      select: { id: true },
+    await upsertValidationFlag({
+      client: prisma,
+      organizationId: job.organizationId,
+      projectId: document.projectId,
+      rule: 'LEGEND_SANITY',
+      severity: 'ERROR',
+      message,
     })
-    if (!existing) {
-      await prisma.validationFlag.create({
-        data: {
-          organizationId: job.organizationId,
-          projectId: document.projectId,
-          rule: 'LEGEND_SANITY',
-          severity: 'ERROR',
-          message,
-        },
-      })
-    }
   }
 
   if (tokensIn > 0 || tokensOut > 0) {

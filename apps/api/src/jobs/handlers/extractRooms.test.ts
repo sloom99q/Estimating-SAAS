@@ -49,4 +49,18 @@ describe('normalizeRoomName — Sprint 8 S8-2', () => {
       expect(normalizeRoomName(a)).toBe(normalizeRoomName(b))
     }
   })
+
+  // PB-5 — kitchen OCR aliases observed on Plot 4357 runs
+  it('collapses kitchen OCR aliases BOW/BOX/ION/BOY → BOH', () => {
+    expect(normalizeRoomName('BOW KITCHEN')).toBe('BOH KITCHEN')
+    expect(normalizeRoomName('BOX KITCHEN')).toBe('BOH KITCHEN')
+    expect(normalizeRoomName('Ion Kitchen')).toBe('BOH KITCHEN')
+    expect(normalizeRoomName('Boy Kitchen')).toBe('BOH KITCHEN')
+    expect(normalizeRoomName('BOH KITCHEN — GF')).toBe('BOH KITCHEN')
+  })
+
+  it('does NOT mangle real "DRY KITCHEN" or similar non-BOH variants', () => {
+    expect(normalizeRoomName('DRY KITCHEN')).toBe('DRY KITCHEN')
+    expect(normalizeRoomName('OUTDOOR KITCHEN')).toBe('OUTDOOR KITCHEN')
+  })
 })

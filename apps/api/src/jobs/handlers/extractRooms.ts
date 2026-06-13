@@ -34,6 +34,7 @@ import type { ExtractRoomsRow } from '../../ai/types'
 import { getBlobStore } from '../../blob/fs'
 import { prisma } from '../../db'
 import { recoverBuaFromText, runValidators, type ValidatorContext } from '../validators'
+import { upsertValidationFlag } from '../validationFlagUpsert'
 import type { JobHandler, JobRecord } from '../types'
 
 interface ExtractRoomsPayload {
@@ -72,11 +73,23 @@ interface ReconciledRoom {
  *      named with / without its code lands in one bucket
  *   5. collapse internal whitespace and strip stray punctuation noise
  */
+/**
+ * Sprint-10 PB-5 — OCR-mistake aliases for the BOH kitchen. The same
+ * label on the I401 finish plan gets vision-misread as BOW, BOX, ION,
+ * or BOY depending on how the model's tokens fall over the 3-letter
+ * prefix. They all collapse to the canonical "BOH KITCHEN" here so the
+ * cross-sheet deduper merges them instead of leaving four separate
+ * Spaces. (Confirmed on Plot 4357: BOW/BOX/ION/BOY all appeared as
+ * KITCHEN-suffixed names in successive live runs.)
+ */
+const KITCHEN_OCR_ALIAS_RE = /\b(?:BOW|BOX|ION|BOY)\s+KITCHEN\b/
+
 export function normalizeRoomName(raw: string): string {
   return raw
     .split('—')[0]!
     .toUpperCase()
     .replace(/[‘’ʼ]/g, "'")
+    .replace(KITCHEN_OCR_ALIAS_RE, 'BOH KITCHEN')
     .replace(/\b(GF|FF|RF|L1|L2|B1|B2|BF)[\s-]?\d{1,3}\b/g, '')
     .replace(/[.,;:()]/g, ' ')
     .replace(/\s+/g, ' ')
@@ -596,30 +609,28 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
 
       if (room.mismatch) {
         mismatches += 1
-        await prisma.validationFlag.create({
-          data: {
-            organizationId: job.organizationId,
-            projectId: document.projectId,
-            takeoffItemId: takeoff.id,
-            rule: RULE_ROW_MISMATCH,
-            severity: 'ERROR',
-            message: `ROOM ${room.name}: ${room.mismatch.field} disagrees (vision=${room.mismatch.vision}, text=${room.mismatch.text}).`,
-          },
+        await upsertValidationFlag({
+          client: prisma,
+          organizationId: job.organizationId,
+          projectId: document.projectId,
+          takeoffItemId: takeoff.id,
+          rule: RULE_ROW_MISMATCH,
+          severity: 'ERROR',
+          message: `ROOM ${room.name}: ${room.mismatch.field} disagrees (vision=${room.mismatch.vision}, text=${room.mismatch.text}).`,
         })
       }
 
       // S6-2: rooms the model couldn't label get an INFO flag so the human
       // reviewer surfaces them quickly. We don't fail the run.
       if (finishCode === null) {
-        await prisma.validationFlag.create({
-          data: {
-            organizationId: job.organizationId,
-            projectId: document.projectId,
-            takeoffItemId: takeoff.id,
-            rule: 'FINISH_UNMAPPED',
-            severity: 'INFO',
-            message: `ROOM ${room.name}${normalizedFloor ? ` (${normalizedFloor})` : ''}: no finish_code assigned. Likely needs human review.`,
-          },
+        await upsertValidationFlag({
+          client: prisma,
+          organizationId: job.organizationId,
+          projectId: document.projectId,
+          takeoffItemId: takeoff.id,
+          rule: 'FINISH_UNMAPPED',
+          severity: 'INFO',
+          message: `ROOM ${room.name}${normalizedFloor ? ` (${normalizedFloor})` : ''}: no finish_code assigned. Likely needs human review.`,
         })
       }
     }
@@ -843,28 +854,14 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
   }
   const validatorResults = runValidators(validatorCtx)
   for (const r of validatorResults) {
-    // Don't double-write the same flag if a previous run already raised it.
-    const existing = await prisma.validationFlag.findFirst({
-      where: {
-        organizationId: job.organizationId,
-        projectId: document.projectId,
-        rule: r.rule,
-        takeoffItemId: r.takeoffItemId ?? null,
-        message: r.message,
-        resolved: false,
-      },
-      select: { id: true },
-    })
-    if (existing) continue
-    await prisma.validationFlag.create({
-      data: {
-        organizationId: job.organizationId,
-        projectId: document.projectId,
-        takeoffItemId: r.takeoffItemId ?? null,
-        rule: r.rule,
-        severity: r.severity,
-        message: r.message,
-      },
+    await upsertValidationFlag({
+      client: prisma,
+      organizationId: job.organizationId,
+      projectId: document.projectId,
+      takeoffItemId: r.takeoffItemId ?? null,
+      rule: r.rule,
+      severity: r.severity,
+      message: r.message,
     })
   }
 
@@ -879,10 +876,28 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
     })
   }
 
-  // Terminal stage of the pipeline — mark the document READY.
+  // PB-3 hygiene: don't claim READY while sibling stage jobs are still
+  // in flight for the same document. The SPRINT10 double-chain finished
+  // EXTRACT_ROOMS on the slow side first, flipped the doc to READY, then
+  // the second chain's ROOMS finished — UI showed READY with RUNNING
+  // jobs underneath it. The doc moves to READY only when no pipeline
+  // job is QUEUED or RUNNING.
+  const stillActive = await prisma.job.count({
+    where: {
+      projectId: document.projectId,
+      type: { in: ['INGEST', 'CLASSIFY', 'EXTRACT_FINISH_LEGEND', 'EXTRACT_SCHEDULES', 'EXTRACT_ROOMS'] },
+      status: { in: ['QUEUED', 'RUNNING'] },
+      payload: { path: ['documentId'], equals: document.id },
+      // Exclude THIS handler's own job — its status still reads RUNNING
+      // until the runner flips it to DONE after we return.
+      id: { not: job.id },
+    },
+  })
   await prisma.document.update({
     where: { id: document.id },
-    data: { status: 'READY' },
+    // Keep PROCESSING if a peer is still in flight; only flip READY when
+    // we're the last one out.
+    data: { status: stillActive > 0 ? 'PROCESSING' : 'READY' },
   })
 
   return {

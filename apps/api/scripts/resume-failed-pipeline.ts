@@ -11,6 +11,7 @@
  */
 import { config } from '../src/config'
 import { prisma } from '../src/db'
+import { enqueueIfNotDone } from '../src/jobs/chainGuard'
 
 const PIPELINE_TYPES = [
   'INGEST',
@@ -56,16 +57,23 @@ if (firstFailedIdx < 0) {
   process.exit(0)
 }
 const resumeType = PIPELINE_TYPES[firstFailedIdx]!
-console.log('[resume] re-enqueueing', resumeType)
-const fresh = await prisma.job.create({
-  data: {
-    organizationId: doc.organizationId,
-    projectId: doc.projectId,
-    type: resumeType,
-    payload: { documentId: docId } as object,
-  },
+console.log('[resume] re-enqueueing', resumeType, 'via chainGuard.enqueueIfNotDone')
+// PB-3 — go through chainGuard so a concurrent SPA Retry click can't
+// fire a second parallel chain (the PA-3 spend overrun on doc
+// cmqbjjudp… cost $0.90 extra precisely because direct .job.create
+// raced two re-enqueues into the worker).
+const outcome = await enqueueIfNotDone({
+  client: prisma,
+  organizationId: doc.organizationId,
+  projectId: doc.projectId,
+  type: resumeType,
+  documentId: docId,
 })
-console.log('[resume] new job id:', fresh.id)
+console.log('[resume] outcome:', outcome.reason, outcome.jobId ? '(job=' + outcome.jobId + ')' : '')
+if (!outcome.enqueued) {
+  console.log('[resume] No new job created — chainGuard found an active peer. Watch the existing job in the SPA.')
+  process.exit(0)
+}
 console.log('[resume] worker will pick it up on next tick. Watch with:')
-console.log('  bun -e "import {prisma} from \\".//src/db\\";const j = await prisma.job.findUnique({where:{id:\\"' + fresh.id + '\\"}});console.log(j?.status,j?.error?.slice(0,200))"')
+console.log('  bun -e "import {prisma} from \\"./src/db\\";const j = await prisma.job.findUnique({where:{id:\\"' + outcome.jobId + '\\"}});console.log(j?.status,j?.error?.slice(0,200))"')
 process.exit(0)

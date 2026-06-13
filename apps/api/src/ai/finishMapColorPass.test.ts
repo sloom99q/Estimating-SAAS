@@ -108,6 +108,31 @@ describe('buildPalette + mapRoomsToFinishCodes', () => {
   })
 })
 
+// PB-5 — finish-excluded name set
+describe('isFinishExcludedName (PB-5 corpus)', () => {
+  it('excludes GARAGE / MEP / VOID / SHAFT / PEDESTRIAN ENTRANCE etc.', async () => {
+    const { isFinishExcludedName } = await import('./finishMapColorPass')
+    expect(isFinishExcludedName('GARAGE — GF')).toBe(true)
+    expect(isFinishExcludedName('MEP SHAFT')).toBe(true)
+    expect(isFinishExcludedName('VOID')).toBe(true)
+    expect(isFinishExcludedName('PEDESTRIAN ENTRANCE')).toBe(true)
+    expect(isFinishExcludedName('COVERED GATE')).toBe(true)
+  })
+
+  it('excludes the "UP (Stair)" callout that previously matched FN01', async () => {
+    const { isFinishExcludedName } = await import('./finishMapColorPass')
+    expect(isFinishExcludedName('UP (Stair)')).toBe(true)
+    expect(isFinishExcludedName('UP Stair')).toBe(true)
+  })
+
+  it('does NOT exclude real rooms', async () => {
+    const { isFinishExcludedName } = await import('./finishMapColorPass')
+    expect(isFinishExcludedName('LIVING')).toBe(false)
+    expect(isFinishExcludedName('STAIRCASE')).toBe(false)
+    expect(isFinishExcludedName('MASTER BEDROOM')).toBe(false)
+  })
+})
+
 describe('rgbDistance', () => {
   it('is zero for identical colours', () => {
     expect(rgbDistance({ r: 100, g: 100, b: 100 }, { r: 100, g: 100, b: 100 })).toBe(0)

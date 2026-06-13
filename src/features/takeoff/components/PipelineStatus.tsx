@@ -23,11 +23,36 @@ function statusColor(s: JobDto['status']): string {
   return 'gray'
 }
 
+/**
+ * PB-3 — pick the LATEST job per type, preferring DONE over RUNNING over
+ * QUEUED over FAILED. The double-chain run on doc cmqbjjudp… left a
+ * stale FAILED CLASSIFY *next to* a DONE CLASSIFY, and the prior
+ * implementation (just-take-the-first-after-desc-sort) picked whichever
+ * the backend returned first. The new tie-breaker is status-priority
+ * → createdAt desc, so the user-visible state reflects the latest
+ * SUCCESSFUL stage, not a stale failure.
+ */
+const STATUS_PRIORITY: Record<JobDto['status'], number> = {
+  DONE: 4,
+  RUNNING: 3,
+  QUEUED: 2,
+  FAILED: 1,
+}
 function latestByType(jobs: JobDto[]): Record<string, JobDto> {
   const map: Record<string, JobDto> = {}
   for (const j of jobs) {
-    // jobs come back ordered desc — first hit per type wins.
-    if (!map[j.type]) map[j.type] = j
+    const existing = map[j.type]
+    if (!existing) {
+      map[j.type] = j
+      continue
+    }
+    const pNew = STATUS_PRIORITY[j.status] ?? 0
+    const pExisting = STATUS_PRIORITY[existing.status] ?? 0
+    if (pNew > pExisting) map[j.type] = j
+    else if (pNew === pExisting) {
+      // same status — keep the more recent one
+      if (j.createdAt > existing.createdAt) map[j.type] = j
+    }
   }
   return map
 }

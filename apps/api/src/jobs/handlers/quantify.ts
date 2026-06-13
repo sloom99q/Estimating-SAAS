@@ -41,6 +41,7 @@ import type { Prisma, TakeoffCategory } from '@prisma/client'
 import { prisma } from '../../db'
 import type { JobHandler, JobRecord } from '../types'
 import { isAreaStatement, selectBillableRooms } from './_roomSelector'
+import { upsertValidationFlag } from '../validationFlagUpsert'
 
 interface QuantifyPayload {
   projectId: string
@@ -460,13 +461,14 @@ async function flagOnce(
   message: string,
   summary: DerivedSummary,
 ): Promise<void> {
-  const existing = await prisma.validationFlag.findFirst({
-    where: { organizationId, projectId, takeoffItemId, rule, resolved: false },
-    select: { id: true },
+  const result = await upsertValidationFlag({
+    client: prisma,
+    organizationId,
+    projectId,
+    takeoffItemId,
+    rule,
+    severity,
+    message,
   })
-  if (existing) return
-  await prisma.validationFlag.create({
-    data: { organizationId, projectId, takeoffItemId, rule, severity, message },
-  })
-  summary.flagsRaised += 1
+  if (result.created) summary.flagsRaised += 1
 }

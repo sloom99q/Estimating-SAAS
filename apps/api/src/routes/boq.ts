@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { tenantDb } from '../db/tenantDb'
 import { requireAuth } from '../middleware/auth'
 import { renderBoqXlsx, type XlsxBoq } from '../pricing/exportXlsx'
+import { upsertValidationFlag } from '../jobs/validationFlagUpsert'
 import type { Router } from './router'
 import { errorResponse, jsonResponse } from '../utils/json'
 
@@ -184,34 +185,45 @@ export function registerBoqRoutes(router: Router): void {
         )
       }
 
-      // S7-1: BOQ generation refuses with an ERROR ValidationFlag if duplicate
-      // (category, tag) pairs exist in the takeoff. Generation never launders
-      // dirty data into money. Tag-less items (tag === null) are ignored —
-      // QUANTIFY-derived rows have tags; legend items have tags; only freeform
-      // 'OTHER' rows could be tag-less, and they don't collide.
-      const seen = new Map<string, number>()
+      // S7-1 + PB-1: BOQ generation refuses with an ERROR ValidationFlag if
+      // duplicate (category, tag) pairs exist in the takeoff. PB-1 adds
+      // structured `details` to the 409 so the SPA can render a friendly
+      // explanation and link the user to the offending rows — raw
+      // "status 409" was the trust leak the gate walkthrough surfaced.
+      const seenIds = new Map<string, string[]>()
       for (const item of items) {
         if (!item.tag) continue
         const key = `${item.category}:${item.tag}`
-        seen.set(key, (seen.get(key) ?? 0) + 1)
+        const list = seenIds.get(key) ?? []
+        list.push(item.id)
+        seenIds.set(key, list)
       }
-      const dupes = Array.from(seen.entries())
-        .filter(([, n]) => n > 1)
-        .map(([k, n]) => `${k} (${n})`)
-      if (dupes.length > 0) {
-        // Raise a ValidationFlag so the SPA review surface can show it.
-        await db.validationFlag.create({
-          data: {
-            organizationId: ctx.organizationId,
-            projectId,
-            rule: 'DUPLICATE_TAG_IN_TAKEOFF',
-            severity: 'ERROR',
-            message: `BOQ generation refused: ${dupes.length} (category, tag) collision(s) in the takeoff: ${dupes.slice(0, 8).join(', ')}${dupes.length > 8 ? `, ...(+${dupes.length - 8})` : ''}. Dedupe before generating.`,
-          },
+      const dupGroups = Array.from(seenIds.entries())
+        .filter(([, ids]) => ids.length > 1)
+        .map(([key, ids]) => {
+          const [category, tag] = key.split(':') as [string, string]
+          return { category, tag, count: ids.length, takeoffItemIds: ids }
+        })
+      if (dupGroups.length > 0) {
+        const summary = dupGroups
+          .slice(0, 8)
+          .map((d) => `${d.category}:${d.tag} (${d.count})`)
+        await upsertValidationFlag({
+          client: db,
+          organizationId: ctx.organizationId,
+          projectId,
+          rule: 'DUPLICATE_TAG_IN_TAKEOFF',
+          severity: 'ERROR',
+          message: `BOQ generation refused: ${dupGroups.length} (category, tag) collision(s) in the takeoff: ${summary.join(', ')}${dupGroups.length > 8 ? `, ...(+${dupGroups.length - 8})` : ''}. Dedupe before generating.`,
         })
         return errorResponse(
           409,
-          `Duplicate (category, tag) pairs in takeoff — BOQ generation refused. Pairs: ${dupes.slice(0, 8).join(', ')}${dupes.length > 8 ? `, ...(+${dupes.length - 8})` : ''}`,
+          'Duplicate takeoff rows detected — resolve before generating.',
+          {
+            kind: 'duplicate_takeoff_rows',
+            dupGroups,
+            totalGroups: dupGroups.length,
+          },
         )
       }
 
