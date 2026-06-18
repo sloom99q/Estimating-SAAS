@@ -78,6 +78,10 @@
   "projectFlags": {
     "title": "Project-wide flags"
   },
+  "serverContinues": {
+    "title": "Extraction continues on the server",
+    "body": "You can navigate away or close this tab — the pipeline is running in the background. Come back to this project page to see the result."
+  },
   "errors": {
     "uploadFailed": "Upload failed: {{message}}",
     "loadFailed": "Could not load takeoff data."

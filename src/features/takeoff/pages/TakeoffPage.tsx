@@ -103,6 +103,12 @@ export function TakeoffPage() {
 
       <DocumentsListCard projectId={projectId} onSelect={setActiveDocumentId} />
 
+      {documentInFlight ? (
+        <Alert color="blue" variant="light" title={t('serverContinues.title')}>
+          {t('serverContinues.body')}
+        </Alert>
+      ) : null}
+
       {docBundle.data ? <PipelineStatus bundle={docBundle.data} /> : null}
 
       <GenerateBoqCard

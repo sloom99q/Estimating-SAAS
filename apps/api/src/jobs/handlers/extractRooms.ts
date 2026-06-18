@@ -36,6 +36,11 @@ import { prisma } from '../../db'
 import { recoverBuaFromText, runValidators, type ValidatorContext } from '../validators'
 import { upsertValidationFlag } from '../validationFlagUpsert'
 import type { JobHandler, JobRecord } from '../types'
+import {
+  AREA_STATEMENT_CATEGORY,
+  isAreaStatement,
+  isLikelyNotARoom,
+} from './_roomSelector'
 
 interface ExtractRoomsPayload {
   documentId: string
@@ -452,6 +457,13 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
   let manualSkipped = 0
   let mismatches = 0
   let quadrantsRendered = 0
+  // P3 — cold UI uploads were producing a 79-row "room" explode because
+  // vision occasionally returned title-block keywords ("DRAWING TITLE",
+  // "SCALE", "DOOR SCHEDULE") and tiny micro-areas as rows. Two counters
+  // surface the funnel rejection rate so the run report shows what was
+  // dropped vs reclassified.
+  let roomsRejected = 0
+  let areaStatementsReclassified = 0
   // S7-4 (the Area Gate): aggregate of name|area pairs the spatial parser
   // recovered from pdftotext -bbox-layout. Counted per-sheet AND collated so
   // the run report tells the reviewer how many drawn-area rooms we
@@ -538,6 +550,20 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
 
     for (const room of reconciled) {
       const normalizedFloor = normalizeFloor(room.floor)
+      // P3 — title-block / schedule-frame strings: drop with a counter.
+      // This is the funnel that protects the SPA review surface from the
+      // cold-upload 79-row explode.
+      if (isLikelyNotARoom(room.name, room.area_m2)) {
+        roomsRejected += 1
+        continue
+      }
+      // P3 — building-level statements (BUA, plot area, "Proposed Villa")
+      // stay in the takeoff but at category=AREA_STATEMENT so the BOQ
+      // selector + scorer skip them. Both isLikelyNotARoom and
+      // isAreaStatement consult shared rules in _roomSelector.ts.
+      const describedAs = `${room.name}${normalizedFloor ? ` — ${normalizedFloor}` : ''}`
+      const isStatement = isAreaStatement(describedAs)
+      if (isStatement) areaStatementsReclassified += 1
       // S7-3: store the RAW observation from the vision pass — independent
       // of whatever legend vocabulary happened to be in effect at the time.
       // assignFinishCode() reads rawFinishObservation in a deterministic
@@ -592,9 +618,9 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
         data: {
           organizationId: job.organizationId,
           projectId: document.projectId,
-          category: 'ROOM',
+          category: isStatement ? AREA_STATEMENT_CATEGORY : 'ROOM',
           tag: room.code,
-          description: `${room.name}${normalizedFloor ? ` — ${normalizedFloor}` : ''}`,
+          description: describedAs,
           unit: 'm²',
           qtyAi: room.area_m2 ?? undefined,
           basis: room.basis,
@@ -918,6 +944,10 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
     bboxPairsBySheet,
     /** Sprint-8 S8-2: survivors skipped from Spaces because no area. */
     unmeasuredSurvivors,
+    /** P3 — title-block / schedule-frame names dropped at the funnel. */
+    roomsRejected,
+    /** P3 — building-level statements routed to AREA_STATEMENT category. */
+    areaStatementsReclassified,
     /** Sprint-4 S4-5: validation flags raised by the post-extraction net. */
     validatorFlagsRaised: validatorResults.length,
     tokensIn,

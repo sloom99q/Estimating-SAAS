@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import {
   AREA_STATEMENT_CATEGORY,
   isAreaStatement,
+  isLikelyNotARoom,
   selectAreaStatements,
   selectBillableRooms,
 } from './_roomSelector'
@@ -76,5 +77,55 @@ describe('selectBillableRooms / selectAreaStatements', () => {
 
   it('exports a stable category string for the reclassifier', () => {
     expect(AREA_STATEMENT_CATEGORY).toBe('AREA_STATEMENT')
+  })
+})
+
+describe('isLikelyNotARoom (P3 cold-upload deny gate)', () => {
+  it('drops title-block / drawing-frame keywords', () => {
+    expect(isLikelyNotARoom('DRAWING TITLE', 0)).toBe(true)
+    expect(isLikelyNotARoom('DRAWING NO', 0)).toBe(true)
+    expect(isLikelyNotARoom('SCALE', 0)).toBe(true)
+    expect(isLikelyNotARoom('REVISION', 0)).toBe(true)
+    expect(isLikelyNotARoom('PROJECT NO', 0)).toBe(true)
+    expect(isLikelyNotARoom('DRAWN', null)).toBe(true)
+    expect(isLikelyNotARoom('CHECKED', null)).toBe(true)
+  })
+
+  it('drops schedule-sheet headers', () => {
+    expect(isLikelyNotARoom('DOOR SCHEDULE', null)).toBe(true)
+    expect(isLikelyNotARoom('WINDOW SCHEDULE', null)).toBe(true)
+    expect(isLikelyNotARoom('GLAZING TYPES', null)).toBe(true)
+    expect(isLikelyNotARoom('FINISH SCHEDULE', null)).toBe(true)
+    expect(isLikelyNotARoom('LEGEND', null)).toBe(true)
+    expect(isLikelyNotARoom('KEY PLAN', null)).toBe(true)
+    expect(isLikelyNotARoom('GENERAL NOTES', null)).toBe(true)
+    expect(isLikelyNotARoom('AREA TABLE', null)).toBe(true)
+  })
+
+  it('drops bare door / window / detail tags that leak past NAME_RE', () => {
+    expect(isLikelyNotARoom('D01', null)).toBe(true)
+    expect(isLikelyNotARoom('CW09', null)).toBe(true)
+    expect(isLikelyNotARoom('A301', null)).toBe(true)
+    expect(isLikelyNotARoom('W14', null)).toBe(true)
+  })
+
+  it('drops micro-areas under 0.5 m² (vision capturing label dims as area)', () => {
+    expect(isLikelyNotARoom('LIVING', 0.2)).toBe(true)
+    expect(isLikelyNotARoom('LIVING', 0.49)).toBe(true)
+  })
+
+  it('drops names longer than 60 chars (sentences from notes blocks)', () => {
+    const sentence = 'ALL FINISHES TO BE CONFIRMED BY THE CONTRACTOR PRIOR TO INSTALLATION'
+    expect(isLikelyNotARoom(sentence, 12.5)).toBe(true)
+  })
+
+  it('KEEPS the real rooms — Phase-1 acceptance set', () => {
+    expect(isLikelyNotARoom('LIVING', 35)).toBe(false)
+    expect(isLikelyNotARoom("MAID'S BATH", 3.2)).toBe(false)
+    expect(isLikelyNotARoom('MASTER BEDROOM', 28.4)).toBe(false)
+    expect(isLikelyNotARoom('POWDER ROOM', 2.1)).toBe(false)
+    expect(isLikelyNotARoom('ENTRANCE LOBBY', 12.8)).toBe(false)
+    expect(isLikelyNotARoom('BOH KITCHEN', 16.4)).toBe(false)
+    expect(isLikelyNotARoom('STAIRCASE', 9.6)).toBe(false)
   })
 })

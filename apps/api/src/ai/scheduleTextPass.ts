@@ -25,7 +25,16 @@ import type { ExtractScheduleRow, ScheduleKind } from './types'
 const DOOR_TAG_RE = /^\s+(D\d{2}(?:-[A-Z])?)\s/
 const WINDOW_TAG_RE = /^\s+((?:CW|W)\d{2}(?:-[A-Z])?)\s/
 const NUMBER_RE = /-?\d+(?:\.\d+)?/g
-const FLOOR_TRAILING_RE = /\s+(GROUND FLOOR|FIRST FLOOR|ROOF|BASEMENT|MEZZANINE)\s*$/i
+/**
+ * P4 — floor label can sit ANYWHERE after the data, not just end-of-line.
+ * The real A502 rows look like
+ *     "CW13   0.60   3.39   1   Standard Fixed   FIRST FLOOR   DRAWN   AK   DATE   17-08-2021"
+ * The trailing schedule-frame text ("DRAWN", "PROJECT NO.", "SCALE", "DRAWING TITLE",
+ * etc.) used to leak into the `type` field because the old regex required
+ * end-of-line. Matching anywhere lets us slice `working` at the floor label
+ * and the description extractor stops there.
+ */
+const FLOOR_TRAILING_RE = /\s+(GROUND FLOOR|FIRST FLOOR|ROOF|BASEMENT|MEZZANINE)\b/i
 
 function metersToMm(value: number): number | null {
   if (!Number.isFinite(value) || value <= 0) return null
@@ -82,6 +91,20 @@ function parseDoorLine(line: string, tag: string): ExtractScheduleRow {
   }
 }
 
+/**
+ * P4 / PB-4 — same data-row test as doors but tuned to the window
+ * column order. A502's real window row is:
+ *     "CW01    3.03    4.04    1    Sliding Windows    GROUND FLOOR"
+ * — leading decimal-with-dot width AND height. A caption row like
+ *     "CW13                                              CW15"
+ * has no decimals after the tag (the "15" inside CW15 is an integer,
+ * not 15.00), so this gate rejects it and the parser keeps looking
+ * for the real data row later in the sheet.
+ */
+function isLikelyWindowDataRowRest(rest: string): boolean {
+  return /^\s+\d+(?:\.\d+)\s+\d+(?:\.\d+)/.test(rest)
+}
+
 function parseWindowLine(line: string, tag: string): ExtractScheduleRow {
   let working = line
   const floorMatch = FLOOR_TRAILING_RE.exec(working)
@@ -91,6 +114,9 @@ function parseWindowLine(line: string, tag: string): ExtractScheduleRow {
     working = working.slice(0, floorMatch.index)
   }
   const rest = working.slice(working.indexOf(tag) + tag.length)
+  if (!isLikelyWindowDataRowRest(rest)) {
+    return { tag, count: null, width_mm: null, height_mm: null, type: null, finish: null, remarks: null }
+  }
   const nums = (rest.match(NUMBER_RE) ?? []).map(Number).filter((n) => !Number.isNaN(n))
   // Expected order: widthM, heightM, count, [extras]
   let width_mm: number | null = nums[0] !== undefined ? metersToMm(nums[0]) : null

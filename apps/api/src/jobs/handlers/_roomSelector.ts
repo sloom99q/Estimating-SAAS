@@ -54,6 +54,67 @@ export function isAreaStatement(description: string): boolean {
 }
 
 /**
+ * P3 — title-block / schedule-frame / drawing-meta strings that the
+ * vision pass occasionally returns as "room names" on a cold UI upload.
+ * These are NOT area statements (no measurable area) — they're just
+ * artefacts of the LLM mis-reading the title-block region or a
+ * schedule sheet. Hard-deny: drop at TakeoffItem creation.
+ *
+ * Distinct from AREA_STATEMENT (which gets stored at a separate
+ * category and surfaces on the BUA card). A "DRAWING TITLE" entry has
+ * no row in either table — it's just noise.
+ */
+const NOT_A_ROOM_PATTERNS: RegExp[] = [
+  // Title-block / drawing-frame keywords.
+  /^\s*drawing\s*(title|no|number|name)\b/i,
+  /^\s*sheet\s*(no|number|size|name|title)\b/i,
+  /^\s*scale\b/i,
+  /^\s*revision\b/i,
+  /^\s*project\s*(no|number|name|title)\b/i,
+  /^\s*(drawn|checked|approved|date|zone|reference)\s*[:=]?\s*$/i,
+  /^\s*(client|consultant|architect|contractor|owner|lead)\b/i,
+  // Schedule-sheet headers.
+  /^\s*(door|window|glazing|finish|finishes|finish[\s-]*schedule|room[\s-]*schedule|material[\s-]*schedule)\s*(schedule|types|list)?\s*$/i,
+  /^\s*(legend|key\s*plan|key\s*to\s*finishes?|finish\s*key|notes?|general\s*notes?|specification\s*notes?)\s*$/i,
+  /^\s*list\s*of\s*(materials?|finishes?|drawings?)\b/i,
+  // Schedule meta + table titles.
+  /^\s*area\s*(table|statement|schedule)\b/i,
+  /^\s*(typ|typical|details?|section|elevation)\s*[:=]?\s*$/i,
+  // Door / window / detail tags that NAME_RE accidentally lets through.
+  /^\s*[A-Z]{1,3}\d{2,3}([-/][A-Z]?\d*)?\s*$/,
+  // Generic compass / direction-only labels.
+  /^\s*(north|south|east|west)\b/i,
+]
+
+/**
+ * P3 — true if `name` is clearly not a real room. Use BEFORE creating a
+ * ROOM TakeoffItem. Applied after `isAreaStatement` returns false; the
+ * two are complementary:
+ *   - isAreaStatement(name)    → category = AREA_STATEMENT
+ *   - isLikelyNotARoom(name)   → drop entirely (not stored)
+ *   - else                     → category = ROOM
+ *
+ * Soft gates:
+ *   - area < 0.5 m² is noise (smallest WC observed in corpus ≈ 1.2 m²);
+ *     vision occasionally captures a label dimension as area.
+ *   - name length > 60 chars is almost certainly a sentence picked up
+ *     from a notes block — drop.
+ *
+ * Hard gate:
+ *   - matches any NOT_A_ROOM_PATTERNS entry.
+ */
+export function isLikelyNotARoom(name: string, area: number | null): boolean {
+  const trimmed = name.trim()
+  if (trimmed.length === 0) return true
+  if (trimmed.length > 60) return true
+  if (area !== null && area > 0 && area < 0.5) return true
+  for (const re of NOT_A_ROOM_PATTERNS) {
+    if (re.test(trimmed)) return true
+  }
+  return false
+}
+
+/**
  * `selectBillableRooms(items)` — the one selector. Filters to category
  * ROOM (deleted or not handled by the caller), drops anything matching
  * `isAreaStatement`, returns the rest.

@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Alert, Button, Card, Group, Stack, Text } from '@mantine/core'
 import { useTranslation } from 'react-i18next'
 import { useUploadProjectDocument } from '../api/useTakeoff'
@@ -13,6 +13,21 @@ export function UploadCard({ projectId, onUploaded }: UploadCardProps) {
   const inputRef = useRef<HTMLInputElement>(null)
   const mutation = useUploadProjectDocument(projectId)
   const [error, setError] = useState<string | null>(null)
+
+  // P1 — fire the browser's "are you sure?" dialog ONLY while the upload
+  // POST is in flight. Once the server has the bytes (mutation resolved),
+  // extraction continues on the server and the user can safely navigate
+  // away or close the tab. The TakeoffPage shows a "extraction continues
+  // on the server" banner so they know it's fine to leave.
+  useEffect(() => {
+    if (!mutation.isPending) return
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault()
+      e.returnValue = ''
+    }
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [mutation.isPending])
 
   const handlePick = () => inputRef.current?.click()
 
