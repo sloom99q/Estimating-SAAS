@@ -84,6 +84,11 @@ const NOT_A_ROOM_PATTERNS: RegExp[] = [
   /^\s*[A-Z]{1,3}\d{2,3}([-/][A-Z]?\d*)?\s*$/,
   // Generic compass / direction-only labels.
   /^\s*(north|south|east|west)\b/i,
+  // P3 cold-upload — stair direction callouts ("UP (Stair)", "DN STAIR",
+  // "DOWN (stair)"). The finish-mapper already denies these via
+  // FINISH_EXCLUDED_NAME_RE; mirroring on the room funnel keeps them out
+  // of the TakeoffItem table entirely so they can't be priced.
+  /^\s*(up|dn|down)\s*\(?\s*stair/i,
 ]
 
 /**

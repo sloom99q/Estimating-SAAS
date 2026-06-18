@@ -119,6 +119,12 @@ describe('isLikelyNotARoom (P3 cold-upload deny gate)', () => {
     expect(isLikelyNotARoom(sentence, 12.5)).toBe(true)
   })
 
+  it('drops stair direction callouts (UP / DN / DOWN — Stair)', () => {
+    expect(isLikelyNotARoom('UP (Stair)', 0)).toBe(true)
+    expect(isLikelyNotARoom('DN STAIR', 0)).toBe(true)
+    expect(isLikelyNotARoom('DOWN (stair)', 0)).toBe(true)
+  })
+
   it('KEEPS the real rooms — Phase-1 acceptance set', () => {
     expect(isLikelyNotARoom('LIVING', 35)).toBe(false)
     expect(isLikelyNotARoom("MAID'S BATH", 3.2)).toBe(false)
