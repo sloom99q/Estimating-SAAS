@@ -10,6 +10,12 @@
  * WIPED: Project · Space · Document · Sheet · TakeoffItem · ValidationFlag ·
  *        Correction · Boq / BoqSection / BoqLine · Quotation · Job
  *
+ * Corrections are archived BEFORE delete — every wipe writes a JSONL dump
+ * to apps/api/data/corrections-archive/<slug>-<utc>.jsonl. They're the
+ * system-learning record (aiValue → humanValue per human edit) and we
+ * want to keep that signal across resets even when the projects that
+ * produced them are gone. Archive failure aborts the wipe.
+ *
  * Usage counters on the org are reset to zero so post-wipe metrics don't
  * carry forward pre-demo token spend.
  *
@@ -17,12 +23,18 @@
  *   - prints a count summary of what WILL be deleted
  *   - aborts unless --confirm is passed
  *   - --dry-run prints the plan and exits without touching the DB
+ *   - Corrections are archived first; if the archive write fails the
+ *     transaction is never started.
  *
  * This script is deliberately the only place in the codebase that issues
  * tenant-scoped DELETEs across the takeoff pipeline. Do not call from a
  * handler, route, or job — it's a CLI artefact for the founder.
  */
+import { promises as fs } from 'node:fs'
+import { join } from 'node:path'
 import { prisma } from '../src/db'
+
+const ARCHIVE_DIR = join(process.cwd(), 'apps/api/data/corrections-archive')
 
 interface CountSummary {
   projects: number
@@ -81,6 +93,62 @@ async function countForOrg(organizationId: string): Promise<CountSummary> {
     quotations,
     jobs,
   }
+}
+
+interface ArchivePlan {
+  archivePath: string | null
+  count: number
+}
+
+/**
+ * Dump every Correction for `organizationId` to JSONL. Returns the
+ * absolute path written (or null if no rows). Each line is one
+ * Correction row with every field we'd want to grep / re-import later.
+ * JSONL — not CSV — because aiValue/humanValue/reason are free-text and
+ * regularly contain commas; one-row-per-line keeps `wc -l` and `grep`
+ * useful for spot checks.
+ */
+async function archiveCorrections(
+  org: { id: string; slug: string },
+  utcStamp: string,
+): Promise<ArchivePlan> {
+  const rows = await prisma.correction.findMany({
+    where: { organizationId: org.id },
+    orderBy: { createdAt: 'asc' },
+    select: {
+      id: true,
+      organizationId: true,
+      entity: true,
+      entityId: true,
+      field: true,
+      aiValue: true,
+      humanValue: true,
+      reason: true,
+      userId: true,
+      createdAt: true,
+    },
+  })
+  if (rows.length === 0) {
+    return { archivePath: null, count: 0 }
+  }
+  await fs.mkdir(ARCHIVE_DIR, { recursive: true })
+  const archivePath = join(ARCHIVE_DIR, `${org.slug}-${utcStamp}.jsonl`)
+  // Stamp each line so a future re-import knows where the row came from
+  // and when it was archived (the same `createdAt` is still the source
+  // of truth for the original human edit).
+  const payload =
+    rows
+      .map((r) =>
+        JSON.stringify({
+          ...r,
+          createdAt: r.createdAt.toISOString(),
+          _archivedFromOrgSlug: org.slug,
+          _archivedAt: new Date().toISOString(),
+        }),
+      )
+      .join('\n') + '\n'
+  await fs.writeFile(archivePath, payload, 'utf-8')
+  return { archivePath, count: rows.length }
 }
 
 async function resolveOrg(arg: string): Promise<{ id: string; name: string; slug: string }> {
@@ -159,15 +227,40 @@ async function main(): Promise<void> {
   console.log('Will delete:')
   console.log(fmtSummary(before))
   console.log('Will KEEP: users, members, materials, suppliers, prices, rate library, assemblies.')
+  // Stamp once so the archive filename and the log lines all match the
+  // same UTC moment. Format: 20260619T143215Z (compact, sortable, safe
+  // in a filename on macOS/Linux).
+  const utcStamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z')
+  const archivePathPreview = before.corrections > 0
+    ? join(ARCHIVE_DIR, `${org.slug}-${utcStamp}.jsonl`)
+    : '(none — no corrections to archive)'
+  console.log('')
+  console.log(`Corrections archive plan: ${before.corrections} row(s) → ${archivePathPreview}`)
   console.log('')
 
   if (dryRun) {
-    console.log('Dry run — no rows touched. Re-run with --confirm to execute.')
+    console.log('Dry run — no rows touched, no archive written. Re-run with --confirm to execute.')
     return
   }
   if (!confirm) {
     console.log('Add --confirm to execute, or --dry-run to preview.')
     return
+  }
+
+  // Archive Corrections FIRST. If the dump fails (disk full, perms,
+  // whatever), abort before any DELETE runs.
+  let plan: ArchivePlan
+  try {
+    plan = await archiveCorrections(org, utcStamp)
+  } catch (err) {
+    console.error('Correction archive FAILED — aborting wipe. Reason:')
+    console.error(err)
+    process.exit(1)
+  }
+  if (plan.archivePath) {
+    console.log(`Archived ${plan.count} correction(s) → ${plan.archivePath}`)
+  } else {
+    console.log('No corrections to archive.')
   }
 
   const t0 = Date.now()
