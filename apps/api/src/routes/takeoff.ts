@@ -211,11 +211,19 @@ export function registerTakeoffRoutes(router: Router): void {
         String(parsed.data.qtyFinal ?? '') !==
           String(existing.qtyAi === null ? '' : existing.qtyAi.toString())
 
-      // S9-3 finishCode change detection. The current code lives in
-      // meta.finish_code from the colour mapper / vision pass.
+      // PIVOT — meta.finish_code is the HUMAN-CONFIRMED code (the only
+      // thing PRICE reads). meta.finishSuggestion is what the AI proposed
+      // (color-sample or vision-extract). The Correction's aiValue is the
+      // suggestion so the data-quality flow sees what the AI got wrong
+      // even though finish_code was never auto-populated.
       const existingMeta = (existing.meta ?? {}) as Record<string, unknown>
       const currentFinish =
         typeof existingMeta.finish_code === 'string' ? existingMeta.finish_code : null
+      const suggestion = existingMeta.finishSuggestion as
+        | { code?: string | null }
+        | null
+        | undefined
+      const suggestedCode = suggestion?.code ?? null
       const finishChanged =
         parsed.data.finishCode !== undefined &&
         (parsed.data.finishCode ?? null) !== currentFinish
@@ -228,14 +236,13 @@ export function registerTakeoffRoutes(router: Router): void {
       // review" filter (default AI rows) honest.
       if ((qtyChanged || finishChanged) && parsed.data.status === undefined) data.status = 'EDITED'
 
-      // S9-3 meta write — keep every other key, set the new finish_code.
       if (finishChanged) {
+        const nextFinish = parsed.data.finishCode ?? null
         data.meta = {
           ...existingMeta,
-          finish_code: parsed.data.finishCode ?? null,
-          // Stamp the override source so QUANTIFY and the BOQ know this
-          // came from the reviewer's hand, not the colour mapper.
-          finishSource: 'human-override',
+          finish_code: nextFinish,
+          finishSource: nextFinish === null ? 'cleared-by-reviewer' : 'human-confirmed',
+          finishConfirmedAt: nextFinish === null ? null : new Date().toISOString(),
         } as Prisma.JsonObject
       }
 
@@ -262,9 +269,11 @@ export function registerTakeoffRoutes(router: Router): void {
           }),
         )
       }
-      // S9-3 Correction row for finish_code so the data-quality flow can
-      // see what the colour mapper got wrong and feed it back into the
-      // tuning loop.
+      // PIVOT — the Correction captures the AI's suggestion vs the
+      // human's confirmed code. aiValue is meta.finishSuggestion.code
+      // (color-sample or vision-extract). humanValue is what the
+      // reviewer picked. Identical values (Accept-as-is) still produce
+      // a row so the audit trail shows the explicit confirmation.
       if (finishChanged) {
         writes.push(
           db.correction.create({
@@ -273,7 +282,7 @@ export function registerTakeoffRoutes(router: Router): void {
               entity: 'TakeoffItem',
               entityId: existing.id,
               field: 'finish_code',
-              aiValue: currentFinish,
+              aiValue: suggestedCode,
               humanValue: parsed.data.finishCode ?? null,
               reason: 'Per-room finish dropdown',
               userId: ctx.user.id,
@@ -285,6 +294,117 @@ export function registerTakeoffRoutes(router: Router): void {
       return jsonResponse(
         takeoffDto(updated as Parameters<typeof takeoffDto>[0]),
       )
+    }),
+  )
+
+  /**
+   * POST /api/projects/:id/finishes/accept-suggestions
+   *
+   * PIVOT: bulk-confirm AI suggested finish codes. For each ROOM in the
+   * project that has meta.finishSuggestion.code AND meta.finish_code is
+   * still null, set finish_code = suggestion.code, stamp
+   * meta.finishSource='human-confirmed', and write a Correction row
+   * (aiValue=suggestion, humanValue=suggestion — explicit acceptance
+   * counts as a confirmation event for the audit trail).
+   *
+   * Body (optional): { roomIds: string[] }  → restrict to these rooms.
+   *                  { onlyFloorFinishCodes: true }  → skip suggestions
+   *                    outside the floor vocab (ST/PR/BATHROOM). Default
+   *                    true; bulk-accept never assigns wall codes.
+   *
+   * Returns the per-room accepted/skipped breakdown so the SPA can
+   * render "Accepted 18 of 22 (4 had no suggestion)".
+   */
+  router.post(
+    '/api/projects/:id/finishes/accept-suggestions',
+    requireAuth(async (req, ctx) => {
+      const projectId = ctx.params.id
+      const db = tenantDb(ctx.organizationId)
+      const project = await db.project.findFirst({
+        where: { id: projectId, deletedAt: null },
+        select: { id: true },
+      })
+      if (!project) return errorResponse(404, 'Project not found')
+
+      const body = (await req.json().catch(() => ({}))) as {
+        roomIds?: string[]
+        onlyFloorFinishCodes?: boolean
+      }
+      const onlyFloor = body.onlyFloorFinishCodes !== false
+      const FLOOR_VOCAB = new Set(['ST01', 'ST02', 'ST03', 'PR01', 'PR03', 'BATHROOM'])
+
+      const rooms = await db.takeoffItem.findMany({
+        where: {
+          projectId,
+          category: 'ROOM',
+          deletedAt: null,
+          ...(body.roomIds && body.roomIds.length > 0 ? { id: { in: body.roomIds } } : {}),
+        },
+      })
+
+      const accepted: Array<{ id: string; code: string }> = []
+      const skipped: Array<{ id: string; reason: string }> = []
+      const now = new Date().toISOString()
+
+      const writes: Prisma.PrismaPromise<unknown>[] = []
+      for (const room of rooms) {
+        const meta = (room.meta ?? {}) as Record<string, unknown>
+        const existingFinish =
+          typeof meta.finish_code === 'string' ? meta.finish_code : null
+        if (existingFinish) {
+          skipped.push({ id: room.id, reason: 'already-confirmed' })
+          continue
+        }
+        const sugg = meta.finishSuggestion as { code?: string | null } | null | undefined
+        const code = sugg?.code ?? null
+        if (!code) {
+          skipped.push({ id: room.id, reason: 'no-suggestion' })
+          continue
+        }
+        if (onlyFloor && !FLOOR_VOCAB.has(code)) {
+          skipped.push({ id: room.id, reason: `non-floor-code:${code}` })
+          continue
+        }
+        accepted.push({ id: room.id, code })
+        writes.push(
+          db.takeoffItem.update({
+            where: { id: room.id },
+            data: {
+              status: 'EDITED',
+              meta: {
+                ...meta,
+                finish_code: code,
+                finishSource: 'human-confirmed',
+                finishConfirmedAt: now,
+                finishConfirmedVia: 'bulk-accept-suggestions',
+              } as Prisma.JsonObject,
+            },
+          }),
+        )
+        writes.push(
+          db.correction.create({
+            data: {
+              organizationId: ctx.organizationId,
+              entity: 'TakeoffItem',
+              entityId: room.id,
+              field: 'finish_code',
+              aiValue: code,
+              humanValue: code,
+              reason: 'Bulk accept-suggestions',
+              userId: ctx.user.id,
+            },
+          }),
+        )
+      }
+      if (writes.length > 0) await db.$transaction(writes)
+      return jsonResponse({
+        ok: true,
+        roomsScanned: rooms.length,
+        accepted: accepted.length,
+        skipped: skipped.length,
+        acceptedDetails: accepted,
+        skippedDetails: skipped,
+      })
     }),
   )
 

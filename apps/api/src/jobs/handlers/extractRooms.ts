@@ -630,13 +630,26 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
         legendHintsLocal,
       )
 
+      // PIVOT — finish code from vision is a SUGGESTION, never a
+      // confirmed assignment. meta.finish_code is RESERVED for the
+      // human-confirmed code (set by the SPA dropdown via PATCH).
+      // meta.finishSuggestion is the AI's proposal that the reviewer
+      // accepts or overrides. PRICE skips rooms with finish_code=null
+      // (the unassigned bucket goes P/S — already in place).
       const meta: Record<string, unknown> = {
         code: room.code,
         floor: room.floor,
         floorNormalized: normalizedFloor,
         area_m2: room.area_m2,
-        finish_code: finishCode,
-        finishConfidence,
+        finish_code: null,
+        finishSuggestion: finishCode
+          ? {
+              code: finishCode,
+              confidence: finishConfidence,
+              source: 'vision',
+              reason: 'vision-extract',
+            }
+          : null,
         finish_evidence: rawFinishObservation.evidence,
         rawFinishObservation,
       }
@@ -734,31 +747,33 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
     const sorted = items.slice().sort((a, b) => score(b) - score(a))
     const survivor = sorted[0]!
     const losers = sorted.slice(1)
-    // P5/P6 — propagate finish_code from a loser into the survivor when the
-    // survivor lacks one. The cold-upload pattern is: area-bearing row from
-    // the floor plan (A101/A102) wins on score because qtyAi is populated,
-    // but the *finish* came from a finish-plan vision pass that scored
-    // lower. Without this merge the survivor permanently loses the finish
-    // code the loser saw, and the room ends up FINISH_UNMAPPED.
+    // PIVOT — propagate finishSuggestion (NOT finish_code) from a loser
+    // into the survivor when the survivor lacks one. The cold-upload
+    // pattern is: area-bearing row from the floor plan (A101/A102) wins
+    // on score because qtyAi is populated, but the finish *suggestion*
+    // came from a finish-plan vision pass that scored lower. We carry
+    // the suggestion so the reviewer sees it in the dropdown; the
+    // assignment is still human-confirmed.
     const survivorMeta = (survivor.meta ?? {}) as Record<string, unknown>
-    const survivorFinish = survivorMeta.finish_code
-    if (!survivorFinish && losers.length > 0) {
+    const survivorSuggestion = survivorMeta.finishSuggestion as
+      | { code?: string | null }
+      | null
+      | undefined
+    const survivorHasSuggestion = !!survivorSuggestion?.code
+    if (!survivorHasSuggestion && losers.length > 0) {
       const donor = losers.find((l) => {
         const lm = (l.meta ?? {}) as Record<string, unknown>
-        return typeof lm.finish_code === 'string' && lm.finish_code !== ''
+        const lsugg = lm.finishSuggestion as { code?: string | null } | null | undefined
+        return !!lsugg?.code
       })
       if (donor) {
         const dm = donor.meta as Record<string, unknown>
         const mergedMeta: Record<string, unknown> = {
           ...survivorMeta,
-          finish_code: dm.finish_code,
-          finishConfidence: dm.finishConfidence ?? null,
+          finishSuggestion: dm.finishSuggestion,
           finish_evidence: dm.finish_evidence ?? survivorMeta.finish_evidence ?? null,
-          finishSource: 'dedup-merge',
-          finishCarriedFromTakeoffItemId: donor.id,
+          finishSuggestionCarriedFromTakeoffItemId: donor.id,
         }
-        // rawFinishObservation: keep the survivor's if present, otherwise
-        // adopt the donor's so re-runs of assignFinishCode can replay.
         if (!survivorMeta.rawFinishObservation && dm.rawFinishObservation) {
           mergedMeta.rawFinishObservation = dm.rawFinishObservation
         }
@@ -766,8 +781,6 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
           where: { id: survivor.id },
           data: { meta: mergedMeta as Prisma.JsonObject },
         })
-        // Make the survivor we push reflect the merged state so the
-        // downstream Spaces sync uses the latest meta.
         survivor.meta = mergedMeta as typeof survivor.meta
       }
     }

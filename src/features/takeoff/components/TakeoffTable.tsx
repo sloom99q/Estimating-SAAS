@@ -1,9 +1,14 @@
 import { useCallback, useMemo, useState } from 'react'
-import { Badge, Group, NumberInput, Select, Stack, Table, Text, Tooltip } from '@mantine/core'
+import { Badge, Button, Group, NumberInput, Select, Stack, Table, Text, Tooltip } from '@mantine/core'
+import { notifications } from '@mantine/notifications'
 import { useTranslation } from 'react-i18next'
+import { useQueryClient } from '@tanstack/react-query'
 import {
-  FINISH_CODE_VOCAB,
+  FLOOR_FINISH_RATE_AED_PER_M2,
+  FLOOR_FINISH_VOCAB,
+  acceptFinishSuggestions,
   type FinishCode,
+  type FloorFinishCode,
   type TakeoffBundle,
   type TakeoffItemDto,
   type ValidationFlagDto,
@@ -48,10 +53,23 @@ function flagSeverityColor(s: ValidationFlagDto['severity']): string {
 }
 
 /**
- * Sprint-9 S9-3 — per-room finish dropdown. Closed 12-code vocab + the
- * BATHROOM sentinel. Edits POST to PATCH /api/takeoff-items/:id and the
- * server writes a Correction row so the data-quality loop captures
- * what the colour mapper got wrong.
+ * PIVOT — per-room finish picker. Dual state:
+ *   - meta.finish_code  = HUMAN-CONFIRMED. The only thing PRICE reads.
+ *                         Green ✓ badge. Status = "confirmed".
+ *   - meta.finishSuggestion.code = AI proposal (color-sample or vision).
+ *                         Yellow ⚠ badge. Status = "pending".
+ *
+ * Three primary actions in the row:
+ *   • Accept       → confirm the AI suggestion (1 click)
+ *   • Change       → pick a different code from FLOOR_FINISH_VOCAB
+ *   • Clear        → unconfirm (reverts to pending; the suggestion stays)
+ *
+ * Wall codes (FN/WD) and landscape (LS) are deliberately ABSENT from the
+ * dropdown — a reviewer cannot mis-assign a wall code as a floor.
+ *
+ * The resolved AED/m² rate is shown next to the code so the reviewer
+ * sees the impact of their click. Source of truth is RateLibraryItem on
+ * the server; this is a display-only mirror.
  */
 function FinishCodeCell({
   item,
@@ -59,30 +77,146 @@ function FinishCodeCell({
   saving,
 }: {
   item: TakeoffItemDto
-  onSave: (next: FinishCode | null) => void
+  onSave: (next: FloorFinishCode | null) => void
   saving: boolean
 }) {
-  const meta = (item.meta ?? {}) as { finish_code?: string | null; finishSource?: string | null }
-  const current = (meta.finish_code ?? null) as FinishCode | null
+  const meta = (item.meta ?? {}) as {
+    finish_code?: string | null
+    finishSource?: string | null
+    finishSuggestion?: { code?: string | null; confidence?: number | null } | null
+  }
+  const confirmed = (meta.finish_code ?? null) as FloorFinishCode | null
+  const suggested = (meta.finishSuggestion?.code ?? null) as FloorFinishCode | null
+  const isConfirmed = !!confirmed
+  const hasSuggestion = !!suggested && !isConfirmed
+
+  const rateFor = (code: FloorFinishCode | null): string => {
+    if (code === null) return '—'
+    const r = FLOOR_FINISH_RATE_AED_PER_M2[code]
+    return typeof r === 'number' ? `${r} AED/m²` : 'P/S'
+  }
+
   return (
-    <Select
-      value={current ?? null}
-      onChange={(v) => onSave(v as FinishCode | null)}
-      data={FINISH_CODE_VOCAB.map((c) => ({ value: c, label: c }))}
-      placeholder="—"
-      size="xs"
-      clearable
-      searchable
-      disabled={saving}
-      style={{ maxWidth: 130 }}
-      rightSection={
-        meta.finishSource === 'human-override' ? (
-          <Tooltip label="Set by reviewer">
-            <Badge size="xs" variant="dot" color="grape" />
+    <Stack gap={4}>
+      <Group gap={6} wrap="nowrap" align="center">
+        <Select
+          value={confirmed}
+          onChange={(v) => onSave(v as FloorFinishCode | null)}
+          data={FLOOR_FINISH_VOCAB.map((c) => ({
+            value: c,
+            label: `${c} (${rateFor(c as FloorFinishCode)})`,
+          }))}
+          placeholder={hasSuggestion ? `${suggested} (suggested)` : 'Pick code'}
+          size="xs"
+          clearable
+          searchable
+          disabled={saving}
+          style={{ minWidth: 200 }}
+        />
+        {hasSuggestion ? (
+          <Tooltip label={`Accept AI suggestion ${suggested}`}>
+            <Button
+              size="xs"
+              variant="light"
+              color="blue"
+              onClick={() => onSave(suggested)}
+              disabled={saving}
+            >
+              Accept {suggested}
+            </Button>
           </Tooltip>
-        ) : null
+        ) : null}
+      </Group>
+      <Group gap={6}>
+        {isConfirmed ? (
+          <Badge color="green" variant="filled" size="xs">
+            ✓ confirmed — {confirmed} · {rateFor(confirmed)}
+          </Badge>
+        ) : hasSuggestion ? (
+          <Badge color="yellow" variant="light" size="xs">
+            ⚠ pending — suggested {suggested}
+          </Badge>
+        ) : (
+          <Badge color="red" variant="light" size="xs">
+            ⚠ pending — no suggestion
+          </Badge>
+        )}
+        {meta.finishSource === 'cleared-by-reviewer' ? (
+          <Badge color="gray" variant="dot" size="xs">
+            cleared
+          </Badge>
+        ) : null}
+      </Group>
+    </Stack>
+  )
+}
+
+/**
+ * PIVOT — bulk Accept-all banner at the top of the ROOM section. POSTs
+ * to /api/projects/:id/finishes/accept-suggestions with the default
+ * onlyFloorFinishCodes=true so wall codes never get auto-confirmed.
+ */
+function BulkAcceptBanner({
+  projectId,
+  rooms,
+}: {
+  projectId: string
+  rooms: TakeoffItemDto[]
+}) {
+  const qc = useQueryClient()
+  const [busy, setBusy] = useState(false)
+  const acceptable = useMemo(() => {
+    let n = 0
+    for (const r of rooms) {
+      const m = (r.meta ?? {}) as {
+        finish_code?: string | null
+        finishSuggestion?: { code?: string | null } | null
       }
-    />
+      const code = m.finishSuggestion?.code ?? null
+      const confirmed = m.finish_code ?? null
+      if (confirmed) continue
+      if (!code) continue
+      if (!FLOOR_FINISH_VOCAB.includes(code as FloorFinishCode)) continue
+      n += 1
+    }
+    return n
+  }, [rooms])
+
+  if (acceptable === 0) return null
+
+  return (
+    <Group justify="space-between" p="xs" style={{ background: 'var(--mantine-color-blue-0)', borderRadius: 4 }}>
+      <Text size="sm">
+        AI suggested floor finishes for <b>{acceptable}</b> room{acceptable === 1 ? '' : 's'}.
+        Accept the lot, then fix exceptions inline.
+      </Text>
+      <Button
+        size="xs"
+        loading={busy}
+        onClick={async () => {
+          setBusy(true)
+          try {
+            const r = await acceptFinishSuggestions(projectId, {})
+            notifications.show({
+              color: 'green',
+              title: 'Suggestions accepted',
+              message: `${r.accepted} room${r.accepted === 1 ? '' : 's'} confirmed · ${r.skipped} skipped`,
+            })
+            await qc.invalidateQueries({ queryKey: ['projects', projectId, 'takeoff'] })
+          } catch (err) {
+            notifications.show({
+              color: 'red',
+              title: 'Bulk accept failed',
+              message: err instanceof Error ? err.message : 'Unknown error',
+            })
+          } finally {
+            setBusy(false)
+          }
+        }}
+      >
+        Accept all {acceptable} suggestion{acceptable === 1 ? '' : 's'}
+      </Button>
+    </Group>
   )
 }
 
@@ -153,12 +287,13 @@ export function TakeoffTable({ projectId, bundle, needsReviewOnly }: TakeoffTabl
     [patch],
   )
 
-  // S9-3 finish-code override handler — only meaningful for ROOM rows.
+  // PIVOT — accepts a FLOOR-only code (or null to clear). The PATCH
+  // server-side stamps meta.finish_code + finishSource='human-confirmed'.
   const handleFinishSave = useCallback(
-    (item: TakeoffItemDto, next: FinishCode | null) => {
+    (item: TakeoffItemDto, next: FloorFinishCode | null) => {
       setSavingId(item.id)
       patch.mutate(
-        { id: item.id, payload: { finishCode: next } },
+        { id: item.id, payload: { finishCode: next as FinishCode | null } },
         {
           onSettled: () => {
             setSavingId((id) => (id === item.id ? null : id))
@@ -181,6 +316,9 @@ export function TakeoffTable({ projectId, bundle, needsReviewOnly }: TakeoffTabl
             <Text fw={600}>{t(`category.${category}`, { defaultValue: category })}</Text>
             <Badge variant="light">{items.length}</Badge>
           </Group>
+          {category === 'ROOM' ? (
+            <BulkAcceptBanner projectId={projectId} rooms={items} />
+          ) : null}
           <Table striped withTableBorder withColumnBorders highlightOnHover>
             <Table.Thead>
               <Table.Tr>

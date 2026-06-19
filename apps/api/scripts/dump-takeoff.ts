@@ -200,6 +200,15 @@ interface ItemMeta {
   finish_code?: string | null
   finishConfidence?: number | null
   finish_evidence?: string | null
+  finishSource?: string | null
+  finishConfirmedAt?: string | null
+  finishConfirmedVia?: string | null
+  finishSuggestion?: {
+    code?: string | null
+    confidence?: number | null
+    source?: string | null
+    reason?: string | null
+  } | null
   area_m2?: number | null
   floor?: string | null
   floorNormalized?: string | null
@@ -242,13 +251,25 @@ function renderLegend(items: ItemRow[]): string {
 function renderRooms(items: ItemRow[]): string {
   const rooms = items.filter((i) => i.category === 'ROOM')
   const stmts = items.filter((i) => i.category === 'AREA_STATEMENT')
-  const lines: string[] = [`ROOMS  (${rooms.length} billable) + AREA_STATEMENTS (${stmts.length})`, sub()]
+  const confirmed = rooms.filter((r) => !!(r.meta?.finish_code))
+  const pending = rooms.length - confirmed.length
+  const lines: string[] = [
+    `ROOMS  (${rooms.length} billable; ${confirmed.length} confirmed, ${pending} pending review) + AREA_STATEMENTS (${stmts.length})`,
+    sub(),
+  ]
   lines.push(`-- ROOM --`)
   for (const r of rooms) {
     const m = r.meta ?? {}
     const area = m.area_m2 != null ? fmtNum(m.area_m2) + ' m²' : '—'
+    const confirmedCode = m.finish_code ?? null
+    const suggestedCode = m.finishSuggestion?.code ?? null
+    const status = confirmedCode
+      ? `✓ ${confirmedCode} (${m.finishSource ?? 'human'})`
+      : suggestedCode
+      ? `⚠ pending — suggested ${suggestedCode} (${m.finishSuggestion?.source ?? 'ai'})`
+      : `⚠ pending — no suggestion`
     lines.push(
-      `  ${pad(r.description, 48)}  ${pad(area, 12)}  finish=${pad(m.finish_code ?? '—', 6)}  conf=${pad(String(r.confidence), 3)}  basis=${r.basis}`,
+      `  ${pad(r.description, 48)}  ${pad(area, 12)}  ${pad(status, 44)}  basis=${r.basis}`,
     )
     if (m.rawFinishObservation?.visionCode || m.rawFinishObservation?.evidence) {
       const ev = (m.rawFinishObservation.evidence ?? '').replace(/\s+/g, ' ').trim()

@@ -213,40 +213,50 @@ export async function colorMapFinishesForProject(
 
   for (const room of rooms) {
     const meta = (room.meta ?? {}) as Record<string, unknown>
-    const before = typeof meta.finish_code === 'string' ? meta.finish_code : null
+    // P5/P6/PIVOT — color-mapper output is a SUGGESTION, never an
+    // assignment. We write to meta.finishSuggestion; meta.finish_code
+    // stays untouched (null until a human confirms via the dropdown).
+    // Four runs in a row produced oscillating finish codes on the same
+    // rooms; the color sample is below the precision floor on these A1
+    // PDFs. Suggesting is honest; assigning is not.
+    const beforeSuggestion = (meta.finishSuggestion ?? null) as
+      | { code?: string | null }
+      | null
+    const beforeSuggestedCode = beforeSuggestion?.code ?? null
     const name = room.description.split('—')[0]!.trim()
     const assignment = best.get(normalizeRoomName(name))
     if (!assignment) {
-      if (before === null) continue
-      // no new evidence — leave existing alone
+      if (beforeSuggestedCode === null) continue
       result.roomsUnchanged += 1
       continue
     }
     const after = assignment.finishCode
-    if (after === before) {
+    if (after === beforeSuggestedCode) {
       result.roomsUnchanged += 1
       continue
     }
     result.roomsMapped += 1
-    if (before === null && after !== null) result.newlyMapped += 1
-    if (before !== null && after !== null) result.changedCode += 1
+    if (beforeSuggestedCode === null && after !== null) result.newlyMapped += 1
+    if (beforeSuggestedCode !== null && after !== null) result.changedCode += 1
     await prisma.takeoffItem.update({
       where: { id: room.id },
       data: {
         meta: {
           ...meta,
-          finish_code: after,
-          finishConfidence: assignment.confidence,
-          finishSource: 'color-sample',
-          finishReason: assignment.reason,
-          sampledColor: assignment.sampledColor,
+          finishSuggestion: {
+            code: after,
+            confidence: assignment.confidence,
+            source: 'color-sample',
+            reason: assignment.reason,
+            sampledColor: assignment.sampledColor,
+          },
         } as Prisma.JsonObject,
       },
     })
     result.perRoom.push({
       roomId: room.id,
       name,
-      before,
+      before: beforeSuggestedCode,
       after,
       confidence: assignment.confidence,
       source: assignment.reason,

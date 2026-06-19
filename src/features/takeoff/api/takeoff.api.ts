@@ -163,6 +163,60 @@ export async function patchTakeoffItem(
 }
 
 /**
+ * PIVOT — closed vocab for ROOM floor-finish selection. FN/WD/LS codes
+ * (wall + landscape) deliberately excluded so a reviewer can't mis-assign
+ * a wall code as a room's floor. Same set used by the bulk
+ * accept-suggestions endpoint as its safety filter (onlyFloorFinishCodes).
+ */
+export const FLOOR_FINISH_VOCAB = [
+  'ST01',
+  'ST02',
+  'ST03',
+  'PR01',
+  'PR03',
+  'BATHROOM',
+] as const
+export type FloorFinishCode = (typeof FLOOR_FINISH_VOCAB)[number]
+
+/**
+ * PIVOT — the rate each floor code resolves to in the pricing waterfall.
+ * Display-only mirror of the server's rateCodeFor() FLOOR_FINISH branch.
+ * Source of truth is RateLibraryItem on the server; this lets the review
+ * table show the impact of a confirmation in-row without an extra fetch.
+ * Keep in sync with apps/api/src/jobs/handlers/price.ts.
+ */
+export const FLOOR_FINISH_RATE_AED_PER_M2: Record<FloorFinishCode, number | 'P/S'> = {
+  ST01: 200,
+  ST02: 550, // stair landing rate (ST02 reserved for stairs; per spec floor=N/A)
+  ST03: 250, // external porcelain pavement
+  PR01: 210,
+  PR03: 150,
+  BATHROOM: 195,
+}
+
+export interface AcceptSuggestionsResult {
+  ok: boolean
+  roomsScanned: number
+  accepted: number
+  skipped: number
+  acceptedDetails: Array<{ id: string; code: string }>
+  skippedDetails: Array<{ id: string; reason: string }>
+}
+
+export async function acceptFinishSuggestions(
+  projectId: string,
+  body: { roomIds?: string[]; onlyFloorFinishCodes?: boolean } = {},
+): Promise<AcceptSuggestionsResult> {
+  return withAuth<AcceptSuggestionsResult>(
+    `/api/projects/${projectId}/finishes/accept-suggestions`,
+    {
+      method: 'POST',
+      body: JSON.stringify(body),
+    },
+  )
+}
+
+/**
  * Sprint-8 S8-7 — owner-runnable BOQ flow from the SPA.
  *
  *   1. quantify  — derives FLOOR/WALL/CEILING totals from rooms+legend
