@@ -185,10 +185,11 @@ export async function renderBoqXlsx(boq: XlsxBoq, options: XlsxOptions = {}): Pr
   if (!hasDoorsWindows) {
     summary.addRow([
       'Scope',
-      'FINISHES-ONLY EXPORT — Section 2.8 (Doors / Windows) is not yet priced. ' +
-        'Door + window schedules return without counts on the current build (P4 schedule ' +
-        'text-pass fix pending). This file shows the Finishes (2.9) + General (1.0) sections ' +
-        'and should not be presented as a complete quote.',
+      'FINISHES-ONLY EXPORT — Section 2.8 (Doors / Windows) is missing from this BOQ. ' +
+        'This indicates the door / window schedule sheets failed to extract for this ' +
+        'document; the file shows the Finishes + General sections only and is NOT a ' +
+        'complete quote. Re-upload the source PDF or inspect the EXTRACT_SCHEDULES job ' +
+        'output to diagnose.',
       '',
     ])
     summary.lastRow!.font = { bold: true, color: { argb: 'FFB00000' } }

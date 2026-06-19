@@ -306,6 +306,14 @@ export const extractSchedulesHandler: JobHandler = async (job: JobRecord) => {
         },
         select: { id: true },
       })
+      // Schedule items go in at status='EDITED' so the BOQ generator's
+      // default onlyApproved filter (APPROVED + EDITED) admits them
+      // without a human round-trip. Doors/windows ARE the architect's
+      // schedule — counts and dims are extracted, not opinions. The
+      // reviewer can still edit qtyFinal inline if a row is wrong; the
+      // status stays EDITED through that edit. Matches QUANTIFY's
+      // pattern for its derived FLOOR_FINISH / CEILING / WALL_FINISH
+      // lines (quantify.ts:465).
       const created = existing
         ? await prisma.takeoffItem.update({
             where: { id: existing.id },
@@ -315,6 +323,7 @@ export const extractSchedulesHandler: JobHandler = async (job: JobRecord) => {
               qtyAi: row.count ?? 1,
               basis: row.basis,
               confidence: row.confidence,
+              status: 'EDITED',
               sourceSheetId: sheet.id,
               sourceNote: `${sheet.drawingNo ?? `page ${sheet.pageNo}`}`,
               meta: meta as object,
@@ -332,6 +341,7 @@ export const extractSchedulesHandler: JobHandler = async (job: JobRecord) => {
               qtyAi: row.count ?? 1,
               basis: row.basis,
               confidence: row.confidence,
+              status: 'EDITED',
               sourceSheetId: sheet.id,
               sourceNote: `${sheet.drawingNo ?? `page ${sheet.pageNo}`}`,
               meta: meta as object,
