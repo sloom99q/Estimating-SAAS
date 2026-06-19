@@ -125,6 +125,26 @@ describe('isLikelyNotARoom (P3 cold-upload deny gate)', () => {
     expect(isLikelyNotARoom('DOWN (stair)', 0)).toBe(true)
   })
 
+  it('drops cold-upload garbage names from dump cmqk6jabm', () => {
+    expect(isLikelyNotARoom('FUTURE LIFT', 2.76)).toBe(true)
+    expect(isLikelyNotARoom('FLAT ROOM', null)).toBe(true)
+    expect(isLikelyNotARoom('High Level Window', null)).toBe(true)
+    expect(isLikelyNotARoom('COVERED GATE', null)).toBe(true)
+    expect(isLikelyNotARoom('Home', null)).toBe(true)
+    expect(isLikelyNotARoom('Garden', null)).toBe(true)
+    expect(isLikelyNotARoom('B.B.Q.', null)).toBe(true)
+    expect(isLikelyNotARoom("DRIVER'S ENTRANCE", null)).toBe(true)
+    expect(isLikelyNotARoom('PEDESTRIAN ENTRANCE', null)).toBe(true)
+    expect(isLikelyNotARoom('VEHICULAR ENTRANCE', null)).toBe(true)
+    expect(isLikelyNotARoom('DINING/LIVING/ACCESSWAY POOL', null)).toBe(true)
+    expect(isLikelyNotARoom('CORRIDOR SLIDING DOOR FUTURE LIFT', 23.27)).toBe(true)
+  })
+
+  it('still keeps DRIVER\'S BATH / DRIVER\'S ROOM (billable rooms)', () => {
+    expect(isLikelyNotARoom("DRIVER'S BATH", 2.67)).toBe(false)
+    expect(isLikelyNotARoom("DRIVER'S ROOM", 10.11)).toBe(false)
+  })
+
   it('KEEPS the real rooms — Phase-1 acceptance set', () => {
     expect(isLikelyNotARoom('LIVING', 35)).toBe(false)
     expect(isLikelyNotARoom("MAID'S BATH", 3.2)).toBe(false)

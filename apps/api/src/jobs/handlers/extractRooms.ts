@@ -36,6 +36,7 @@ import { prisma } from '../../db'
 import { recoverBuaFromText, runValidators, type ValidatorContext } from '../validators'
 import { upsertValidationFlag } from '../validationFlagUpsert'
 import type { JobHandler, JobRecord } from '../types'
+import { colorMapFinishesForProject, type ColorMapResult } from './colorMapFinishes'
 import {
   AREA_STATEMENT_CATEGORY,
   isAreaStatement,
@@ -89,16 +90,42 @@ interface ReconciledRoom {
  */
 const KITCHEN_OCR_ALIAS_RE = /\b(?:BOW|BOX|ION|BOY)\s+KITCHEN\b/
 
+/**
+ * P5/P6 — architect-side spelling variants observed in cold uploads.
+ * Both forms get rewritten to the canonical so the dedup groups them.
+ *   - "BED ROOM" (two-word) ↔ "BEDROOM" (one-word) — both forms appear
+ *     in the same PDF, frequently on plan vs finish-plan sheets
+ *   - "DINNING" ↔ "DINING" — recurring typo
+ *   - "LOBBY" / "LOBBYS" — pluralization
+ *   - "BATH ROOM" / "BATHROOM" — same pattern as BED ROOM
+ */
+const ROOM_NAME_CANONICALIZATIONS: Array<{ re: RegExp; to: string }> = [
+  { re: /\bBED\s+ROOM\b/g, to: 'BEDROOM' },
+  { re: /\bBATH\s+ROOM\b/g, to: 'BATHROOM' },
+  { re: /\bDINN?ING\b/g, to: 'DINING' },
+  { re: /\bLOBBY?S\b/g, to: 'LOBBY' },
+]
+
 export function normalizeRoomName(raw: string): string {
-  return raw
+  let s = raw
     .split('—')[0]!
     .toUpperCase()
     .replace(/[‘’ʼ]/g, "'")
     .replace(KITCHEN_OCR_ALIAS_RE, 'BOH KITCHEN')
     .replace(/\b(GF|FF|RF|L1|L2|B1|B2|BF)[\s-]?\d{1,3}\b/g, '')
-    .replace(/[.,;:()]/g, ' ')
+    // P5/P6: include `/` so "LAUNDRY / LINEN" merges with "LAUNDRY/LINEN"
+    // and "Entrance / Lobby" merges with "ENTRANCE LOBBY". Cold-upload
+    // dump showed the architect's finish-plan labels use slash-with-spaces
+    // while the floor plan uses the same words separated by a space —
+    // without the strip they keyed to different buckets and the area
+    // and finish_code stayed on separate rows.
+    .replace(/[.,;:()/&]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
+  for (const rule of ROOM_NAME_CANONICALIZATIONS) {
+    s = s.replace(rule.re, rule.to)
+  }
+  return s
 }
 
 function compareNumeric(a: number | null, b: number | null): boolean {
@@ -705,8 +732,46 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
     const score = (i: (typeof allRoomItems)[number]) =>
       (i.qtyAi !== null ? 4 : 0) + (i.tag !== null ? 2 : 0) + i.confidence / 100
     const sorted = items.slice().sort((a, b) => score(b) - score(a))
-    survivors.push(sorted[0]!)
+    const survivor = sorted[0]!
     const losers = sorted.slice(1)
+    // P5/P6 — propagate finish_code from a loser into the survivor when the
+    // survivor lacks one. The cold-upload pattern is: area-bearing row from
+    // the floor plan (A101/A102) wins on score because qtyAi is populated,
+    // but the *finish* came from a finish-plan vision pass that scored
+    // lower. Without this merge the survivor permanently loses the finish
+    // code the loser saw, and the room ends up FINISH_UNMAPPED.
+    const survivorMeta = (survivor.meta ?? {}) as Record<string, unknown>
+    const survivorFinish = survivorMeta.finish_code
+    if (!survivorFinish && losers.length > 0) {
+      const donor = losers.find((l) => {
+        const lm = (l.meta ?? {}) as Record<string, unknown>
+        return typeof lm.finish_code === 'string' && lm.finish_code !== ''
+      })
+      if (donor) {
+        const dm = donor.meta as Record<string, unknown>
+        const mergedMeta: Record<string, unknown> = {
+          ...survivorMeta,
+          finish_code: dm.finish_code,
+          finishConfidence: dm.finishConfidence ?? null,
+          finish_evidence: dm.finish_evidence ?? survivorMeta.finish_evidence ?? null,
+          finishSource: 'dedup-merge',
+          finishCarriedFromTakeoffItemId: donor.id,
+        }
+        // rawFinishObservation: keep the survivor's if present, otherwise
+        // adopt the donor's so re-runs of assignFinishCode can replay.
+        if (!survivorMeta.rawFinishObservation && dm.rawFinishObservation) {
+          mergedMeta.rawFinishObservation = dm.rawFinishObservation
+        }
+        await prisma.takeoffItem.update({
+          where: { id: survivor.id },
+          data: { meta: mergedMeta as Prisma.JsonObject },
+        })
+        // Make the survivor we push reflect the merged state so the
+        // downstream Spaces sync uses the latest meta.
+        survivor.meta = mergedMeta as typeof survivor.meta
+      }
+    }
+    survivors.push(survivor)
     if (losers.length > 0) {
       await prisma.takeoffItem.updateMany({
         where: { id: { in: losers.map((l) => l.id) } },
@@ -714,6 +779,22 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
       })
       collapsedRoomDuplicates += losers.length
     }
+  }
+
+  // P5/P6 — RUN THE COLOR-MAPPER. Sprint-9 S9-2 introduced
+  // colorMapFinishesForProject (deterministic RGB sampling of the I4xx
+  // finish plans against the legend palette) but it was never wired into
+  // the pipeline — orphan handler. Without it, vision is the only path
+  // to a finish_code, and cold uploads come back with most main-floor
+  // rooms FINISH_UNMAPPED because Sonnet can't reliably read the swatch
+  // ↔ room-fill mapping at the available resolution. The color-mapper
+  // is zero token cost and runs after the cross-sheet dedup so it gets
+  // the merged survivor set.
+  let colorMap: ColorMapResult | null = null
+  try {
+    colorMap = await colorMapFinishesForProject(job.organizationId, document.projectId)
+  } catch (err) {
+    console.error('[extractRooms] colorMapFinishesForProject failed:', err)
   }
 
   // S8-2: Spaces sync only over survivors WITH measured area. Vision-noise
@@ -948,6 +1029,20 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
     roomsRejected,
     /** P3 — building-level statements routed to AREA_STATEMENT category. */
     areaStatementsReclassified,
+    /** P5/P6 — Sprint-9 S9-2 color-sampler counters: rooms remapped via
+     *  RGB sampling of the I4xx finish plans against the legend palette.
+     *  null if the pass was skipped (no I4xx sheets / no rooms / error). */
+    colorMap: colorMap
+      ? {
+          sheetsProcessed: colorMap.sheetsProcessed,
+          roomsConsidered: colorMap.roomsConsidered,
+          roomsMapped: colorMap.roomsMapped,
+          newlyMapped: colorMap.newlyMapped,
+          changedCode: colorMap.changedCode,
+          paletteSamplesFromDocument: colorMap.paletteSamplesFromDocument,
+          paletteSamplesCanonical: colorMap.paletteSamplesCanonical,
+        }
+      : null,
     /** Sprint-4 S4-5: validation flags raised by the post-extraction net. */
     validatorFlagsRaised: validatorResults.length,
     tokensIn,

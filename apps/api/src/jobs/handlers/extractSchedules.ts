@@ -102,10 +102,26 @@ function reconcile(
           : (v.finish ?? '') !== (t.finish ?? '')
           ? { field: 'finish', vision: v.finish, text: t.finish }
           : null
+      // P5/P6 — count selection. Cold-upload dump showed CW01 land with
+      // count=193 because vision hallucinated a 3-digit number off the
+      // schedule sheet and the reconciler trusted vision-over-text
+      // unconditionally (`visionCount ?? textCount`). For schedules, the
+      // text-pass is the authoritative source: the architect's columnar
+      // data is unambiguous, vision's LLM read of tabular content is not.
+      // Prefer text on disagreement. As a belt-and-braces, cap implausibly
+      // large counts: residential window types rarely exceed 50 units —
+      // treat anything past that as a hallucination and fall back to the
+      // other source.
+      const COUNT_SANITY_CAP = 50
+      const sanitize = (n: number | null): number | null =>
+        n !== null && n > COUNT_SANITY_CAP ? null : n
+      const safeText = sanitize(textCount)
+      const safeVision = sanitize(visionCount)
+      const reconciledCount = safeText ?? safeVision
       return {
         tag,
         description: `${kind === 'DOOR' ? 'Door' : 'Window'} ${tag}${v.finish ? ` (${v.finish})` : ''}`,
-        count: visionCount ?? textCount,
+        count: reconciledCount,
         width_mm: v.width_mm,
         height_mm: v.height_mm,
         finish: v.finish,

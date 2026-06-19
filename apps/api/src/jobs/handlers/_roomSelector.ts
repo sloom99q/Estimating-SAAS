@@ -89,6 +89,19 @@ const NOT_A_ROOM_PATTERNS: RegExp[] = [
   // FINISH_EXCLUDED_NAME_RE; mirroring on the room funnel keeps them out
   // of the TakeoffItem table entirely so they can't be priced.
   /^\s*(up|dn|down)\s*\(?\s*stair/i,
+  // P5/P6 — cold-upload dump (cmqk6jabm…) surfaced these non-room labels
+  // that vision picked up off plan / finish-plan sheets. Not billable
+  // rooms; not building-level statements either. Hard-deny.
+  /^\s*future\s+lift\b/i,
+  /^\s*flat\s+room\b/i,
+  /^\s*high\s+level\s+window\b/i,
+  /^\s*covered\s+gate\b/i,
+  /^\s*home\s*$/i, // bare "Home" label from key-plan tiles
+  /^\s*(garden|garden\s+area)\s*$/i,
+  /^\s*b\.?\s*b\.?\s*q\.?\b/i, // B.B.Q. backyard amenity
+  /^\s*(pedestrian|vehicular|driver['’]?s)\s+entrance\b/i,
+  /\baccessway\b/i, // "DINING/LIVING/ACCESSWAY POOL" composite
+  /\bsliding\s+door\s+future\s+lift\b/i, // "CORRIDOR SLIDING DOOR FUTURE LIFT" note
 ]
 
 /**
