@@ -42,24 +42,17 @@ const COORDINATE_CARRY_PAIRS: Array<{ from: string; to: string }> = [
 
 /**
  * Codes the color-sampler is allowed to assign as a ROOM's floor finish.
+ * Mirrors apps/api/src/jobs/handlers/_roomSelector.ts FLOOR_LEGEND_ALLOWED
+ * minus the BATHROOM sentinel (handled by name-prior, no palette needed).
  *
- * The contractor's standing rule (verified vs v8 + the post-7a12e29 dump
- * regression): floor finishes are limited to ST01-03 (stone) + PR01/PR03
- * (porcelain). BATHROOM is a sentinel handled by name-prior in
- * mapRoomsToFinishCodes (no palette entry needed).
- *
- * What was happening: CORE_LEGEND_CODES contained the full legend
- * vocabulary — WD01 (wall), FN01-04 (wall fluted/dark grey/GRC/plaster),
- * LS01-02 (landscape sand/gravel). Once the palette had those codes
- * sampled from I401's swatch column, the nearest-RGB matcher routinely
- * assigned wall + landscape codes to a room's floor (BOH KITCHEN → FN02,
- * MASTER BEDROOM → WD01, DRIVER'S ROOM → FN01). Restricting the palette
- * to floor codes only makes the wall codes structurally unreachable as a
- * room's finish_code, which is what the contractor needs.
+ * ST02 deliberately excluded — it maps to the STAIR-LAND rate (550 AED/m²)
+ * in the price waterfall, NOT a floor rate. A KITCHEN priced at 550 = a
+ * quarter of the whole bill on a stair-landing rate; staircases get ST02
+ * via QUANTIFY's separate STAIR-TREAD/STAIR-LAND emission, not through
+ * this palette.
  */
 const FLOOR_FINISH_CODES = [
   'ST01',
-  'ST02',
   'ST03',
   'PR01',
   'PR03',

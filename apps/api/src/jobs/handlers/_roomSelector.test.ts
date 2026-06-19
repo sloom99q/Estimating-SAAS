@@ -158,13 +158,16 @@ describe('isLikelyNotARoom (P3 cold-upload deny gate)', () => {
 })
 
 describe('isFloorLegendCode (PIVOT floor-only suggestion gate)', () => {
-  it('admits floor codes (ST/PR + BATHROOM sentinel)', () => {
+  it('admits real floor codes (ST01/ST03/PR01/PR03 + BATHROOM sentinel)', () => {
     expect(isFloorLegendCode('ST01')).toBe(true)
-    expect(isFloorLegendCode('ST02')).toBe(true)
     expect(isFloorLegendCode('ST03')).toBe(true)
     expect(isFloorLegendCode('PR01')).toBe(true)
     expect(isFloorLegendCode('PR03')).toBe(true)
     expect(isFloorLegendCode('BATHROOM')).toBe(true)
+  })
+
+  it('rejects ST02 — stair-only code; would route a kitchen at 550 AED/m² otherwise', () => {
+    expect(isFloorLegendCode('ST02')).toBe(false)
   })
 
   it('rejects FF furniture/joinery codes (the cmqka8hc6 cold-run leak)', () => {

@@ -165,12 +165,18 @@ export async function patchTakeoffItem(
 /**
  * PIVOT — closed vocab for ROOM floor-finish selection. FN/WD/LS codes
  * (wall + landscape) deliberately excluded so a reviewer can't mis-assign
- * a wall code as a room's floor. Same set used by the bulk
- * accept-suggestions endpoint as its safety filter (onlyFloorFinishCodes).
+ * a wall code as a room's floor. ST02 also out — it routes to the
+ * stair-landing rate (550 AED/m²) in the price waterfall; staircase rooms
+ * get ST02 via QUANTIFY's separate STAIR-TREAD emission, not through
+ * this dropdown. Cold-run priced a KITCHEN floor at 550 × 70.4 m² =
+ * 38,692 AED on this rate before ST02 was pulled.
+ *
+ * Same set used by the bulk accept-suggestions endpoint's
+ * onlyFloorFinishCodes guard. Keep aligned with server
+ * apps/api/src/jobs/handlers/_roomSelector.ts FLOOR_LEGEND_ALLOWED.
  */
 export const FLOOR_FINISH_VOCAB = [
   'ST01',
-  'ST02',
   'ST03',
   'PR01',
   'PR03',
@@ -187,7 +193,6 @@ export type FloorFinishCode = (typeof FLOOR_FINISH_VOCAB)[number]
  */
 export const FLOOR_FINISH_RATE_AED_PER_M2: Record<FloorFinishCode, number | 'P/S'> = {
   ST01: 200,
-  ST02: 550, // stair landing rate (ST02 reserved for stairs; per spec floor=N/A)
   ST03: 250, // external porcelain pavement
   PR01: 210,
   PR03: 150,

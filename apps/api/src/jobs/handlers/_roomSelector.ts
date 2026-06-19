@@ -161,32 +161,38 @@ export function selectAreaStatements<T extends Pick<TakeoffItem, 'category' | 'd
 export const AREA_STATEMENT_CATEGORY = 'AREA_STATEMENT'
 
 /**
- * PIVOT — code-prefix discriminator for legend entries that may appear
- * as a ROOM's floor finish suggestion. A villa drawing set typically
- * carries several distinct legends on different sheets:
+ * PIVOT — explicit allow-list of legend codes that may appear as a
+ * ROOM's floor finish suggestion. The villa drawings carry several
+ * legend tables (joinery FF, wall FN/WD, landscape LS, stone/porcelain
+ * floor ST/PR, BATHROOM sentinel). Only this small set is ever a valid
+ * floor finish; everything else is structurally excluded from the room
+ * dropdown + the bulk-accept endpoint + the vision-pass closed vocab.
  *
- *   - ST01-03   : stone floor finishes (white marble, grainy marble, ...)
- *   - PR01/PR03 : porcelain floor finishes (marble-texture, grey service)
- *   - FN01-04   : WALL finishes (fluted GRC, dark grey, plaster)
- *   - WD01      : wall wood/veneer panels
- *   - LS01/02   : landscape (play sand, gravel)
- *   - FF01-06   : furniture / joinery (wardrobes, kitchen cabinetry, ...)
- *   - BATHROOM  : sentinel for "see bathroom drawings"
+ * What's IN:
+ *   ST01  WHITE MARBLE                interior floor   200 AED/m²
+ *   ST03  CONCRETE PORCELAIN          external pavement 250 AED/m²
+ *   PR01  MARBLE-TEXTURE PORCELAIN    interior floor   210 AED/m²
+ *   PR03  GREY PORCELAIN service      interior floor   150 AED/m²
+ *   BATHROOM                          sentinel, P/S until measured
  *
- * EXTRACT_FINISH_LEGEND grabs every code on the I4xx sheets — including
- * the joinery + wall tables — because they're legitimate legend entries
- * for those categories. But a ROOM's floor finish must NEVER suggest
- * FF/FN/WD/LS. This helper is the single source of truth for that gate.
+ * What's OUT — and WHY:
+ *   ST02  GRAINY MARBLE (stair-only). Routes to STAIR-LAND @ 550 AED/m²
+ *         in the price waterfall — a stair landing rate, NOT a floor
+ *         rate. Cold-run priced a KITCHEN at 38,692 AED (550 × 70.4 m²
+ *         = a quarter of the whole bill) on this rate. The staircase
+ *         itself never reaches the floor-groups loop in QUANTIFY
+ *         (isStaircaseRoom skips it; stairs emit STAIR-TREAD/STAIR-LAND
+ *         lines via the OTHER category), so removing ST02 here doesn't
+ *         affect actual stair pricing.
+ *   FF*, FN*, WD*, LS*  — joinery / wall / landscape codes.
  *
- * Code-prefix based, not name-based: the legend extractor's description
- * field is often missing or noisy ("FF04 KITCHEN CABINETRY" vs "ST01
- * WHITE MARBLE"), but the code shape itself is stable. ST/PR/BATHROOM
- * are the only legitimate suggestions for a floor.
+ * Explicit Set (not a regex) so adding/removing a code is a one-line
+ * audit. Keep aligned with client FLOOR_FINISH_VOCAB +
+ * FLOOR_FINISH_RATE_AED_PER_M2 in src/features/takeoff/api/takeoff.api.ts.
  */
-const FLOOR_LEGEND_CODE_RE = /^(ST|PR)\d{2}$/
+const FLOOR_LEGEND_ALLOWED = new Set<string>(['ST01', 'ST03', 'PR01', 'PR03', 'BATHROOM'])
 
 export function isFloorLegendCode(code: string): boolean {
   if (!code) return false
-  if (code === 'BATHROOM') return true
-  return FLOOR_LEGEND_CODE_RE.test(code)
+  return FLOOR_LEGEND_ALLOWED.has(code)
 }

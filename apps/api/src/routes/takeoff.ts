@@ -331,7 +331,10 @@ export function registerTakeoffRoutes(router: Router): void {
         onlyFloorFinishCodes?: boolean
       }
       const onlyFloor = body.onlyFloorFinishCodes !== false
-      const FLOOR_VOCAB = new Set(['ST01', 'ST02', 'ST03', 'PR01', 'PR03', 'BATHROOM'])
+      // PIVOT — aligned with _roomSelector.ts FLOOR_LEGEND_ALLOWED.
+      // ST02 deliberately excluded; would route a non-stair room at
+      // STAIR-LAND 550 AED/m².
+      const FLOOR_VOCAB = new Set(['ST01', 'ST03', 'PR01', 'PR03', 'BATHROOM'])
 
       const rooms = await db.takeoffItem.findMany({
         where: {
