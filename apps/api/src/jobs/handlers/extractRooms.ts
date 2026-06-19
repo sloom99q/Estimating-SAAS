@@ -40,6 +40,7 @@ import { colorMapFinishesForProject, type ColorMapResult } from './colorMapFinis
 import {
   AREA_STATEMENT_CATEGORY,
   isAreaStatement,
+  isFloorLegendCode,
   isLikelyNotARoom,
 } from './_roomSelector'
 
@@ -261,9 +262,14 @@ export async function remapFinishesForProject(
       select: { id: true, category: true, tag: true, meta: true },
     }),
   ])
+  // PIVOT — restrict to FLOOR-vocabulary entries. The villa drawings carry
+  // FF (joinery) + FN (wall) + WD (wall) + LS (landscape) legends that the
+  // legend extractor legitimately captures, but a ROOM's floor finish
+  // suggestion must NEVER pick from them. isFloorLegendCode() is the
+  // single discriminator (ST/PR codes + BATHROOM sentinel).
   const legendLookup = legendItems.filter((i) => {
     const m = (i.meta ?? {}) as Record<string, unknown>
-    return m.kind === 'LEGEND'
+    return m.kind === 'LEGEND' && i.tag != null && isFloorLegendCode(i.tag)
   })
   const legendCodes = legendLookup.map((i) => i.tag!).concat(['BATHROOM'])
   const legendHints: LegendItemHint[] = legendLookup.map((i) => {
@@ -280,42 +286,55 @@ export async function remapFinishesForProject(
   let changedCode = 0
   let unchanged = 0
   let stillUnmapped = 0
+  // PIVOT — remapFinishesForProject is the "re-run the AI suggestion logic
+  // against the current legend" path. It writes to meta.finishSuggestion
+  // (NEVER meta.finish_code, which is reserved for human confirmation via
+  // the dropdown / accept-suggestions endpoint). The before/after compare
+  // is against the previous suggestion, not the confirmed code.
+  const suggestionOf = (m: Record<string, unknown>): string | null => {
+    const s = m.finishSuggestion as { code?: string | null } | null | undefined
+    return s?.code ?? null
+  }
+  const writeSuggestion = (
+    m: Record<string, unknown>,
+    code: string | null,
+    confidence: number | null,
+  ): Prisma.JsonObject => {
+    if (code == null) {
+      const { finishSuggestion: _drop, ...rest } = m as Record<string, unknown> & {
+        finishSuggestion?: unknown
+      }
+      return rest as Prisma.JsonObject
+    }
+    return {
+      ...m,
+      finishSuggestion: {
+        code,
+        confidence,
+        source: 'remap',
+        reason: 'remapFinishesForProject',
+      },
+    } as Prisma.JsonObject
+  }
   for (const r of rooms) {
     const m = (r.meta ?? {}) as Record<string, unknown>
     const raw = (m.rawFinishObservation ?? null) as RawFinishObservation | null
+    const before = suggestionOf(m)
+    let next: { finishCode: string | null; finishConfidence: number | null }
     if (!raw) {
-      // Pre-Sprint-7 data lacks the raw observation; we synthesise it from
-      // whatever meta we DO have. That's enough to surface ROOMs whose
-      // evidence string happens to mention a legend code.
       const evidence = typeof m.finish_evidence === 'string' ? m.finish_evidence : null
-      const visionCode = typeof m.finish_code === 'string' ? m.finish_code : null
+      const visionCode = before
       const synth: RawFinishObservation = {
         visionCode,
         evidence,
         textSnippetSlice: null,
       }
-      const { finishCode, finishConfidence } = assignFinishCode(synth, legendCodes, '', legendHints)
-      const before = m.finish_code as string | null
-      if (finishCode && finishCode !== before) {
-        if (before == null) newlyMapped += 1
-        else changedCode += 1
-        await prisma.takeoffItem.update({
-          where: { id: r.id },
-          data: {
-            meta: { ...m, finish_code: finishCode, finishConfidence } as Prisma.JsonObject,
-          },
-        })
-      } else if (finishCode == null) {
-        stillUnmapped += 1
-      } else {
-        unchanged += 1
-      }
-      continue
+      next = assignFinishCode(synth, legendCodes, '', legendHints)
+    } else {
+      next = assignFinishCode(raw, legendCodes, '', legendHints)
     }
-    const { finishCode, finishConfidence } = assignFinishCode(raw, legendCodes, '', legendHints)
-    const before = m.finish_code as string | null
-    if (finishCode === before) {
-      if (finishCode == null) stillUnmapped += 1
+    if (next.finishCode === before) {
+      if (next.finishCode == null) stillUnmapped += 1
       else unchanged += 1
       continue
     }
@@ -323,7 +342,7 @@ export async function remapFinishesForProject(
     else changedCode += 1
     await prisma.takeoffItem.update({
       where: { id: r.id },
-      data: { meta: { ...m, finish_code: finishCode, finishConfidence } as Prisma.JsonObject },
+      data: { meta: writeSuggestion(m, next.finishCode, next.finishConfidence) },
     })
   }
   return { rooms: rooms.length, newlyMapped, changedCode, unchanged, stillUnmapped }
@@ -469,9 +488,13 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
     },
     select: { tag: true, meta: true },
   })
+  // PIVOT — same floor-only filter as remapFinishesForProject. The room
+  // vision pass only sees ST/PR codes + BATHROOM in its closed vocab; even
+  // if the legend table grabbed the joinery FF codes, they can never
+  // surface as a room's floor finish suggestion.
   const legendLookup = legendItems.filter((i) => {
     const m = (i.meta ?? {}) as Record<string, unknown>
-    return m.kind === 'LEGEND'
+    return m.kind === 'LEGEND' && i.tag != null && isFloorLegendCode(i.tag)
   })
   const legendCodes = Array.from(
     new Set(legendLookup.map((i) => i.tag!).concat(['BATHROOM'])),

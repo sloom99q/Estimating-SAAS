@@ -159,3 +159,34 @@ export function selectAreaStatements<T extends Pick<TakeoffItem, 'category' | 'd
 
 /** Free-text category we set on reclassified TakeoffItems. */
 export const AREA_STATEMENT_CATEGORY = 'AREA_STATEMENT'
+
+/**
+ * PIVOT — code-prefix discriminator for legend entries that may appear
+ * as a ROOM's floor finish suggestion. A villa drawing set typically
+ * carries several distinct legends on different sheets:
+ *
+ *   - ST01-03   : stone floor finishes (white marble, grainy marble, ...)
+ *   - PR01/PR03 : porcelain floor finishes (marble-texture, grey service)
+ *   - FN01-04   : WALL finishes (fluted GRC, dark grey, plaster)
+ *   - WD01      : wall wood/veneer panels
+ *   - LS01/02   : landscape (play sand, gravel)
+ *   - FF01-06   : furniture / joinery (wardrobes, kitchen cabinetry, ...)
+ *   - BATHROOM  : sentinel for "see bathroom drawings"
+ *
+ * EXTRACT_FINISH_LEGEND grabs every code on the I4xx sheets — including
+ * the joinery + wall tables — because they're legitimate legend entries
+ * for those categories. But a ROOM's floor finish must NEVER suggest
+ * FF/FN/WD/LS. This helper is the single source of truth for that gate.
+ *
+ * Code-prefix based, not name-based: the legend extractor's description
+ * field is often missing or noisy ("FF04 KITCHEN CABINETRY" vs "ST01
+ * WHITE MARBLE"), but the code shape itself is stable. ST/PR/BATHROOM
+ * are the only legitimate suggestions for a floor.
+ */
+const FLOOR_LEGEND_CODE_RE = /^(ST|PR)\d{2}$/
+
+export function isFloorLegendCode(code: string): boolean {
+  if (!code) return false
+  if (code === 'BATHROOM') return true
+  return FLOOR_LEGEND_CODE_RE.test(code)
+}

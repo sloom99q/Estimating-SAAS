@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import {
   AREA_STATEMENT_CATEGORY,
   isAreaStatement,
+  isFloorLegendCode,
   isLikelyNotARoom,
   selectAreaStatements,
   selectBillableRooms,
@@ -153,5 +154,50 @@ describe('isLikelyNotARoom (P3 cold-upload deny gate)', () => {
     expect(isLikelyNotARoom('ENTRANCE LOBBY', 12.8)).toBe(false)
     expect(isLikelyNotARoom('BOH KITCHEN', 16.4)).toBe(false)
     expect(isLikelyNotARoom('STAIRCASE', 9.6)).toBe(false)
+  })
+})
+
+describe('isFloorLegendCode (PIVOT floor-only suggestion gate)', () => {
+  it('admits floor codes (ST/PR + BATHROOM sentinel)', () => {
+    expect(isFloorLegendCode('ST01')).toBe(true)
+    expect(isFloorLegendCode('ST02')).toBe(true)
+    expect(isFloorLegendCode('ST03')).toBe(true)
+    expect(isFloorLegendCode('PR01')).toBe(true)
+    expect(isFloorLegendCode('PR03')).toBe(true)
+    expect(isFloorLegendCode('BATHROOM')).toBe(true)
+  })
+
+  it('rejects FF furniture/joinery codes (the cmqka8hc6 cold-run leak)', () => {
+    expect(isFloorLegendCode('FF01')).toBe(false) // JOINERY
+    expect(isFloorLegendCode('FF02')).toBe(false) // WARDROBES
+    expect(isFloorLegendCode('FF03')).toBe(false) // SINK & BATHROOM COUNTERS
+    expect(isFloorLegendCode('FF04')).toBe(false) // KITCHEN CABINETRY
+    expect(isFloorLegendCode('FF05')).toBe(false) // CUSTOM CABINETRY
+    expect(isFloorLegendCode('FF06')).toBe(false) // STORAGE CABINETS
+  })
+
+  it('rejects FN wall codes (fluted GRC, dark grey, plaster)', () => {
+    expect(isFloorLegendCode('FN01')).toBe(false)
+    expect(isFloorLegendCode('FN02')).toBe(false)
+    expect(isFloorLegendCode('FN03')).toBe(false)
+    expect(isFloorLegendCode('FN04')).toBe(false)
+  })
+
+  it('rejects WD wood/veneer wall codes', () => {
+    expect(isFloorLegendCode('WD01')).toBe(false)
+    expect(isFloorLegendCode('WD02')).toBe(false)
+  })
+
+  it('rejects LS landscape codes (play sand, gravel)', () => {
+    expect(isFloorLegendCode('LS01')).toBe(false)
+    expect(isFloorLegendCode('LS02')).toBe(false)
+  })
+
+  it('rejects malformed or empty codes', () => {
+    expect(isFloorLegendCode('')).toBe(false)
+    expect(isFloorLegendCode('ST')).toBe(false) // missing digits
+    expect(isFloorLegendCode('ST1')).toBe(false) // single digit
+    expect(isFloorLegendCode('XX01')).toBe(false)
+    expect(isFloorLegendCode('bathroom')).toBe(false) // case-sensitive sentinel
   })
 })
