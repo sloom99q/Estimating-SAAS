@@ -1,0 +1,89 @@
+{
+  "page": {
+    "title": "حصر الكميات",
+    "subtitle": "ارفع ملف PDF للرسومات؛ يستخرج الذكاء الاصطناعي الجداول والغرف والتشطيبات للمراجعة."
+  },
+  "upload": {
+    "cta": "رفع PDF",
+    "dropHere": "أسقط ملف PDF هنا أو اضغط للاختيار",
+    "help": "application/pdf، حتى ٥٠ ميجابايت",
+    "uploading": "جاري الرفع…",
+    "uploaded": "تم الرفع. تتم المعالجة في الخلفية…"
+  },
+  "pipeline": {
+    "title": "حالة المعالجة",
+    "INGEST": "قراءة الملف",
+    "CLASSIFY": "تصنيف اللوحات",
+    "EXTRACT_SCHEDULES": "استخراج الجداول",
+    "EXTRACT_ROOMS": "استخراج الغرف",
+    "status": {
+      "QUEUED": "في الانتظار",
+      "RUNNING": "قيد التشغيل",
+      "DONE": "تم",
+      "FAILED": "فشل"
+    }
+  },
+  "document": {
+    "status": {
+      "UPLOADED": "مرفوع",
+      "PROCESSING": "قيد المعالجة",
+      "READY": "جاهز",
+      "FAILED": "فشل"
+    }
+  },
+  "table": {
+    "empty": "لا توجد بنود حصر بعد — ارفع ملف PDF للبدء.",
+    "headers": {
+      "tag": "الرمز",
+      "description": "الوصف",
+      "unit": "الوحدة",
+      "qtyAi": "كمية الذكاء",
+      "qtyFinal": "الكمية النهائية",
+      "confidence": "الثقة",
+      "flags": "تنبيهات"
+    },
+    "categoryGroup": "الفئة",
+    "groupNoTag": "—"
+  },
+  "filter": {
+    "all": "الكل",
+    "needsReview": "بحاجة لمراجعة"
+  },
+  "category": {
+    "ROOM": "الغرف",
+    "DOOR": "الأبواب",
+    "WINDOW": "النوافذ",
+    "FLOOR_FINISH": "أرضيات",
+    "WALL_FINISH": "جدران",
+    "CEILING": "أسقف",
+    "SCREED": "صبّات",
+    "PAINT": "دهانات",
+    "PLASTER": "بلاستر",
+    "BLOCKWORK": "بلوك",
+    "WATERPROOFING": "عوازل",
+    "METAL": "أعمال معدنية",
+    "GRC": "GRC",
+    "JOINERY": "نجارة",
+    "SANITARY": "أعمال صحية",
+    "EXTERNAL": "أعمال خارجية",
+    "STRUCTURE_PROV": "إنشائي (احتياطي)",
+    "MEP_PROV": "كهروميكانيك (احتياطي)",
+    "OTHER": "أخرى"
+  },
+  "flagSeverity": {
+    "ERROR": "خطأ",
+    "WARN": "تنبيه",
+    "INFO": "معلومة"
+  },
+  "projectFlags": {
+    "title": "تنبيهات المشروع"
+  },
+  "serverContinues": {
+    "title": "الاستخراج يستمر على الخادم",
+    "body": "يمكنك مغادرة الصفحة أو إغلاق التبويب — الخط يعمل في الخلفية. عُد إلى صفحة المشروع لاحقاً لمشاهدة النتيجة."
+  },
+  "errors": {
+    "uploadFailed": "فشل الرفع: {{message}}",
+    "loadFailed": "تعذر تحميل بيانات الحصر."
+  }
+}

@@ -42,6 +42,7 @@ async function mockLogin(credentials: LoginCredentials): Promise<Session> {
       fullName: deriveName(credentials.email),
       role: 'owner',
       avatarUrl: null,
+      platformRole: null,
     },
     token: 'mock.jwt.token',
     issuedAt: new Date().toISOString(),

@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { prisma } from '../db'
+import { tenantDb } from '../db/tenantDb'
 import { requireAuth } from '../middleware/auth'
 import type { Router } from './router'
 import { emptyResponse, errorResponse, jsonResponse } from '../utils/json'
@@ -23,6 +23,8 @@ const createBody = z.object({
   rating: z.number().min(0).max(5).nullable().optional(),
   preferred: z.boolean().optional(),
   notes: z.string().nullable().optional(),
+  /** ADR-009 — credit limit in AED, optional. */
+  creditLimitAed: z.number().nonnegative().nullable().optional(),
 })
 
 const updateBody = createBody.partial()
@@ -41,9 +43,21 @@ interface SupplierRow {
   rating: number | null
   preferred: boolean
   notes: string | null
+  creditLimitAed: unknown
   createdAt: Date
   updatedAt: Date
   deletedAt: Date | null
+}
+
+function decimalToNumber(value: unknown): number | null {
+  if (value == null) return null
+  if (typeof value === 'number') return value
+  // Prisma returns Decimal as a Decimal.js instance with toString().
+  if (typeof value === 'object' && 'toString' in (value as object)) {
+    const parsed = Number((value as { toString: () => string }).toString())
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
 }
 
 function supplier(row: SupplierRow) {
@@ -61,6 +75,7 @@ function supplier(row: SupplierRow) {
     rating: row.rating,
     preferred: row.preferred,
     notes: row.notes,
+    creditLimitAed: decimalToNumber(row.creditLimitAed),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
     deletedAt: row.deletedAt ? row.deletedAt.toISOString() : null,
@@ -83,26 +98,25 @@ export function registerSupplierRoutes(router: Router): void {
   router.get(
     '/api/suppliers',
     requireAuth(async (_req, ctx) => {
+      const db = tenantDb(ctx.organizationId)
       const includeDeleted = ctx.query.get('includeDeleted') === 'true'
-      const rows = await prisma.supplier.findMany({
-        where: {
-          organizationId: ctx.organizationId,
-          ...(includeDeleted ? {} : { deletedAt: null }),
-        },
+      const rows = await db.supplier.findMany({
+        where: includeDeleted ? {} : { deletedAt: null },
         orderBy: [{ preferred: 'desc' }, { name: 'asc' }],
       })
-      return jsonResponse(rows.map(supplier))
+      return jsonResponse(rows.map((r) => supplier(r as unknown as SupplierRow)))
     }),
   )
 
   router.get(
     '/api/suppliers/:id',
     requireAuth(async (_req, ctx) => {
-      const row = await prisma.supplier.findFirst({
-        where: { id: ctx.params.id, organizationId: ctx.organizationId, deletedAt: null },
+      const db = tenantDb(ctx.organizationId)
+      const row = await db.supplier.findFirst({
+        where: { id: ctx.params.id, deletedAt: null },
       })
       if (!row) return errorResponse(404, 'Supplier not found')
-      return jsonResponse(supplier(row))
+      return jsonResponse(supplier(row as unknown as SupplierRow))
     }),
   )
 
@@ -111,8 +125,10 @@ export function registerSupplierRoutes(router: Router): void {
     requireAuth(async (req, ctx) => {
       const parsed = await readBody(req, createBody)
       if (parsed instanceof Response) return parsed
-      const created = await prisma.supplier.create({
+      const db = tenantDb(ctx.organizationId)
+      const created = await db.supplier.create({
         data: {
+          // Compiler-required but extension-overridden — see tenantDb.ts.
           organizationId: ctx.organizationId,
           name: parsed.name,
           country: trimmedNullable(parsed.country),
@@ -125,9 +141,10 @@ export function registerSupplierRoutes(router: Router): void {
           rating: parsed.rating ?? null,
           preferred: parsed.preferred ?? false,
           notes: trimmedNullable(parsed.notes),
+          creditLimitAed: parsed.creditLimitAed ?? null,
         },
       })
-      return jsonResponse(supplier(created), 201)
+      return jsonResponse(supplier(created as unknown as SupplierRow), 201)
     }),
   )
 
@@ -136,19 +153,16 @@ export function registerSupplierRoutes(router: Router): void {
     requireAuth(async (req, ctx) => {
       const parsed = await readBody(req, updateBody)
       if (parsed instanceof Response) return parsed
-      const existing = await prisma.supplier.findFirst({
-        where: { id: ctx.params.id, organizationId: ctx.organizationId },
-      })
+      const db = tenantDb(ctx.organizationId)
+      const existing = await db.supplier.findFirst({ where: { id: ctx.params.id } })
       if (!existing) return errorResponse(404, 'Supplier not found')
 
-      const updated = await prisma.supplier.update({
+      const updated = await db.supplier.update({
         where: { id: existing.id },
         data: {
           ...(parsed.name !== undefined ? { name: parsed.name.trim() } : {}),
           ...('country' in parsed ? { country: trimmedNullable(parsed.country) } : {}),
-          ...('contactName' in parsed
-            ? { contactName: trimmedNullable(parsed.contactName) }
-            : {}),
+          ...('contactName' in parsed ? { contactName: trimmedNullable(parsed.contactName) } : {}),
           ...('email' in parsed ? { email: trimmedNullable(parsed.email) } : {}),
           ...('phone' in parsed ? { phone: trimmedNullable(parsed.phone) } : {}),
           ...('website' in parsed ? { website: trimmedNullable(parsed.website) } : {}),
@@ -159,25 +173,30 @@ export function registerSupplierRoutes(router: Router): void {
           ...('rating' in parsed ? { rating: parsed.rating ?? null } : {}),
           ...(parsed.preferred !== undefined ? { preferred: parsed.preferred } : {}),
           ...('notes' in parsed ? { notes: trimmedNullable(parsed.notes) } : {}),
+          ...('creditLimitAed' in parsed
+            ? { creditLimitAed: parsed.creditLimitAed ?? null }
+            : {}),
         },
       })
-      return jsonResponse(supplier(updated))
+      return jsonResponse(supplier(updated as unknown as SupplierRow))
     }),
   )
 
   router.del(
     '/api/suppliers/:id',
     requireAuth(async (_req, ctx) => {
-      const existing = await prisma.supplier.findFirst({
-        where: { id: ctx.params.id, organizationId: ctx.organizationId, deletedAt: null },
+      const db = tenantDb(ctx.organizationId)
+      const existing = await db.supplier.findFirst({
+        where: { id: ctx.params.id, deletedAt: null },
       })
-      if (!existing) return emptyResponse()
+      // ADR-011: DELETE matches PATCH — 404 for missing or cross-tenant.
+      if (!existing) return errorResponse(404, 'Supplier not found')
       const now = new Date()
       // Cascade: soft-delete every (material, supplier) link this supplier
-      // owns. PriceSnapshots stay (immutable history) — they are NEVER deleted.
-      await prisma.$transaction([
-        prisma.supplier.update({ where: { id: existing.id }, data: { deletedAt: now } }),
-        prisma.materialSupplierPrice.updateMany({
+      // owns. PriceSnapshots stay (immutable history) — never deleted.
+      await db.$transaction([
+        db.supplier.update({ where: { id: existing.id }, data: { deletedAt: now } }),
+        db.materialSupplierPrice.updateMany({
           where: { supplierId: existing.id, deletedAt: null },
           data: { deletedAt: now },
         }),
@@ -189,15 +208,14 @@ export function registerSupplierRoutes(router: Router): void {
   router.post(
     '/api/suppliers/:id/restore',
     requireAuth(async (_req, ctx) => {
-      const existing = await prisma.supplier.findFirst({
-        where: { id: ctx.params.id, organizationId: ctx.organizationId },
-      })
+      const db = tenantDb(ctx.organizationId)
+      const existing = await db.supplier.findFirst({ where: { id: ctx.params.id } })
       if (!existing) return errorResponse(404, 'Supplier not found')
-      const restored = await prisma.supplier.update({
+      const restored = await db.supplier.update({
         where: { id: existing.id },
         data: { deletedAt: null },
       })
-      return jsonResponse(supplier(restored))
+      return jsonResponse(supplier(restored as unknown as SupplierRow))
     }),
   )
 }

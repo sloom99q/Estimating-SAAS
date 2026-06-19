@@ -64,7 +64,8 @@
   "workspace": {
     "back": "كل المشاريع",
     "summary": "ملخص المشروع",
-    "createdOn": "أُنشئ في {{date}}"
+    "createdOn": "أُنشئ في {{date}}",
+    "takeoff": "حصر الكميات"
   },
   "flow": {
     "project": "المشروع",

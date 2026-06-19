@@ -2,6 +2,7 @@ import { ActionIcon, Anchor, Button, Group, Menu, Stack, Text, Title } from '@ma
 import {
   ArrowLeft,
   DotsThreeVertical,
+  FileText,
   MapPin,
   PencilSimple,
   Trash,
@@ -18,6 +19,8 @@ interface ProjectWorkspaceHeaderProps {
   project: Project
   onEdit: () => void
   onDelete: () => void
+  /** Sprint-3 A4: link to the AI takeoff review surface. */
+  takeoffHref?: string
 }
 
 /**
@@ -29,6 +32,7 @@ export function ProjectWorkspaceHeader({
   project,
   onEdit,
   onDelete,
+  takeoffHref,
 }: ProjectWorkspaceHeaderProps) {
   const { t } = useTranslation(['projects'])
 
@@ -62,6 +66,16 @@ export function ProjectWorkspaceHeader({
         </Stack>
 
         <Group gap="xs" wrap="nowrap">
+          {takeoffHref ? (
+            <Button
+              component={Link}
+              to={takeoffHref}
+              variant="default"
+              leftSection={<FileText size={16} />}
+            >
+              {t('projects:workspace.takeoff', { defaultValue: 'Takeoff' })}
+            </Button>
+          ) : null}
           <Button
             variant="default"
             leftSection={<PencilSimple size={16} />}

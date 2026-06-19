@@ -1,4 +1,6 @@
 import { prisma } from './db'
+import { seedJotunForOrg } from './seed/jotunSeed'
+import { seedGlobalRates } from './seed/rateLibrarySeed'
 import { hashPassword } from './utils/auth'
 
 /**
@@ -527,12 +529,21 @@ async function main(): Promise<void> {
     ])
   }
 
+  // Sprint-3: seed global RateLibraryItems + the demo Jotun assembly for
+  // the org. Sprint-6 S6-0: the seed now also PRUNES orphan global rates.
+  const rateResult = await seedGlobalRates(prisma)
+  const jotunId = await seedJotunForOrg(prisma, org.id)
+
   console.log('[seed] ok')
-  console.log(`        org       = ${org.slug}`)
-  console.log(`        login as  = ${adminEmail}`)
-  console.log(`        password  = ${adminPassword}`)
-  console.log(`        suppliers = ${suppliersToSeed.length}`)
-  console.log(`        prices    = ${priceSeeds.length}`)
+  console.log(`        org           = ${org.slug}`)
+  console.log(`        login as      = ${adminEmail}`)
+  console.log(`        password      = ${adminPassword}`)
+  console.log(`        suppliers     = ${suppliersToSeed.length}`)
+  console.log(`        prices        = ${priceSeeds.length}`)
+  console.log(
+    `        global rates  = ${rateResult.inserted} inserted, ${rateResult.updated} updated, ${rateResult.deleted} pruned`,
+  )
+  console.log(`        Jotun assembly = ${jotunId}`)
 }
 
 main()

@@ -44,10 +44,21 @@ export const materialsRepository: Repository<Material, MaterialInput> =
       if (input.active !== undefined) patch.active = input.active
       return patch
     },
-    // Backfill pre-Phase-4 (no imageUrl) and pre-Phase-5 (no deletedAt) rows.
-    normaliseOnRead: (row) => ({
-      ...row,
-      imageUrl: row.imageUrl ?? null,
-      deletedAt: row.deletedAt ?? null,
-    }),
+    // Sprint-3: the server now sends Material.unitPrice / coverage / wastePct
+    // as stringified Decimals. Parse back into JS numbers here so the
+    // domain math (quantity.ts, boq.ts, discovery.ts) keeps working.
+    // Backfill: pre-Phase-4 (no imageUrl) and pre-Phase-5 (no deletedAt) rows.
+    normaliseOnRead: (row) => {
+      const r = row as unknown as Record<string, unknown>
+      const num = (v: unknown): number =>
+        typeof v === 'number' ? v : typeof v === 'string' ? Number.parseFloat(v) : 0
+      return {
+        ...row,
+        unitPrice: num(r.unitPrice),
+        coverage: num(r.coverage),
+        wastePct: num(r.wastePct),
+        imageUrl: row.imageUrl ?? null,
+        deletedAt: row.deletedAt ?? null,
+      }
+    },
   })

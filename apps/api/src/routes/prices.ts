@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client'
 import { z } from 'zod'
-import { prisma } from '../db'
+import { tenantDb } from '../db/tenantDb'
 import { requireAuth } from '../middleware/auth'
 import type { Router } from './router'
 import { emptyResponse, errorResponse, jsonResponse } from '../utils/json'
@@ -13,16 +13,9 @@ const trimmedNullable = (input: unknown): string | null => {
 }
 
 /**
- * POST  /api/material-supplier-prices  — set the price for a (material, supplier) pair.
- *
- * This endpoint is the heart of Phase 8B. It does two writes in one tx:
- *
- *   1. Upserts the live `MaterialSupplierPrice` row, updating `unitPrice +
- *      effectiveDate` if the link already exists.
- *   2. Inserts a `PriceSnapshot` row capturing the price at `effectiveDate`.
- *
- * Snapshots are NEVER updated and NEVER deleted, so the timeline + trend
- * analytics always see the full history.
+ * POST /api/material-supplier-prices is the heart of Phase 8B — every call
+ * upserts the live link AND writes a new PriceSnapshot in the same
+ * transaction so price history can never be overwritten.
  */
 
 const setPriceBody = z.object({
@@ -49,9 +42,10 @@ interface PriceLinkRow {
   organizationId: string
   materialId: string
   supplierId: string
-  unitPrice: number
+  // Sprint-3 Decimal promotion. DTO emits string for wire stability.
+  unitPrice: Prisma.Decimal
   currency: string
-  minimumOrderQuantity: number | null
+  minimumOrderQuantity: Prisma.Decimal | null
   leadTimeDays: number | null
   effectiveDate: Date
   isPreferred: boolean
@@ -67,9 +61,10 @@ function priceLink(row: PriceLinkRow) {
     organizationId: row.organizationId,
     materialId: row.materialId,
     supplierId: row.supplierId,
-    unitPrice: row.unitPrice,
+    unitPrice: row.unitPrice.toString(),
     currency: row.currency,
-    minimumOrderQuantity: row.minimumOrderQuantity,
+    minimumOrderQuantity:
+      row.minimumOrderQuantity === null ? null : row.minimumOrderQuantity.toString(),
     leadTimeDays: row.leadTimeDays,
     effectiveDate: row.effectiveDate.toISOString(),
     isPreferred: row.isPreferred,
@@ -85,7 +80,7 @@ function snapshot(row: {
   organizationId: string
   materialId: string
   supplierId: string
-  price: number
+  price: Prisma.Decimal
   currency: string
   effectiveDate: Date
   createdAt: Date
@@ -95,7 +90,7 @@ function snapshot(row: {
     organizationId: row.organizationId,
     materialId: row.materialId,
     supplierId: row.supplierId,
-    price: row.price,
+    price: row.price.toString(),
     currency: row.currency,
     effectiveDate: row.effectiveDate.toISOString(),
     createdAt: row.createdAt.toISOString(),
@@ -120,13 +115,13 @@ export function registerPriceRoutes(router: Router): void {
   router.get(
     '/api/material-supplier-prices',
     requireAuth(async (_req, ctx) => {
+      const db = tenantDb(ctx.organizationId)
       const materialId = ctx.query.get('materialId')
       const supplierId = ctx.query.get('supplierId')
       const includeDeleted = ctx.query.get('includeDeleted') === 'true'
 
-      const rows = await prisma.materialSupplierPrice.findMany({
+      const rows = await db.materialSupplierPrice.findMany({
         where: {
-          organizationId: ctx.organizationId,
           ...(materialId ? { materialId } : {}),
           ...(supplierId ? { supplierId } : {}),
           ...(includeDeleted ? {} : { deletedAt: null }),
@@ -142,16 +137,17 @@ export function registerPriceRoutes(router: Router): void {
     requireAuth(async (req, ctx) => {
       const parsed = await readBody(req, setPriceBody)
       if (parsed instanceof Response) return parsed
+      const db = tenantDb(ctx.organizationId)
 
       // Resolve org-scoped material + supplier (security boundary). A request
       // is rejected if either references something the caller's org doesn't own.
       const [material, supplier] = await Promise.all([
-        prisma.material.findFirst({
-          where: { id: parsed.materialId, organizationId: ctx.organizationId, deletedAt: null },
+        db.material.findFirst({
+          where: { id: parsed.materialId, deletedAt: null },
           select: { id: true, currency: true },
         }),
-        prisma.supplier.findFirst({
-          where: { id: parsed.supplierId, organizationId: ctx.organizationId, deletedAt: null },
+        db.supplier.findFirst({
+          where: { id: parsed.supplierId, deletedAt: null },
           select: { id: true },
         }),
       ])
@@ -161,16 +157,14 @@ export function registerPriceRoutes(router: Router): void {
       const currency = parsed.currency ?? material.currency
       const effectiveDate = parsed.effectiveDate ? new Date(parsed.effectiveDate) : new Date()
 
-      // If isPreferred=true, clear every other supplier's preferred flag for
-      // this material so the invariant "exactly one preferred per material"
-      // holds. Do it in the SAME transaction as the snapshot write.
       const writes: Prisma.PrismaPromise<unknown>[] = []
 
+      // Invariant: at most one preferred per (org, material). Clear competing
+      // preferred flags in the SAME transaction as the upsert + snapshot.
       if (parsed.isPreferred === true) {
         writes.push(
-          prisma.materialSupplierPrice.updateMany({
+          db.materialSupplierPrice.updateMany({
             where: {
-              organizationId: ctx.organizationId,
               materialId: material.id,
               supplierId: { not: supplier.id },
               isPreferred: true,
@@ -181,7 +175,10 @@ export function registerPriceRoutes(router: Router): void {
         )
       }
 
-      const upsert = prisma.materialSupplierPrice.upsert({
+      // The tenant extension scopes `where` and create-data; for `upsert` we
+      // still pass the composite unique selector explicitly because the
+      // generated name encodes `organizationId_materialId_supplierId`.
+      const upsert = db.materialSupplierPrice.upsert({
         where: {
           organizationId_materialId_supplierId: {
             organizationId: ctx.organizationId,
@@ -190,6 +187,7 @@ export function registerPriceRoutes(router: Router): void {
           },
         },
         create: {
+          // Compiler-required but extension-overridden — see tenantDb.ts.
           organizationId: ctx.organizationId,
           materialId: material.id,
           supplierId: supplier.id,
@@ -215,8 +213,9 @@ export function registerPriceRoutes(router: Router): void {
         },
       })
 
-      const snap = prisma.priceSnapshot.create({
+      const snap = db.priceSnapshot.create({
         data: {
+          // Compiler-required but extension-overridden — see tenantDb.ts.
           organizationId: ctx.organizationId,
           materialId: material.id,
           supplierId: supplier.id,
@@ -227,7 +226,7 @@ export function registerPriceRoutes(router: Router): void {
       })
 
       writes.push(upsert, snap)
-      const results = await prisma.$transaction(writes)
+      const results = await db.$transaction(writes)
       const linkRow = results.find(
         (r): r is PriceLinkRow =>
           (r as PriceLinkRow).materialId !== undefined &&
@@ -243,8 +242,9 @@ export function registerPriceRoutes(router: Router): void {
     requireAuth(async (req, ctx) => {
       const parsed = await readBody(req, patchLinkBody)
       if (parsed instanceof Response) return parsed
-      const existing = await prisma.materialSupplierPrice.findFirst({
-        where: { id: ctx.params.id, organizationId: ctx.organizationId, deletedAt: null },
+      const db = tenantDb(ctx.organizationId)
+      const existing = await db.materialSupplierPrice.findFirst({
+        where: { id: ctx.params.id, deletedAt: null },
       })
       if (!existing) return errorResponse(404, 'Price link not found')
 
@@ -253,9 +253,8 @@ export function registerPriceRoutes(router: Router): void {
       const writes: Prisma.PrismaPromise<unknown>[] = []
       if (parsed.isPreferred === true) {
         writes.push(
-          prisma.materialSupplierPrice.updateMany({
+          db.materialSupplierPrice.updateMany({
             where: {
-              organizationId: ctx.organizationId,
               materialId: existing.materialId,
               supplierId: { not: existing.supplierId },
               isPreferred: true,
@@ -266,7 +265,7 @@ export function registerPriceRoutes(router: Router): void {
         )
       }
       writes.push(
-        prisma.materialSupplierPrice.update({
+        db.materialSupplierPrice.update({
           where: { id: existing.id },
           data: {
             ...('minimumOrderQuantity' in parsed
@@ -278,7 +277,7 @@ export function registerPriceRoutes(router: Router): void {
           },
         }),
       )
-      const results = await prisma.$transaction(writes)
+      const results = await db.$transaction(writes)
       const last = results[results.length - 1] as PriceLinkRow
       return jsonResponse(priceLink(last))
     }),
@@ -287,11 +286,13 @@ export function registerPriceRoutes(router: Router): void {
   router.del(
     '/api/material-supplier-prices/:id',
     requireAuth(async (_req, ctx) => {
-      const existing = await prisma.materialSupplierPrice.findFirst({
-        where: { id: ctx.params.id, organizationId: ctx.organizationId, deletedAt: null },
+      const db = tenantDb(ctx.organizationId)
+      const existing = await db.materialSupplierPrice.findFirst({
+        where: { id: ctx.params.id, deletedAt: null },
       })
-      if (!existing) return emptyResponse()
-      await prisma.materialSupplierPrice.update({
+      // ADR-011: DELETE matches PATCH — 404 for missing or cross-tenant.
+      if (!existing) return errorResponse(404, 'Price link not found')
+      await db.materialSupplierPrice.update({
         where: { id: existing.id },
         data: { deletedAt: new Date() },
       })
@@ -304,14 +305,14 @@ export function registerPriceRoutes(router: Router): void {
   router.get(
     '/api/price-snapshots',
     requireAuth(async (_req, ctx) => {
+      const db = tenantDb(ctx.organizationId)
       const materialId = ctx.query.get('materialId')
       const supplierId = ctx.query.get('supplierId')
       const sinceParam = ctx.query.get('since')
       const since = sinceParam ? new Date(sinceParam) : null
 
-      const rows = await prisma.priceSnapshot.findMany({
+      const rows = await db.priceSnapshot.findMany({
         where: {
-          organizationId: ctx.organizationId,
           ...(materialId ? { materialId } : {}),
           ...(supplierId ? { supplierId } : {}),
           ...(since && !Number.isNaN(since.getTime())

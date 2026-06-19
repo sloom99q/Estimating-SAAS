@@ -72,6 +72,15 @@ export const router = createBrowserRouter([
             },
           },
           {
+            path: paths.projectTakeoff,
+            lazy: async () => {
+              const { TakeoffPage } = await import(
+                '@/features/takeoff/pages/TakeoffPage'
+              )
+              return { Component: TakeoffPage }
+            },
+          },
+          {
             path: paths.materials,
             lazy: async () => {
               const { MaterialsListPage } = await import(
@@ -103,6 +112,15 @@ export const router = createBrowserRouter([
             lazy: async () => {
               const { UsersPage } = await import('@/features/users/pages/UsersPage')
               return { Component: UsersPage }
+            },
+          },
+          {
+            path: paths.adminOrgs,
+            lazy: async () => {
+              const { AdminOrgsPage } = await import(
+                '@/features/admin/pages/AdminOrgsPage'
+              )
+              return { Component: AdminOrgsPage }
             },
           },
         ],

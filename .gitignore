@@ -10,6 +10,9 @@ dist-ssr/
 
 # Bun
 bun.lockb
+# Stack is Bun-only — npm/yarn lockfiles are noise from accidental tool use.
+package-lock.json
+yarn.lock
 
 # Editor / OS
 .DS_Store
@@ -29,6 +32,11 @@ node_modules/.tmp/
 # Env
 .env
 .env.*.local
+# Sprint-9 S9-4 — secrets file (ANTHROPIC_API_KEY etc) lives here.
+# Never read, print, edit, or commit. Automated sessions are blocked
+# from this file in CLAUDE.md.
+.env.secrets
+.env.secrets.*
 
 # Logs
 logs/
@@ -39,3 +47,23 @@ yarn-error.log*
 
 # Test / coverage
 coverage/
+
+# Sprint-2 takeoff pipeline — never commit binary fixtures or runtime data.
+# Sprint-4: glob the dir contents (not the dir itself) so the small text
+# groundtruth.json can be re-included with a negation.
+apps/api/fixtures/**
+!apps/api/fixtures/
+!apps/api/fixtures/plot4357.groundtruth.json
+# Sprint-7 S7-4: bbox-layout JSON fixtures are small (<100KB) text and
+# drive the spatial parser's TDD test. Commit them.
+!apps/api/fixtures/bbox/
+!apps/api/fixtures/bbox/*.json
+# Sprint-8 S8-1: I4xx text-layer fixtures for the legend text-pass tests.
+!apps/api/fixtures/text-layer/
+!apps/api/fixtures/text-layer/*.txt
+apps/api/data/
+apps/api/tmp/
+
+# Sprint-8 S8-6: Claude harness state (scheduled-tasks lock, transcripts,
+# memory snapshots) is per-machine session state, not source.
+.claude/

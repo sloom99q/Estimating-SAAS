@@ -1,0 +1,127 @@
+{
+  "$comment": "Ground truth for apps/api/fixtures/plot4357.pdf — LM 1929 Rev 0 tender set (58 sheets, ARCH+ID only). Compiled from the architect's pilot extraction (text layer + 200 DPI quadrant vision) cross-verified against the contractor's real quote (Triple-A Qo/202605/221 Rev-01). Commit at apps/api/fixtures/plot4357.groundtruth.json. The accuracy harness scores live extraction runs against this file.",
+  "register": {
+    "pageCount": 58,
+    "disciplines": ["ARCH", "ID"],
+    "structuralSheets": false,
+    "mepSheets": false,
+    "$note": "Any STR/MEP classification on this set is a misclassification. MISSING_DISCIPLINE flag SHOULD fire.",
+    "anchorSheets": {
+      "glazingTypesSchedule": { "drawingNos": ["A501", "A502"], "approxPages": [23, 24], "$note": "Window/CW schedule lives HERE. Title is 'GLAZING TYPES' — keyword 'glazing' must route to WINDOW." },
+      "doorSchedule": { "drawingNos": ["A551"], "approxPages": [27, 28] },
+      "groundFloorPlan": { "drawingNo": "A101", "approxPage": 10 },
+      "firstFloorPlan": { "drawingNo": "A102", "approxPage": 11 },
+      "finishPlans": { "drawingNos": ["I401", "I402", "I403", "I404"], "approxPages": [55, 56, 57, 58] }
+    }
+  },
+  "doors": {
+    "expectedTagCount": 9,
+    "expectedTotalLeaves": 24,
+    "items": [
+      { "tag": "D01", "count": 6, "width_mm": 1000, "height_mm": 3000 },
+      { "tag": "D02", "count": 4, "width_mm": 900,  "height_mm": 3000, "$note": "Triple-A priced 5; the printed schedule says 4. Extraction ground truth = 4." },
+      { "tag": "D03", "count": 2, "width_mm": 1000, "height_mm": 3000 },
+      { "tag": "D04", "count": 2, "width_mm": 900,  "height_mm": 3000 },
+      { "tag": "D05", "count": 1, "width_mm": 800,  "height_mm": 3000 },
+      { "tag": "D06", "count": 2, "width_mm": 900,  "height_mm": 2400 },
+      { "tag": "D07", "count": 1, "width_mm": 500,  "height_mm": 3000 },
+      { "tag": "D08", "count": 4, "width_mm": 900,  "height_mm": 2400, "acceptAlternates": [{ "height_mm": 2100 }], "$note": "ADR-015 clause 3 source conflict on A551: the schedule's dim column prints 2.40 m, but the same row's elevation note prints 'D08 900 x 2100mm'. Extraction reading either height passes." },
+      { "tag": "D10", "count": 2, "width_mm": 900,  "height_mm": 3000 }
+    ],
+    "knownTraps": [
+      "D09 is drawn in the schedule elevations but ABSENT from the count table. Correct extraction returns NO D09 count row (or flags it INFO). Returning D09 with an invented count is a FAIL.",
+      "Finish variants (D01-A/D01-B etc.) are the contractor's pricing convention, NOT printed schedule rows. Do not penalize their absence."
+    ]
+  },
+  "windows": {
+    "expectedTagCount": 20,
+    "items": [
+      { "tag": "CW01", "count": 1, "width_mm": 4040,  "height_mm": 3080 },
+      { "tag": "CW02", "count": 1, "width_mm": 600,   "height_mm": 3030, "$note": "Dropped entirely by naive layout-text parsing in the pilot. Presence of CW02 is a key score." },
+      { "tag": "CW03", "count": 1, "width_mm": 6450,  "height_mm": 900 },
+      { "tag": "CW04", "count": 2, "width_mm": 6400,  "height_mm": 700 },
+      { "tag": "CW05", "count": 6, "width_mm": 3000,  "height_mm": 300 },
+      { "tag": "CW06", "count": 1, "width_mm": 1200,  "height_mm": 3000 },
+      { "tag": "CW07", "count": 1, "width_mm": 3000,  "height_mm": 900 },
+      { "tag": "CW08", "count": 2, "width_mm": 11600, "height_mm": 3005, "$note": "The giant living/dining sliders — a strong canary for schedule reading." },
+      { "tag": "CW09", "count": 2, "width_mm": 11480, "height_mm": 1000 },
+      { "tag": "CW10", "count": 5, "width_mm": 600,   "height_mm": 3000 },
+      { "tag": "CW11", "count": 2, "width_mm": 4100,  "height_mm": 3050 },
+      { "tag": "CW12", "count": 1, "width_mm": 600,   "height_mm": 3000 },
+      { "tag": "CW13", "count": 1, "width_mm": 600,   "height_mm": 3450 },
+      { "tag": "CW14", "count": 2, "width_mm": 2100,  "height_mm": 2400 },
+      { "tag": "CW15", "count": 2, "width_mm": 6420,  "height_mm": 600 },
+      { "tag": "CW16", "count": 1, "width_mm": 2100,  "height_mm": 3000 },
+      { "tag": "CW17", "count": 1, "width_mm": 2800,  "height_mm": 4630, "$note": "Width/height orientation ambiguous between sources (pilot read 4630w x 3000h). Scoring accepts either orientation." },
+      { "tag": "CW18", "count": 1, "width_mm": 300,   "height_mm": 2700 },
+      { "tag": "CW19", "count": 1, "width_mm": 1190,  "height_mm": 2700 },
+      { "tag": "CW20", "count": 1, "width_mm": 2000,  "height_mm": 3000, "$note": "Main entrance door, listed inside the glazing schedule." }
+    ],
+    "knownTraps": [
+      "Adjacent-row count swaps in whitespace-layout text parsing: CW09<->CW10, CW11<->CW12, CW15<->CW16. The dual-pass reconciler exists because of exactly this.",
+      "Schedule sheets are titled GLAZING TYPES — title-keyword routing without 'glazing'/'cw' misses them entirely (the 0-windows failure of the first live run)."
+    ]
+  },
+  "rooms": {
+    "minNamedRoomsWithArea": 20,
+    "textLayerFormat": "Room name, code and area render on SEPARATE lines in pdftotext -layout output, e.g. \"MAID'S ROOM\" \\n \"GF-08\" \\n \"7.22 m²\". A single-line regex scores zero; the parser must join 2-3 line windows.",
+    "deduplication": "The same rooms appear on floor plans, finish plans and RCPs. Dedupe by normalized (name, floor). A correct run yields ~25-35 unique spaces, not 150+.",
+    "floorLabelAliases": { "GF": ["GF", "Ground Floor", "G"], "L1": ["FF", "First Floor", "L1", "1st Floor"], "ROOF": ["Roof", "RF"] },
+    "items": [
+      { "name": "ENTRANCE LOBBY", "code": "GF-01", "floor": "GF", "area_m2": 18.29 },
+      { "name": "BATH 03",        "code": "GF-02", "floor": "GF", "area_m2": 5.41 },
+      { "name": "PLAY ROOM",      "code": "GF-03", "floor": "GF", "area_m2": 24.32 },
+      { "name": "LIVING",         "floor": "GF", "area_m2": 58.82 },
+      { "name": "DINNING",        "code": "GF-05", "floor": "GF", "area_m2": 21.58, "$note": "Spelled DINNING on the drawing. Plan tag prints 21.38; finish plan prints 21.58 — accept either (source conflict)." },
+      { "name": "BOH KITCHEN",    "code": "GF-06", "floor": "GF", "area_m2": 28.01 },
+      { "name": "MAID'S BATH",    "code": "GF-07", "floor": "GF", "area_m2": 5.37 },
+      { "name": "MAID'S ROOM",    "code": "GF-08", "floor": "GF", "area_m2": 7.22 },
+      { "name": "LAUNDRY/LINEN",  "code": "GF-04", "floor": "GF", "area_m2": 9.80 },
+      { "name": "POWDER",         "floor": "GF", "area_m2": 8.44 },
+      { "name": "DRIVER'S ROOM",  "floor": "GF", "area_m2": 10.11 },
+      { "name": "MASTER BEDROOM", "code": "FF-11", "floor": "L1", "area_m2": 38.35 },
+      { "name": "MASTER BATH",    "code": "FF-10", "floor": "L1", "area_m2": 13.86 },
+      { "name": "MASTER BALCONY", "floor": "L1", "area_m2": 19.04 },
+      { "name": "01 BEDROOM",     "code": "FF-02", "floor": "L1", "area_m2": 28.27 },
+      { "name": "02 BEDROOM",     "code": "FF-09", "floor": "L1", "area_m2": 25.28 },
+      { "name": "BATH 01",        "floor": "L1", "area_m2": 5.41 },
+      { "name": "BATH 02",        "floor": "L1", "area_m2": 5.68 },
+      { "name": "FAMILY ROOM",    "code": "FF-03", "floor": "L1", "area_m2": 39.12 },
+      { "name": "FAMILY ROOM TERRACE", "floor": "L1", "area_m2": 23.30 },
+      { "name": "CORRIDOR",       "code": "FF-06", "floor": "L1", "area_m2": 23.27 },
+      { "name": "STAIRCASE",      "code": "FF-04", "floor": "L1", "area_m2": 26.96 }
+    ]
+  },
+  "finishes": {
+    "$note": "Sprint-6 extension: legend codes the I401-I404 sheets define + the per-room finish mapping the contractor's BOQ paid against. Sprint-7 adds optionalCodes (bathroom-series) corroborated by the contractor quote per ADR-015.",
+    "legendCodesExpected": ["ST01", "ST02", "ST03", "PR01", "PR03", "WD01", "FN01", "FN02", "FN03", "FN04", "LS01", "LS02"],
+    "optionalCodes": ["FN22", "FN23", "FN24", "FN31", "FN32", "FN33", "FN41", "FN42", "FN43"],
+    "floorMap": {
+      "ST01":     ["LIVING", "DINNING", "ENTRANCE LOBBY", "PLAY ROOM"],
+      "PR01":     ["MASTER BEDROOM", "01 BEDROOM", "02 BEDROOM", "FAMILY ROOM", "CORRIDOR"],
+      "PR03":     ["BOH KITCHEN", "LAUNDRY/LINEN", "MAID'S ROOM", "DRIVER'S ROOM"],
+      "ST02":     ["STAIRCASE"],
+      "ST03":     ["MASTER BALCONY", "FAMILY ROOM TERRACE"],
+      "BATHROOM": ["MASTER BATH", "BATH 01", "BATH 02", "BATH 03", "POWDER", "MAID'S BATH"]
+    },
+    "floorQtyTargets_m2": {
+      "ST01":     [120, 140],
+      "PR01":     [150, 190],
+      "PR03":     [50, 90],
+      "BATHROOM": [45, 60],
+      "ST03":     [40, 50]
+    },
+    "ceilingTargets_m2": {
+      "CL03": [330, 420],
+      "CL02": [70, 110]
+    },
+    "scoringRule": "PASS = core 12 found as subset; zero pattern-violating codes (regex /^[A-Z]{2}\\d{2}$/, BATHROOM allowed); total within 8-25; >=80% of mapped ground-truth rooms carry the correct finish_code; each floor finish total within its target range; CL03 != CL02 != floor total."
+  },
+  "scoring": {
+    "doors":   "PASS = 9/9 tags, exact counts, no invented D09 count.",
+    "windows": "PASS = >=18/20 tags found INCLUDING CW02; counts exact on found tags (swap-trap rows CW09-CW16 weighted double).",
+    "rooms":   "PASS = >=20 of the listed rooms found with area within ±2% of the printed value; unique-space count after dedup between 20 and 40.",
+    "register":"PASS = no STR/MEP disciplines asserted; glazing sheets routed to WINDOW extraction.",
+    "finishes":"PASS = core 12 (legendCodesExpected) found as subset; zero pattern-violating codes; total within 8-25; >=80% of mapped ground-truth rooms carry the correct finish_code; each floor total within target range; CL03 != CL02 != floor total."
+  }
+}

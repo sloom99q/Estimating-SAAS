@@ -1,23 +1,108 @@
-// Phase 8A — Production-shaped Prisma schema for the API.
+// Sprint-1 schema (Phase 9). PostgreSQL is now the live source of truth.
+// SQLite has been retired — the previous app.db is migrated by
+// `apps/api/scripts/migrate-sqlite-to-postgres.ts`.
 //
-// SQLite for now; migrating to PostgreSQL is a `provider = "postgresql"` change
-// + re-running `prisma migrate dev`. We avoid every SQLite-incompatible attribute
-// (no @db.Timestamptz, no @db.Decimal, no @db.Char), so swap-time is minimal.
+// Conventions (per architect rulings, ADR-010):
+//   - cuid() PKs
+//   - @db.Timestamptz(6) on every DateTime
+//   - Decimal @db.Decimal(p, s) for money/qty on NEW takeoff models
+//     (Sprint 2+). Existing 8A/8B Float columns stay Float for now to keep
+//     /materials and /suppliers wire-shape stable; promotion to Decimal is a
+//     follow-up cleanup, not Sprint 1.
+//   - organizationId on every tenant-scoped row; composite uniques scope by org.
+//   - Soft-delete via deletedAt; audit createdAt/updatedAt.
+//   - Role enum uses the repo's 4-role vocabulary (owner/admin/estimator/viewer).
 //
-// CRITICAL invariants:
-//   - Every tenant-scoped row carries `organizationId`.
-//   - Every row carries `createdAt / updatedAt / deletedAt` (soft delete).
-//   - String-typed enums (status / role) match the union types in src/.
-//   - Composite uniqueness `[organizationId, id]` lets future child tables use
-//     `references: [organizationId, id]` for structural tenant FKs.
+// ADR-009 (8B pricing model supersedes spec §2):
+//   - MaterialSupplierPrice + PriceSnapshot are retained as the authoritative
+//     procurement schema. Supplier gains `creditLimitAed`.
+//
+// ADR-010 (schema source of truth):
+//   - apps/api/prisma/schema.prisma is now the LIVE schema; the root
+//     prisma/schema.prisma stays as the long-term reference.
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
-  url      = env("DATABASE_URL")
+  provider = "postgresql"
+  // App connections use the pooled DSN (cheap, scalable).
+  url       = env("DATABASE_URL")
+  // Migrations need session-scoped state (advisory locks) which Neon's pooler
+  // does not support. Point DIRECT_URL at the non-pooled host; the runtime
+  // never touches it. Locally this is just DATABASE_URL with "-pooler" removed.
+  directUrl = env("DIRECT_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum MembershipRole {
+  owner
+  admin
+  estimator
+  viewer
+}
+
+// Sprint-2 enums (takeoff pipeline).
+
+enum DocumentStatus {
+  UPLOADED
+  PROCESSING
+  READY
+  FAILED
+}
+
+// Brief lists "WIGHT" between DOOR and FLOOR_FINISH — that's a typo for
+// WINDOW (the only plausible counterpart to DOOR in a fit-out catalogue).
+// Using WINDOW; flag for architect review at sprint close.
+enum TakeoffCategory {
+  ROOM
+  /// Sprint-9 S9-0: building-level totals ("Proposed Villa 972 m²",
+  /// "ACCESSIBLE ROOF 74 m²", "PLAN AREA") that the upstream vision
+  /// pass keeps emitting as rooms. They are NEVER billable rooms; both
+  /// QUANTIFY and the scorer drop them via selectBillableRooms.
+  AREA_STATEMENT
+  DOOR
+  WINDOW
+  FLOOR_FINISH
+  WALL_FINISH
+  CEILING
+  SCREED
+  PAINT
+  PLASTER
+  BLOCKWORK
+  WATERPROOFING
+  METAL
+  GRC
+  JOINERY
+  SANITARY
+  EXTERNAL
+  STRUCTURE_PROV
+  MEP_PROV
+  OTHER
+}
+
+enum TakeoffBasis {
+  MEASURED
+  DERIVED
+  VISUAL
+  PARAMETRIC
+  PLACEHOLDER
+}
+
+enum TakeoffStatus {
+  AI
+  EDITED
+  APPROVED
+}
+
+enum ValidationSeverity {
+  ERROR
+  WARN
+  INFO
 }
 
 // ---------------------------------------------------------------------------
@@ -31,9 +116,13 @@ model User {
   passwordHash String
   avatarUrl    String?
   isSuperAdmin Boolean   @default(false)
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
-  deletedAt    DateTime?
+  /// Sprint-10 S10-1: platform-level role for founder visibility. Null for
+  /// every tenant user; 'founder' for the platform admin who can list
+  /// orgs and provision new ones. Read+provision only — see ADR-018.
+  platformRole String?
+  createdAt    DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt    DateTime? @db.Timestamptz(6)
 
   memberships Membership[]
 
@@ -45,33 +134,45 @@ model Organization {
   name            String
   slug            String    @unique
   defaultCurrency String    @default("AED")
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
-  deletedAt       DateTime?
+  createdAt       DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt       DateTime? @db.Timestamptz(6)
 
-  memberships Membership[]
-  projects    Project[]
-  spaces      Space[]
-  materials   Material[]
-  // Phase 8B — supplier intelligence
+  memberships            Membership[]
+  projects               Project[]
+  spaces                 Space[]
+  materials              Material[]
   suppliers              Supplier[]
   materialSupplierPrices MaterialSupplierPrice[]
   priceSnapshots         PriceSnapshot[]
+  jobs                   Job[]
+  usage                  Usage?
+  // Sprint-2 takeoff pipeline.
+  documents              Document[]
+  sheets                 Sheet[]
+  takeoffItems           TakeoffItem[]
+  validationFlags        ValidationFlag[]
+  corrections            Correction[]
+  // Sprint-3 money path.
+  assemblies             Assembly[]
+  assemblyComponents     AssemblyComponent[]
+  rateLibraryItems       RateLibraryItem[]
+  boqs                   Boq[]
+  boqSections            BoqSection[]
+  boqLines               BoqLine[]
+  quotations             Quotation[]
 
   @@map("organizations")
 }
 
-/// A user's membership in an organization, carrying the org-scoped role.
-/// role is one of: owner | admin | estimator | viewer
-/// status is one of: invited | active | disabled
 model Membership {
-  id             String    @id @default(cuid())
+  id             String         @id @default(cuid())
   organizationId String
   userId         String
-  role           String    @default("estimator")
-  status         String    @default("active")
-  invitedAt      DateTime  @default(now())
-  joinedAt       DateTime?
+  role           MembershipRole @default(estimator)
+  status         String         @default("active")
+  invitedAt      DateTime       @default(now()) @db.Timestamptz(6)
+  joinedAt       DateTime?      @db.Timestamptz(6)
 
   organization Organization @relation(fields: [organizationId], references: [id])
   user         User         @relation(fields: [userId], references: [id])
@@ -82,11 +183,9 @@ model Membership {
 }
 
 // ---------------------------------------------------------------------------
-// Estimation domain
+// Estimation domain (8A)
 // ---------------------------------------------------------------------------
 
-/// status: lead | active | on_hold | completed | cancelled
-/// type:   residential | commercial | luxury
 model Project {
   id             String    @id @default(cuid())
   organizationId String
@@ -95,12 +194,23 @@ model Project {
   location       String
   type           String
   status         String    @default("lead")
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
-  deletedAt      DateTime?
+  /// Sprint-9 S9-1 — declared Built-Up Area in m². Populated from the
+  /// cover-sheet text layer ("TOTAL BUA 6,286 SQ.FT" → 584) by the
+  /// EXTRACT_ROOMS handler. Drives ROOMS_AREA_RECONCILE; null when the
+  /// document has no recognisable BUA declaration (in which case the
+  /// validator skips, not fails).
+  buaM2          Decimal?  @db.Decimal(10, 2)
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime? @db.Timestamptz(6)
 
-  organization Organization @relation(fields: [organizationId], references: [id])
-  spaces       Space[]
+  organization    Organization     @relation(fields: [organizationId], references: [id])
+  spaces          Space[]
+  documents       Document[]
+  takeoffItems    TakeoffItem[]
+  validationFlags ValidationFlag[]
+  boqs            Boq[]
+  quotations      Quotation[]
 
   @@index([organizationId, status])
   @@index([organizationId, createdAt])
@@ -118,55 +228,61 @@ model Space {
   floorMaterialId   String?
   wallMaterialId    String?
   ceilingMaterialId String?
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
-  deletedAt         DateTime?
+  // Sprint-2 additive columns. Nullable / defaulted so the wire shape of the
+  // existing /api/spaces endpoint stays stable for the SPA — fields appear in
+  // responses only after EXTRACT_ROOMS has populated them.
+  code              String?
+  floor             String?
+  areaM2            Decimal?  @db.Decimal(10, 2)
+  source            String    @default("manual")  // 'manual' | 'takeoff'
+  confidence        Int?
+  createdAt         DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt         DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt         DateTime? @db.Timestamptz(6)
 
   organization Organization @relation(fields: [organizationId], references: [id])
   project      Project      @relation(fields: [projectId], references: [id])
 
   @@index([projectId])
   @@index([organizationId])
+  @@index([organizationId, projectId, source])
   @@map("spaces")
 }
 
-/// category: tiles | marble | paint | gypsum | glue | grout | cladding | other
-/// unit:     m2 | kg | bag | piece
 model Material {
   id             String    @id @default(cuid())
   organizationId String
   name           String
   category       String
   unit           String
-  unitPrice      Float
-  coverage       Float
-  wastePct       Float
+  // Sprint-3: promoted from Float to Decimal. Pricing math never runs on
+  // Float (no money types are allowed to be Float on the live schema).
+  unitPrice      Decimal   @db.Decimal(14, 2)
+  coverage       Decimal   @db.Decimal(10, 4)
+  wastePct       Decimal   @db.Decimal(5, 2)
   currency       String    @default("AED")
   supplier       String?
   notes          String?
   imageUrl       String?
   active         Boolean   @default(true)
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
-  deletedAt      DateTime?
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime? @db.Timestamptz(6)
 
-  organization Organization @relation(fields: [organizationId], references: [id])
-  // Phase 8B — supplier intelligence relations
-  supplierPrices MaterialSupplierPrice[]
-  priceSnapshots PriceSnapshot[]
+  organization        Organization            @relation(fields: [organizationId], references: [id])
+  supplierPrices      MaterialSupplierPrice[]
+  priceSnapshots      PriceSnapshot[]
+  assemblyComponents  AssemblyComponent[]
 
   @@index([organizationId, name])
   @@index([organizationId, category])
   @@map("materials")
 }
 
-// ===========================================================================
-// Phase 8B — Supplier intelligence
-// ===========================================================================
+// ---------------------------------------------------------------------------
+// Supplier intelligence (8B) — kept per ADR-009. NEW: `creditLimitAed`.
+// ---------------------------------------------------------------------------
 
-/// Org-scoped procurement directory. `preferred` flags an org-wide
-/// preference — the directory's default; a per-material preferred supplier is
-/// tracked on `MaterialSupplierPrice.isPreferred`.
 model Supplier {
   id             String    @id @default(cuid())
   organizationId String
@@ -177,15 +293,15 @@ model Supplier {
   phone          String?
   website        String?
   paymentTerms   String?
-  /// Average lead time in days for orders from this supplier (org default).
   leadTimeDays   Int?
-  /// Quality rating in [0, 5]. Nullable while the org is still ranking suppliers.
   rating         Float?
   preferred      Boolean   @default(false)
   notes          String?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
-  deletedAt      DateTime?
+  // ADR-009 addition — original requirements field that was missing in 8B.
+  creditLimitAed Decimal?  @db.Decimal(14, 2)
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime? @db.Timestamptz(6)
 
   organization   Organization            @relation(fields: [organizationId], references: [id])
   materialPrices MaterialSupplierPrice[]
@@ -197,27 +313,22 @@ model Supplier {
   @@map("suppliers")
 }
 
-/// The CURRENT price for a (material, supplier) pair. Exactly one live row
-/// per pair (enforced by the composite unique index). `isPreferred` marks the
-/// org's chosen supplier for THIS material — different from `Supplier.preferred`.
-///
-/// Updating the price never overwrites history: the route writes a new
-/// `PriceSnapshot` and updates this row's `unitPrice` + `effectiveDate`.
 model MaterialSupplierPrice {
   id                   String    @id @default(cuid())
   organizationId       String
   materialId           String
   supplierId           String
-  unitPrice            Float
+  // Sprint-3: Decimal everywhere money lives.
+  unitPrice            Decimal   @db.Decimal(14, 2)
   currency             String
-  minimumOrderQuantity Float?
+  minimumOrderQuantity Decimal?  @db.Decimal(14, 4)
   leadTimeDays         Int?
-  effectiveDate        DateTime
+  effectiveDate        DateTime  @db.Timestamptz(6)
   isPreferred          Boolean   @default(false)
   notes                String?
-  createdAt            DateTime  @default(now())
-  updatedAt            DateTime  @updatedAt
-  deletedAt            DateTime?
+  createdAt            DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt            DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt            DateTime? @db.Timestamptz(6)
 
   organization Organization @relation(fields: [organizationId], references: [id])
   material     Material     @relation(fields: [materialId], references: [id])
@@ -229,19 +340,16 @@ model MaterialSupplierPrice {
   @@map("material_supplier_prices")
 }
 
-/// Immutable price history. Written on every `MaterialSupplierPrice` create
-/// AND on every price change. Never updated, never deleted. Drives the
-/// timeline chart + trend detection (`up | down | stable`) on the material
-/// detail page.
 model PriceSnapshot {
   id             String   @id @default(cuid())
   organizationId String
   materialId     String
   supplierId     String
-  price          Float
+  // Sprint-3: Decimal everywhere money lives.
+  price          Decimal  @db.Decimal(14, 2)
   currency       String
-  effectiveDate  DateTime
-  createdAt      DateTime @default(now())
+  effectiveDate  DateTime @db.Timestamptz(6)
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
 
   organization Organization @relation(fields: [organizationId], references: [id])
   material     Material     @relation(fields: [materialId], references: [id])
@@ -250,4 +358,409 @@ model PriceSnapshot {
   @@index([organizationId, materialId, supplierId, effectiveDate])
   @@index([organizationId, materialId, effectiveDate])
   @@map("price_snapshots")
+}
+
+// ===========================================================================
+// Sprint 1 infrastructure: Job runner + usage metering
+// ===========================================================================
+
+/// Background-job table. Worker claims via UPDATE ... FOR UPDATE SKIP LOCKED.
+/// Retry-with-backoff lives in code: 2^attempt × 2s, max 3 attempts.
+/// Sprint 2+ wires the real handlers (INGEST / CLASSIFY / EXTRACT_* / etc.);
+/// Sprint 1 ships NOOP + FORCE_FAIL handlers to prove the lifecycle.
+model Job {
+  id             String    @id @default(cuid())
+  organizationId String
+  projectId      String?
+  type           String
+  payload        Json
+  status         String    @default("QUEUED")
+  attempts       Int       @default(0)
+  error          String?
+  result         Json?
+  /// When the row should next become eligible for claim. Null = immediately.
+  scheduledFor   DateTime? @db.Timestamptz(6)
+  /// Sprint-8 S8-6: the AI_MODE the worker resolved when it claimed this job.
+  /// 'live' = real Anthropic calls; 'stub' = deterministic stub output.
+  /// Lets ops tell at a glance whether a job that "worked" actually billed
+  /// tokens or returned canned data (the S7-5 stub-run papercut). Null
+  /// only for very-old rows from before the column existed.
+  aiMode         String?
+  /// Sprint-8 S8-8 R1: the Anthropic model the worker would route this
+  /// job's vision calls through. Per-stage config (classify / vision /
+  /// default) is resolved at boot; the runner picks the right tier based on
+  /// the job type at claim time. Lets the A/B harness diff model verdicts
+  /// without re-reading the workers' environment.
+  aiModel        String?
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  startedAt      DateTime? @db.Timestamptz(6)
+  finishedAt     DateTime? @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([status, scheduledFor, createdAt])
+  @@index([organizationId, createdAt])
+  @@map("jobs")
+}
+
+/// Per-org metering. Incremented from job handlers (Sprint 2+). Single row
+/// per org maintained by upsert.
+model Usage {
+  id             String   @id @default(cuid())
+  organizationId String   @unique
+  pagesProcessed Int      @default(0)
+  jobsRun        Int      @default(0)
+  jobsFailed     Int      @default(0)
+  tokensIn       Int      @default(0)
+  tokensOut      Int      @default(0)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@map("usages")
+}
+
+// ===========================================================================
+// Sprint 2 — Takeoff pipeline (Document → Sheet → TakeoffItem)
+// ===========================================================================
+
+/// Uploaded source drawing PDF. `storageKey` is the BlobStore key under
+/// org/{orgId}/projects/{projectId}/documents/{docId}/source.pdf — identical
+/// shape across fs and (Sprint-3+) S3 drivers, so a dev blob is portable.
+model Document {
+  id             String         @id @default(cuid())
+  organizationId String
+  projectId      String
+  filename       String
+  storageKey     String
+  pageCount      Int?
+  status         DocumentStatus @default(UPLOADED)
+  createdAt      DateTime       @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime       @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime?      @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  project      Project      @relation(fields: [projectId], references: [id])
+  sheets       Sheet[]
+
+  @@index([organizationId, projectId])
+  @@index([organizationId, status])
+  @@map("documents")
+}
+
+/// One row per PDF page. CLASSIFY writes `discipline / sheetType / drawingNo
+/// / title / scaleNote / aiJson / promptVersion`. EXTRACT_* reads them.
+model Sheet {
+  id             String   @id @default(cuid())
+  organizationId String
+  documentId     String
+  pageNo         Int
+  drawingNo      String?
+  title          String?
+  /// 'ARCH' | 'ID' | 'STR' | 'MEP' | 'UNKNOWN'
+  discipline     String?
+  /// 'cover' | 'register' | 'plan' | 'elevation' | 'section' | 'schedule' |
+  /// 'legend' | 'detail' | 'rcp' | 'finish_plan' | 'other'
+  sheetType      String?
+  scaleNote      String?
+  hasTextLayer   Boolean  @default(false)
+  /// BlobStore key for the per-page pdftotext output. Null = scanned page.
+  rawTextKey     String?
+  /// BlobStore key for the per-page jpeg render. Null until INGEST runs.
+  imageKey       String?
+  aiJson         Json?
+  promptVersion  String?
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization  @relation(fields: [organizationId], references: [id])
+  document     Document      @relation(fields: [documentId], references: [id])
+  takeoffItems TakeoffItem[]
+
+  @@unique([documentId, pageNo])
+  @@index([organizationId, documentId])
+  @@index([organizationId, discipline])
+  @@map("sheets")
+}
+
+/// The output of the extract pipeline. One row per measured / inferred item.
+/// `qtyAi` is the AI's number (never mutated after write). `qtyFinal` is the
+/// human-confirmed number; once it diverges from qtyAi a Correction row is
+/// written so we can A/B retrain prompts.
+model TakeoffItem {
+  id             String          @id @default(cuid())
+  organizationId String
+  projectId      String
+  category       TakeoffCategory
+  tag            String?
+  description    String
+  unit           String
+  qtyAi          Decimal?        @db.Decimal(14, 4)
+  qtyFinal       Decimal?        @db.Decimal(14, 4)
+  basis          TakeoffBasis
+  confidence     Int             @default(0)
+  sourceSheetId  String?
+  sourceNote     String?
+  status         TakeoffStatus   @default(AI)
+  meta           Json?
+  promptVersion  String?
+  createdAt      DateTime        @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime        @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime?       @db.Timestamptz(6)
+
+  organization    Organization     @relation(fields: [organizationId], references: [id])
+  project         Project          @relation(fields: [projectId], references: [id])
+  sourceSheet     Sheet?           @relation(fields: [sourceSheetId], references: [id])
+  validationFlags ValidationFlag[]
+
+  @@index([organizationId, projectId, category])
+  @@index([organizationId, projectId, status])
+  @@index([organizationId, projectId, confidence])
+  @@map("takeoff_items")
+}
+
+/// Surfaces a problem that needs review. Always pinned to a project; usually
+/// to a takeoff item too, but project-wide flags (MISSING_DISCIPLINE) leave
+/// `takeoffItemId` null.
+model ValidationFlag {
+  id             String             @id @default(cuid())
+  organizationId String
+  projectId      String
+  takeoffItemId  String?
+  rule           String
+  severity       ValidationSeverity
+  message        String
+  resolved       Boolean            @default(false)
+  createdAt      DateTime           @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime           @updatedAt @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  project      Project      @relation(fields: [projectId], references: [id])
+  takeoffItem  TakeoffItem? @relation(fields: [takeoffItemId], references: [id])
+
+  @@index([organizationId, projectId, resolved])
+  @@index([organizationId, projectId, severity])
+  @@map("validation_flags")
+}
+
+/// A/B record for prompt retraining. Polymorphic: `entity` + `entityId` point
+/// at any tenant-scoped row (today only TakeoffItem). `aiValue`/`humanValue`
+/// store both sides as strings (we don't need to math on them — we just need
+/// to see them).
+model Correction {
+  id             String   @id @default(cuid())
+  organizationId String
+  entity         String
+  entityId       String
+  field          String
+  aiValue        String?
+  humanValue     String?
+  reason         String?
+  userId         String?
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId, entity, entityId])
+  @@index([organizationId, createdAt])
+  @@map("corrections")
+}
+
+// ===========================================================================
+// Sprint 3 — Money path (Assemblies, Rate library, BOQ, Quotation)
+// ===========================================================================
+
+/// Composable cost recipe. unitCost is computed from its components, never
+/// stored — see apps/api/src/pricing/assemblyEngine.ts. `appliesTo` tells the
+/// PRICE waterfall which BOQ line categories this assembly is eligible to
+/// match (WALL → wall finishes, FLOOR → floor finishes, etc; GENERIC = any).
+model Assembly {
+  id             String              @id @default(cuid())
+  organizationId String
+  name           String
+  /// 'WALL' | 'FLOOR' | 'CEILING' | 'GENERIC'
+  appliesTo      String
+  outputUnit     String
+  notes          String?
+  createdAt      DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime            @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime?           @db.Timestamptz(6)
+
+  organization Organization         @relation(fields: [organizationId], references: [id])
+  components   AssemblyComponent[]
+  boqLines     BoqLine[]
+
+  @@index([organizationId, name])
+  @@index([organizationId, appliesTo])
+  @@map("assemblies")
+}
+
+/// Recipe leaf. `kind` tells the engine which formula slot the row feeds:
+///   MATERIAL  : (unitPrice / coverage) × coats × (1 + wastagePct/100)
+///   LABOR     : unitPrice (per outputUnit)
+///   TOOL_FIXED: fixedCost / projectQty (amortised over the run)
+model AssemblyComponent {
+  id             String   @id @default(cuid())
+  organizationId String
+  assemblyId     String
+  /// 'MATERIAL' | 'LABOR' | 'TOOL_FIXED'
+  kind           String
+  label          String
+  unitPrice      Decimal? @db.Decimal(14, 2)
+  coverage       Decimal? @db.Decimal(14, 4)
+  coats          Int      @default(1)
+  wastagePct     Decimal  @default(0) @db.Decimal(5, 2)
+  fixedCost      Decimal? @db.Decimal(14, 2)
+  materialId     String?
+  sortOrder      Int      @default(0)
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  assembly     Assembly     @relation(fields: [assemblyId], references: [id])
+  material     Material?    @relation(fields: [materialId], references: [id])
+
+  @@index([assemblyId])
+  @@index([organizationId])
+  @@map("assembly_components")
+}
+
+/// Deterministic rate table — the final non-P/S fallback in the PRICE
+/// waterfall. `organizationId` is NULLABLE per ADR-012: NULL = global seed
+/// rate; non-null = per-org override. Excluded from `TENANT_MODELS` because
+/// blanket scoping would hide the global rows. Queries scope explicitly with
+///   WHERE organizationId = :org OR organizationId IS NULL
+/// and per-org rows win on conflict.
+model RateLibraryItem {
+  id             String    @id @default(cuid())
+  organizationId String?
+  code           String
+  description    String
+  unit           String
+  rate           Decimal   @db.Decimal(14, 2)
+  source         String
+  region         String    @default("SHJ")
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime? @db.Timestamptz(6)
+
+  organization Organization? @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId, code])
+  @@index([code, region])
+  @@unique([organizationId, code, region])
+  @@map("rate_library_items")
+}
+
+/// Bill of Quantities. One BOQ per (project, version). PRICE writes against
+/// a Boq's lines; EXPORT_XLSX reads from it.
+model Boq {
+  id                 String        @id @default(cuid())
+  organizationId     String
+  projectId          String
+  version            Int           @default(1)
+  /// 'DRAFT' | 'REVIEWED' | 'LOCKED'
+  status             String        @default("DRAFT")
+  currency           String        @default("AED")
+  subtotal           Decimal?      @db.Decimal(14, 2)
+  totalProvisional   Decimal?      @db.Decimal(14, 2)
+  generatedFromJobId String?
+  createdAt          DateTime      @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime      @updatedAt @db.Timestamptz(6)
+  deletedAt          DateTime?     @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  project      Project      @relation(fields: [projectId], references: [id])
+  sections     BoqSection[]
+  lines        BoqLine[]
+  quotations   Quotation[]
+
+  @@unique([organizationId, projectId, version])
+  @@index([organizationId, projectId])
+  @@map("boqs")
+}
+
+/// Triple-A grouping: '1.0 General', '2.5 Metal', '2.6 Wood', '2.8 Doors-
+/// Windows-Glazing', '2.9 Finishes', '3.1 External', '4.0 Provisional Sums'.
+/// `code` is the dotted prefix the export uses.
+model BoqSection {
+  id             String   @id @default(cuid())
+  organizationId String
+  boqId          String
+  code           String
+  title          String
+  sortOrder      Int      @default(0)
+  subtotal       Decimal? @db.Decimal(14, 2)
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  boq          Boq          @relation(fields: [boqId], references: [id])
+  lines        BoqLine[]
+
+  @@unique([boqId, code])
+  @@index([organizationId])
+  @@map("boq_sections")
+}
+
+/// One row per BOQ line. `rateSource` records which waterfall tier priced it.
+/// Provisional sums leave `rate` null and put the carry-amount in `psAmount`.
+model BoqLine {
+  id             String   @id @default(cuid())
+  organizationId String
+  boqId          String
+  sectionId      String
+  itemRef        String
+  description    String
+  unit           String
+  qty            Decimal? @db.Decimal(14, 4)
+  rate           Decimal? @db.Decimal(14, 2)
+  rateSource     String?
+  amount         Decimal? @db.Decimal(14, 2)
+  isProvisional  Boolean  @default(false)
+  psAmount       Decimal? @db.Decimal(14, 2)
+  confidence     Int?
+  takeoffItemId  String?
+  assemblyId     String?
+  sortOrder      Int      @default(0)
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  boq          Boq          @relation(fields: [boqId], references: [id])
+  section      BoqSection   @relation(fields: [sectionId], references: [id])
+  assembly     Assembly?    @relation(fields: [assemblyId], references: [id])
+
+  @@index([organizationId, boqId])
+  @@index([organizationId, takeoffItemId])
+  @@map("boq_lines")
+}
+
+/// Commercial wrapper around a Boq. `ref` shape: `Qo/{YYYYMM}/{serial} Rev-{NN}`.
+/// `total` = Σ BoqLine.amount − discount, then VAT applied on top.
+model Quotation {
+  id             String    @id @default(cuid())
+  organizationId String
+  projectId      String
+  boqId          String
+  ref            String
+  clientName     String
+  discount       Decimal   @default(0) @db.Decimal(14, 2)
+  vatPct         Decimal   @default(5) @db.Decimal(5, 2)
+  subtotal       Decimal?  @db.Decimal(14, 2)
+  total          Decimal?  @db.Decimal(14, 2)
+  validityDays   Int       @default(30)
+  /// 'DRAFT' | 'SENT' | 'ACCEPTED' | 'WITHDRAWN'
+  status         String    @default("DRAFT")
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime? @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  project      Project      @relation(fields: [projectId], references: [id])
+  boq          Boq          @relation(fields: [boqId], references: [id])
+
+  @@unique([organizationId, ref])
+  @@index([organizationId, projectId])
+  @@map("quotations")
 }

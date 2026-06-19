@@ -74,3 +74,24 @@ export function requireAuth(handler: AuthedHandler): Handler {
     return handler(req, authCtx)
   }
 }
+
+/**
+ * Sprint-10 S10-1 — founder-only gate. Wraps a normal handler with an
+ * extra check that the bearer user's `platformRole === 'founder'`.
+ * Per ADR-018 these handlers may LIST orgs and PROVISION new ones; they
+ * may NOT read tenant business data (projects, takeoff items, BOQs).
+ * Route authors keep that contract by writing each handler narrowly.
+ */
+export function requireFounder(handler: AuthedHandler): Handler {
+  return requireAuth(async (req, ctx) => {
+    const dbUser = await prisma.user.findUnique({
+      where: { id: ctx.user.id },
+      select: { platformRole: true, deletedAt: true },
+    })
+    if (!dbUser || dbUser.deletedAt) return errorResponse(401, 'User not found')
+    if (dbUser.platformRole !== 'founder') {
+      return errorResponse(403, 'Founder access required')
+    }
+    return handler(req, ctx)
+  })
+}
