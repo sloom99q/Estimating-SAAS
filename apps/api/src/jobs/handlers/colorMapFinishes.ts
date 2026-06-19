@@ -40,19 +40,29 @@ const COORDINATE_CARRY_PAIRS: Array<{ from: string; to: string }> = [
   { from: 'A102', to: 'I402' }, // First floor plan → first floor finish plan
 ]
 
-const CORE_LEGEND_CODES = [
+/**
+ * Codes the color-sampler is allowed to assign as a ROOM's floor finish.
+ *
+ * The contractor's standing rule (verified vs v8 + the post-7a12e29 dump
+ * regression): floor finishes are limited to ST01-03 (stone) + PR01/PR03
+ * (porcelain). BATHROOM is a sentinel handled by name-prior in
+ * mapRoomsToFinishCodes (no palette entry needed).
+ *
+ * What was happening: CORE_LEGEND_CODES contained the full legend
+ * vocabulary — WD01 (wall), FN01-04 (wall fluted/dark grey/GRC/plaster),
+ * LS01-02 (landscape sand/gravel). Once the palette had those codes
+ * sampled from I401's swatch column, the nearest-RGB matcher routinely
+ * assigned wall + landscape codes to a room's floor (BOH KITCHEN → FN02,
+ * MASTER BEDROOM → WD01, DRIVER'S ROOM → FN01). Restricting the palette
+ * to floor codes only makes the wall codes structurally unreachable as a
+ * room's finish_code, which is what the contractor needs.
+ */
+const FLOOR_FINISH_CODES = [
   'ST01',
   'ST02',
   'ST03',
   'PR01',
   'PR03',
-  'WD01',
-  'FN01',
-  'FN02',
-  'FN03',
-  'FN04',
-  'LS01',
-  'LS02',
 ] as const
 
 export interface ColorMapResult {
@@ -163,7 +173,7 @@ export async function colorMapFinishesForProject(
   for (const sheet of anchored) {
     const image = await renderPageRgb(sourceBytes, sheet.pageNo, { dpi: 220 })
     const bbox = await renderPageBbox(sourceBytes, sheet.pageNo)
-    const palette = buildPalette(image, bbox.words, CORE_LEGEND_CODES)
+    const palette = buildPalette(image, bbox.words, FLOOR_FINISH_CODES)
     for (const [, p] of palette) {
       if (p.fromDocument) result.paletteSamplesFromDocument += 1
       else result.paletteSamplesCanonical += 1

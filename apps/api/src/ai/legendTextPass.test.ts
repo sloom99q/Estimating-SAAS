@@ -69,6 +69,31 @@ describe('legendTextPass — Plot 4357', () => {
     expect(st01?.description).toMatch(/floor finish/i)
   })
 
+  it('does NOT bleed room-area annotations into legend descriptions (P5/P6)', () => {
+    // Synthetic line: code in column N, room area in column N+1, name above.
+    // Pre-fix: descriptionFromLine returned "19.04 m² PLAY SAND".
+    // Post-fix: the m² segment is filtered out before joining.
+    const synth = [
+      'PLAY SAND',
+      '                    LS01                  19.04 m²                  Garden Hardscape',
+    ].join('\n')
+    const { rows } = parseLegendTextLayer(synth)
+    const ls01 = rows.find((r) => r.code === 'LS01')
+    expect(ls01).toBeDefined()
+    expect(ls01?.description ?? '').not.toMatch(/19\.04|m²|m2/)
+    expect(ls01?.name?.toUpperCase()).toContain('PLAY SAND')
+  })
+
+  it('does NOT pick a floor-label line as the legend name', () => {
+    const synth = [
+      'GROUND FLOOR',
+      '                    PR03                  Service Areas',
+    ].join('\n')
+    const { rows } = parseLegendTextLayer(synth)
+    const pr03 = rows.find((r) => r.code === 'PR03')
+    expect(pr03?.name).toBeNull()
+  })
+
   it('walls-only I403 should still expose codes when present', () => {
     const i403 = readFileSync(join(FIXTURE_DIR, 'plot4357-I403.txt'), 'utf-8')
     const { rows } = parseLegendTextLayer(i403)

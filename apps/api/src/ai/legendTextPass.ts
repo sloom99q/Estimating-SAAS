@@ -89,22 +89,62 @@ function segmentForCode(lineText: string, code: string): string {
 }
 
 /**
+ * Segments that look like room-area annotations bleeding in from an
+ * adjacent column on a finish-plan sheet. The cold-upload dump showed
+ * "LS01 — 19.04 m² PLAY SAND" because `descriptionFromLine` greedily
+ * absorbed the m² value sitting two columns to the right of the LS01
+ * token. These never belong in a legend description.
+ *
+ * Also reject pure-number segments and floor labels (GROUND FLOOR,
+ * FIRST FLOOR, etc.) and pdf-frame keywords (DRAWING, SCALE).
+ */
+const LEGEND_DESC_NOISE_PATTERNS: RegExp[] = [
+  // Room area annotations: "19.04 m²", "19.04 m2", "19.04 m", "19.04"
+  // bleeding in from an adjacent column. `\b` after `²` doesn't match
+  // because `²` is not a word char — use `\s*$` so the segment must be
+  // *only* the area annotation.
+  /^\s*-?\d+(\.\d+)?\s*m[²2]?\s*$/i,
+  // Floor labels printed as standalone column entries.
+  /^\s*(ground|first|second|third|roof|basement|mezzanine)\s*(floor)?\s*$/i,
+  // PDF title-block / drawing-frame keywords used as column headers.
+  /^\s*(drawing|scale|sheet|revision|project)\b/i,
+]
+
+function isLegendDescriptionSegment(s: string): boolean {
+  const trimmed = s.trim()
+  if (trimmed.length === 0) return false
+  for (const re of LEGEND_DESC_NOISE_PATTERNS) {
+    if (re.test(trimmed)) return false
+  }
+  return true
+}
+
+/**
  * Collect every text segment on the line that sits to the RIGHT of the code,
  * in column order. The legend layout typically prints the code in a left
  * column and the description in a far-right column, separated by ~20 spaces
  * — `segmentForCode` returns just the code, missing the description that
  * sits in a sibling segment. This helper recovers it.
+ *
+ * P5/P6 — area-annotation segments (e.g. "19.04 m²") are dropped before
+ * the right-of-code segments are joined, so they don't leak into the
+ * legend description. Without this, the color-mapper's palette token
+ * lookup still works (it keys on the literal "ST01"/"LS01" word), but
+ * the SPA-visible legend row + downstream BOQ descriptions ended up
+ * carrying junk like "LS01 — 19.04 m² PLAY SAND".
  */
 function descriptionFromLine(lineText: string, code: string): string | null {
   const segments = lineText.split(/\s{6,}/).map((s) => s.trim()).filter(Boolean)
   const codeIdx = segments.findIndex((s) => s.includes(code))
   if (codeIdx < 0) return null
   const codeSeg = segments[codeIdx]!
-  const inline = codeSeg.slice(codeSeg.indexOf(code) + code.length).trim()
+  const rawInline = codeSeg.slice(codeSeg.indexOf(code) + code.length).trim()
+  const inline = isLegendDescriptionSegment(rawInline) ? rawInline : ''
   const rest = segments
     .slice(codeIdx + 1)
     .map((s) => s.trim())
     .filter((s) => s.length > 0 && !LEGEND_CODE_STRICT_RE.test(s))
+    .filter(isLegendDescriptionSegment)
     .join(' ')
   const joined = [inline, rest].filter(Boolean).join(' ').trim()
   return joined.length > 0 ? joined : null
@@ -167,7 +207,10 @@ export function parseLegendTextLayer(text: string): LegendTextPassResult {
       const aboveSeg = above ? segmentForCode(above.text, code).trim() : null
       const belowSeg = below ? segmentForCode(below.text, code).trim() : null
 
-      const name = aboveSeg && looksLikeNameLine(aboveSeg) ? aboveSeg : null
+      const name =
+        aboveSeg && looksLikeNameLine(aboveSeg) && isLegendDescriptionSegment(aboveSeg)
+          ? aboveSeg
+          : null
       const detail = belowSeg && looksLikeDetailLine(belowSeg) ? belowSeg : null
 
       rows.push({
