@@ -215,6 +215,60 @@ describe('KITCHEN_TOOL schema', () => {
     expect(schema.required).toContain('uncertainty')
     expect(schema.required).toContain('baseReasoning')
     expect(schema.required).toContain('wallReasoning')
+    expect(schema.required).toContain('countertopReasoning')
     expect(schema.required).toContain('confidence')
+  })
+})
+
+describe('countertop extension (AI-est roadmap #4b)', () => {
+  it('normalizeKitchenVision carries countertopLm + reasoning through', () => {
+    const r = normalizeKitchenVision({
+      kitchenLayout: 'L',
+      baseLm: 7.8,
+      baseReasoning: 'n 6.4 + e 1.4',
+      wallLm: 5,
+      wallReasoning: 'n 5',
+      countertopLm: 9.3,
+      countertopReasoning: 'n 6.4 + e 1.4 + island top 1.5',
+      hasIsland: true,
+      islandLm: 2.5,
+      confidence: 50,
+      uncertainty: 'island depth unclear',
+    })
+    expect(r.countertopLm).toBe(9.3)
+    expect(r.countertopReasoning).toMatch(/island top 1\.5/)
+  })
+
+  it('composeKitchenReasoning("counter", ...) surfaces the countertop breakdown', () => {
+    const r = composeKitchenReasoning('counter', {
+      layout: 'L',
+      baseLm: 7.8,
+      wallLm: 5,
+      countertopLm: 9.3,
+      hasIsland: true,
+      islandLm: 2.5,
+      confidence: 50,
+      baseReasoning: '',
+      wallReasoning: '',
+      countertopReasoning: 'n 6.4 + e 1.4 + island top 1.5 = 9.3 lm',
+      uncertainty: 'island depth unclear',
+    })
+    expect(r).toContain('Layout: L + island')
+    expect(r).toContain('Counter: n 6.4')
+    expect(r).toContain('UNCERTAINTY')
+  })
+
+  it('countertopLm defaults to 0 when missing — does not crash', () => {
+    const r = normalizeKitchenVision({
+      kitchenLayout: 'I',
+      baseLm: 3,
+      wallLm: 2,
+      hasIsland: false,
+      islandLm: 0,
+      confidence: 40,
+      uncertainty: '',
+    })
+    expect(r.countertopLm).toBe(0)
+    expect(r.countertopReasoning).toBe('')
   })
 })

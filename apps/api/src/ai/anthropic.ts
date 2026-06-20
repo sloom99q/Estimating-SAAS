@@ -358,6 +358,14 @@ import {
   type KitchenEstimate,
   type KitchenVisionRaw,
 } from './estimateKitchenPass'
+import {
+  WARDROBE_PROMPT_VERSION,
+  WARDROBE_SYSTEM_PROMPT,
+  WARDROBE_TOOL,
+  normalizeWardrobeVision,
+  type WardrobeEstimate,
+  type WardrobeVisionRaw,
+} from './estimateWardrobesPass'
 
 export interface EstimateKitchenInput {
   documentId: string
@@ -423,6 +431,68 @@ export async function estimateKitchen(
     tokensIn: res.usage?.input_tokens ?? 0,
     tokensOut: res.usage?.output_tokens ?? 0,
     promptVersion: KITCHEN_PROMPT_VERSION,
+  }
+}
+
+// --- ESTIMATE_WARDROBES (AI-est roadmap #4a) -----------------------------
+
+export interface EstimateWardrobeInput {
+  documentId: string
+  pageNo: number
+  jpegBase64: string
+  roomName: string
+}
+
+export interface EstimateWardrobeOutput {
+  estimate: WardrobeEstimate
+  tokensIn: number
+  tokensOut: number
+  promptVersion: string
+}
+
+export async function estimateWardrobe(
+  input: EstimateWardrobeInput,
+): Promise<EstimateWardrobeOutput> {
+  if (isStubMode()) {
+    return zeroTokens({
+      estimate: normalizeWardrobeVision({
+        wallsWithWardrobes: 1,
+        totalLm: 4.2,
+        perWallReasoning: 'north wall 4.2 m = 4.2 lm (stub)',
+        hatchingPattern: 'parallel-line',
+        builtInVsWalkIn: 'built-in',
+        confidence: 45,
+        uncertainty: 'STUB mode — no real vision performed.',
+      }),
+      promptVersion: WARDROBE_PROMPT_VERSION + '.stub',
+    })
+  }
+  const res = await callMessages({
+    model: config.anthropicModels.wardrobes,
+    max_tokens: 1024,
+    temperature: 0,
+    system: WARDROBE_SYSTEM_PROMPT,
+    tools: [WARDROBE_TOOL],
+    tool_choice: { type: 'tool', name: WARDROBE_TOOL.name },
+    messages: [
+      {
+        role: 'user',
+        content: [
+          ...buildImageBlock(input.jpegBase64),
+          {
+            type: 'text',
+            text: `Bedroom plan crop for room "${input.roomName}" on Document=${input.documentId} page=${input.pageNo}.\n\nReturn ONE wardrobe_estimate tool call. The reasoning and hatching-pattern fields matter more than the lm number — the expert reads those first.`,
+          },
+        ],
+      },
+    ],
+  })
+  const raw = findToolInput(res, WARDROBE_TOOL.name) as WardrobeVisionRaw
+  return {
+    estimate: normalizeWardrobeVision(raw ?? {}),
+    tokensIn: res.usage?.input_tokens ?? 0,
+    tokensOut: res.usage?.output_tokens ?? 0,
+    promptVersion: WARDROBE_PROMPT_VERSION,
   }
 }
 

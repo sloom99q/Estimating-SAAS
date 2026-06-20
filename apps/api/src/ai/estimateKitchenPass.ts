@@ -158,6 +158,11 @@ export interface KitchenVisionRaw {
   baseReasoning?: string
   wallLm?: number
   wallReasoning?: string
+  // AI-est roadmap #4b — KITCHEN COUNTERTOP (KC-) folded into the
+  // existing kitchen call. Free vs a separate vision pass; the model
+  // already understands the layout from base/wall reasoning.
+  countertopLm?: number
+  countertopReasoning?: string
   hasIsland?: boolean
   islandLm?: number
   confidence?: number
@@ -173,11 +178,13 @@ export interface KitchenEstimate {
   layout: 'I' | 'L' | 'U' | 'OPEN-ISLAND' | 'OTHER'
   baseLm: number
   wallLm: number
+  countertopLm: number
   hasIsland: boolean
   islandLm: number
   confidence: number
   baseReasoning: string
   wallReasoning: string
+  countertopReasoning: string
   uncertainty: string
 }
 
@@ -194,6 +201,7 @@ export function normalizeKitchenVision(raw: KitchenVisionRaw): KitchenEstimate {
       : 'OTHER'
   const baseLm = Number.isFinite(raw.baseLm) ? Math.max(0, raw.baseLm!) : 0
   const wallLm = Number.isFinite(raw.wallLm) ? Math.max(0, raw.wallLm!) : 0
+  const countertopLm = Number.isFinite(raw.countertopLm) ? Math.max(0, raw.countertopLm!) : 0
   const hasIsland = raw.hasIsland === true
   const islandLm = Number.isFinite(raw.islandLm) ? Math.max(0, raw.islandLm!) : 0
   const rawConfidence = Number.isFinite(raw.confidence) ? raw.confidence! : 50
@@ -202,11 +210,13 @@ export function normalizeKitchenVision(raw: KitchenVisionRaw): KitchenEstimate {
     layout,
     baseLm,
     wallLm,
+    countertopLm,
     hasIsland,
     islandLm,
     confidence,
     baseReasoning: typeof raw.baseReasoning === 'string' ? raw.baseReasoning : '',
     wallReasoning: typeof raw.wallReasoning === 'string' ? raw.wallReasoning : '',
+    countertopReasoning: typeof raw.countertopReasoning === 'string' ? raw.countertopReasoning : '',
     uncertainty: typeof raw.uncertainty === 'string' ? raw.uncertainty : '',
   }
 }
@@ -218,15 +228,20 @@ export function normalizeKitchenVision(raw: KitchenVisionRaw): KitchenEstimate {
  * expert reads the uncertainty line FIRST in practice.
  */
 export function composeKitchenReasoning(
-  category: 'base' | 'wall',
+  category: 'base' | 'wall' | 'counter',
   est: KitchenEstimate,
 ): string {
   const layoutPart = `Layout: ${est.layout}${est.hasIsland ? ' + island' : ''}`
-  const reasoning =
-    category === 'base'
-      ? `Base: ${est.baseReasoning || '(no breakdown given)'}` +
-        (est.hasIsland ? ` · island ${est.islandLm.toFixed(2)} lm` : '')
-      : `Wall: ${est.wallReasoning || '(no breakdown given)'}`
+  let reasoning: string
+  if (category === 'base') {
+    reasoning =
+      `Base: ${est.baseReasoning || '(no breakdown given)'}` +
+      (est.hasIsland ? ` · island ${est.islandLm.toFixed(2)} lm` : '')
+  } else if (category === 'wall') {
+    reasoning = `Wall: ${est.wallReasoning || '(no breakdown given)'}`
+  } else {
+    reasoning = `Counter: ${est.countertopReasoning || '(no breakdown given)'}`
+  }
   const uncertainty = est.uncertainty ? ` · UNCERTAINTY: ${est.uncertainty}` : ''
   return `${layoutPart} · ${reasoning}${uncertainty}`
 }
@@ -244,8 +259,13 @@ OUTPUT RULES (hard):
 1. Identify layout: I (one wall), L (two walls), U (three walls), OPEN-ISLAND (cabinets along walls plus an island), or OTHER.
 2. For BASE cabinets, count each wall along which base cabinets would run. List the wall and its approximate length in meters, e.g. "south wall 4.2 m + west wall 3.8 m = 8.0 lm". Add island perimeter to the base total if present.
 3. For WALL (upper) cabinets, count only walls/sections that typically carry upper cabinets. WALL LM IS TYPICALLY LESS THAN BASE LM — upper cabinets are usually absent over windows, over the range hood, over the sink (unless explicitly shown), and over the island. Be conservative.
-4. The "uncertainty" field is REQUIRED. State in ONE sentence what was unclear, cut off, ambiguous, or beyond your ability to read from the image. If everything was clear, say so explicitly.
-5. Your "confidence" self-report is capped server-side at 60. Do not inflate it. A confidence of 40-50 with an honest reasoning beats 60 with a guess.
+4. For COUNTERTOP (stone top surface), report the LINEAR METERS of countertop run. Countertop USUALLY follows the base run (counter sits on top of base cabinets) but be alert to:
+   - Bar overhangs / breakfast extensions (countertop extends past the base by 30-50cm)
+   - Waterfall ends (countertop wraps down the side of an island; rare in this market)
+   - Island tops (count the full island perimeter top, not just the base footprint)
+   Report countertopReasoning with the same per-wall breakdown style as base.
+5. The "uncertainty" field is REQUIRED. State in ONE sentence what was unclear, cut off, ambiguous, or beyond your ability to read from the image. If everything was clear, say so explicitly.
+6. Your "confidence" self-report is capped server-side at 60. Do not inflate it. A confidence of 40-50 with an honest reasoning beats 60 with a guess.
 
 OUTPUT VIA the kitchen_estimate tool only. Do not write prose outside the tool call.`
 
@@ -286,6 +306,16 @@ export const KITCHEN_TOOL: KitchenToolDef = {
         description:
           'Which walls/sections carry upper cabinets and their lengths.',
       },
+      countertopLm: {
+        type: 'number',
+        description:
+          'Total countertop linear meters. Usually follows base run + island top + any bar overhang or waterfall end.',
+      },
+      countertopReasoning: {
+        type: 'string',
+        description:
+          'Per-wall countertop breakdown, plus any bar/waterfall additions, e.g. "north 6.4 + east 1.4 + island top 1.5 = 9.3 lm".',
+      },
       hasIsland: {
         type: 'boolean',
         description: 'Whether an island or peninsula was detected.',
@@ -311,6 +341,8 @@ export const KITCHEN_TOOL: KitchenToolDef = {
       'baseReasoning',
       'wallLm',
       'wallReasoning',
+      'countertopLm',
+      'countertopReasoning',
       'hasIsland',
       'islandLm',
       'confidence',
