@@ -578,6 +578,179 @@ export function registerBoqRoutes(router: Router): void {
   )
 
   /**
+   * #128 — PATCH a BoqLine. Edits description, qty, rate (cost lines
+   * only), or psAmount (P/S only). The line stays in its section, the
+   * isProvisional flag stays fixed (toggling P/S↔cost is a different
+   * semantic; delete + re-add).
+   *
+   * Adjusts the BOQ.subtotal / totalProvisional by the delta and writes
+   * a Correction row capturing which field changed.
+   */
+  router.patch(
+    '/api/boqs/:id/lines/:lineId',
+    requireAuth(async (req, ctx) => {
+      const db = tenantDb(ctx.organizationId)
+      const boq = await db.boq.findFirst({
+        where: { id: ctx.params.id, deletedAt: null },
+        select: { id: true },
+      })
+      if (!boq) return errorResponse(404, 'BOQ not found')
+      const line = await db.boqLine.findFirst({
+        where: { id: ctx.params.lineId, boqId: boq.id },
+      })
+      if (!line) return errorResponse(404, 'BOQ line not found in this BOQ')
+      let raw: unknown
+      try {
+        raw = await req.json()
+      } catch {
+        return errorResponse(400, 'Invalid JSON body')
+      }
+      const body = z
+        .object({
+          description: z.string().min(1).max(500).optional(),
+          qty: z.number().finite().nonnegative().optional(),
+          rate: z.number().finite().nonnegative().nullable().optional(),
+          psAmount: z.number().finite().nonnegative().nullable().optional(),
+        })
+        .refine(
+          (b) =>
+            b.description !== undefined ||
+            b.qty !== undefined ||
+            b.rate !== undefined ||
+            b.psAmount !== undefined,
+          'At least one of description / qty / rate / psAmount required',
+        )
+        .safeParse(raw)
+      if (!body.success) {
+        return errorResponse(400, 'Invalid payload', body.error.format())
+      }
+
+      // Compute the new field values + the delta vs. the existing row.
+      const oldAmount = line.amount ? Number(line.amount.toString()) : 0
+      const oldPs = line.psAmount ? Number(line.psAmount.toString()) : 0
+
+      const nextQty =
+        body.data.qty !== undefined ? body.data.qty : line.qty ? Number(line.qty.toString()) : 0
+      const nextRate =
+        body.data.rate === null
+          ? null
+          : body.data.rate !== undefined
+          ? body.data.rate
+          : line.rate
+          ? Number(line.rate.toString())
+          : null
+      const nextPs =
+        body.data.psAmount === null
+          ? null
+          : body.data.psAmount !== undefined
+          ? body.data.psAmount
+          : line.psAmount
+          ? Number(line.psAmount.toString())
+          : null
+
+      // Cost lines: amount = qty × rate. P/S lines: amount stays null.
+      const newAmount =
+        line.isProvisional || nextRate === null ? null : nextQty * nextRate
+      const newPs = line.isProvisional ? nextPs : null
+
+      const update: Record<string, unknown> = {}
+      if (body.data.description !== undefined) update.description = body.data.description
+      if (body.data.qty !== undefined) update.qty = body.data.qty
+      if (body.data.rate !== undefined) update.rate = body.data.rate
+      if (body.data.psAmount !== undefined) update.psAmount = body.data.psAmount
+      update.amount = newAmount
+      if (line.isProvisional) update.psAmount = newPs
+
+      const updated = await db.boqLine.update({
+        where: { id: line.id },
+        data: update,
+      })
+
+      // Subtotal / totalProvisional adjustments.
+      const amountDelta = (newAmount ?? 0) - oldAmount
+      const psDelta = (newPs ?? 0) - oldPs
+      if (amountDelta !== 0 || psDelta !== 0) {
+        await db.boq.update({
+          where: { id: boq.id },
+          data: {
+            ...(amountDelta !== 0 ? { subtotal: { increment: amountDelta } } : {}),
+            ...(psDelta !== 0 ? { totalProvisional: { increment: psDelta } } : {}),
+          },
+        })
+      }
+
+      // Audit: record what changed. One Correction per request — the
+      // human-side reason text summarises which fields moved.
+      const changes: string[] = []
+      if (body.data.description !== undefined) changes.push('description')
+      if (body.data.qty !== undefined) changes.push(`qty:${line.qty?.toString() ?? '—'}→${nextQty}`)
+      if (body.data.rate !== undefined) changes.push(`rate:${line.rate?.toString() ?? '—'}→${nextRate ?? '—'}`)
+      if (body.data.psAmount !== undefined) changes.push(`psAmount:${line.psAmount?.toString() ?? '—'}→${newPs ?? '—'}`)
+      await db.correction.create({
+        data: {
+          organizationId: ctx.organizationId,
+          entity: 'BoqLine',
+          entityId: line.id,
+          field: 'EDIT',
+          aiValue: null,
+          humanValue: changes.join(' · '),
+          reason: 'Edit Line from quotation UI',
+          userId: ctx.user.id,
+        },
+      })
+      return jsonResponse({ id: updated.id, itemRef: updated.itemRef })
+    }),
+  )
+
+  /**
+   * #128 — DELETE a BoqLine. Hard delete (no deletedAt column on
+   * BoqLine). Subtract the line's amount + psAmount from the BOQ
+   * totals, write a Correction row capturing the deletion.
+   */
+  router.delete(
+    '/api/boqs/:id/lines/:lineId',
+    requireAuth(async (_req, ctx) => {
+      const db = tenantDb(ctx.organizationId)
+      const boq = await db.boq.findFirst({
+        where: { id: ctx.params.id, deletedAt: null },
+        select: { id: true },
+      })
+      if (!boq) return errorResponse(404, 'BOQ not found')
+      const line = await db.boqLine.findFirst({
+        where: { id: ctx.params.lineId, boqId: boq.id },
+      })
+      if (!line) return errorResponse(404, 'BOQ line not found in this BOQ')
+
+      const oldAmount = line.amount ? Number(line.amount.toString()) : 0
+      const oldPs = line.psAmount ? Number(line.psAmount.toString()) : 0
+
+      await db.boqLine.delete({ where: { id: line.id } })
+      if (oldAmount !== 0 || oldPs !== 0) {
+        await db.boq.update({
+          where: { id: boq.id },
+          data: {
+            ...(oldAmount !== 0 ? { subtotal: { decrement: oldAmount } } : {}),
+            ...(oldPs !== 0 ? { totalProvisional: { decrement: oldPs } } : {}),
+          },
+        })
+      }
+      await db.correction.create({
+        data: {
+          organizationId: ctx.organizationId,
+          entity: 'BoqLine',
+          entityId: line.id,
+          field: 'DELETE',
+          aiValue: line.description,
+          humanValue: `deleted (itemRef=${line.itemRef}, amount=${oldAmount}, psAmount=${oldPs})`,
+          reason: 'Delete Line from quotation UI',
+          userId: ctx.user.id,
+        },
+      })
+      return jsonResponse({ ok: true, deletedId: line.id })
+    }),
+  )
+
+  /**
    * AI-est roadmap #3 — opt-in ESTIMATE_KITCHEN job. Triggered ONLY by
    * the SPA "Estimate kitchen" button; no automatic chain, no cold-
    * upload billing. Costs ~1.5-2k tokens per click; the suggestions

@@ -267,6 +267,91 @@ export async function addProvisionalBoqLine(
 }
 
 /**
+ * #128 — Edit an existing provisional BOQ line. Pass only the fields
+ * you want to change. The server adjusts BOQ subtotals by the delta
+ * and writes a Correction row.
+ */
+export interface PatchBoqLinePayload {
+  description?: string
+  qty?: number
+  rate?: number | null
+  psAmount?: number | null
+}
+
+export async function patchBoqLine(
+  boqId: string,
+  lineId: string,
+  payload: PatchBoqLinePayload,
+): Promise<void> {
+  await withAuth(`/api/boqs/${boqId}/lines/${lineId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  })
+}
+
+/**
+ * #128 — Delete a BOQ line (hard delete; the BoqLine model has no
+ * deletedAt). Server subtracts the line's amount + psAmount from the
+ * BOQ totals and writes a Correction row.
+ */
+export async function deleteBoqLine(boqId: string, lineId: string): Promise<void> {
+  await withAuth(`/api/boqs/${boqId}/lines/${lineId}`, { method: 'DELETE' })
+}
+
+/**
+ * #128 — Lightweight DTO of the existing P/S lines in section 4.0 (and
+ * any other section). The AddProvisionalLineCard renders a list of
+ * these so the estimator can edit + delete what they previously added.
+ */
+export interface ExistingProvisionalLine {
+  id: string
+  itemRef: string
+  description: string
+  unit: string
+  qty: number
+  psAmount: number
+  sectionId: string
+  sectionCode: string
+}
+
+interface BoqDetail {
+  sections: Array<{
+    id: string
+    code: string
+    lines: Array<{
+      id: string
+      itemRef: string
+      description: string
+      unit: string
+      qty: string | null
+      psAmount: string | null
+      isProvisional: boolean
+    }>
+  }>
+}
+
+export async function fetchProvisionalLines(boqId: string): Promise<ExistingProvisionalLine[]> {
+  const boq = await withAuth<BoqDetail>(`/api/boqs/${boqId}`, { method: 'GET' })
+  const out: ExistingProvisionalLine[] = []
+  for (const s of boq.sections) {
+    for (const l of s.lines) {
+      if (!l.isProvisional) continue
+      out.push({
+        id: l.id,
+        itemRef: l.itemRef,
+        description: l.description,
+        unit: l.unit,
+        qty: l.qty ? Number.parseFloat(l.qty) : 0,
+        psAmount: l.psAmount ? Number.parseFloat(l.psAmount) : 0,
+        sectionId: s.id,
+        sectionCode: s.code,
+      })
+    }
+  }
+  return out
+}
+
+/**
  * Sprint-8 S8-7 — owner-runnable BOQ flow from the SPA.
  *
  *   1. quantify  — derives FLOOR/WALL/CEILING totals from rooms+legend
