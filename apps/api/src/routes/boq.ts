@@ -577,6 +577,33 @@ export function registerBoqRoutes(router: Router): void {
     }),
   )
 
+  /**
+   * AI-est roadmap #3 — opt-in ESTIMATE_KITCHEN job. Triggered ONLY by
+   * the SPA "Estimate kitchen" button; no automatic chain, no cold-
+   * upload billing. Costs ~1.5-2k tokens per click; the suggestions
+   * land in JOINERY for the expert to Confirm.
+   */
+  router.post(
+    '/api/projects/:id/estimate-kitchen',
+    requireAuth(async (_req, ctx) => {
+      const db = tenantDb(ctx.organizationId)
+      const project = await db.project.findFirst({
+        where: { id: ctx.params.id, deletedAt: null },
+        select: { id: true },
+      })
+      if (!project) return errorResponse(404, 'Project not found')
+      const job = await db.job.create({
+        data: {
+          organizationId: ctx.organizationId,
+          projectId: project.id,
+          type: 'ESTIMATE_KITCHEN',
+          payload: { projectId: project.id } as object,
+        },
+      })
+      return jsonResponse({ jobId: job.id }, 202)
+    }),
+  )
+
   /** Enqueue a QUANTIFY job. Stops short of automatic chain — user-triggered. */
   router.post(
     '/api/projects/:id/quantify',

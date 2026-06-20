@@ -15,6 +15,7 @@ import { useTranslation } from 'react-i18next'
 import { useParams } from 'react-router'
 import { DocumentsListCard } from '../components/DocumentsListCard'
 import { EnvBanner } from '../components/EnvBanner'
+import { EstimateKitchenCard } from '../components/EstimateKitchenCard'
 import { GenerateBoqCard } from '../components/GenerateBoqCard'
 import { TakeoffTable } from '../components/TakeoffTable'
 import { PipelineStatus } from '../components/PipelineStatus'
@@ -117,6 +118,14 @@ export function TakeoffPage() {
         // OR an existing takeoff (a previous run's data carries through
         // even if the doc selection is stale). The card itself shows the
         // existing-BOQ download path so this is the right gate.
+        ready={
+          docBundle.data?.document.status === 'READY' ||
+          (takeoff.data?.items.length ?? 0) > 0
+        }
+      />
+
+      <EstimateKitchenCard
+        projectId={projectId}
         ready={
           docBundle.data?.document.status === 'READY' ||
           (takeoff.data?.items.length ?? 0) > 0

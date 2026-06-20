@@ -281,6 +281,15 @@ export async function startQuantify(projectId: string): Promise<QuantifyResult> 
   return withAuth<QuantifyResult>(`/api/projects/${projectId}/quantify`, { method: 'POST' })
 }
 
+/**
+ * AI-est roadmap #3 — opt-in kitchen estimate. Costs ~$0.01 per click.
+ * Returns the jobId; caller polls fetchJob until DONE, then invalidates
+ * the takeoff bundle to surface the new ESTIMATED rows in JOINERY.
+ */
+export async function startEstimateKitchen(projectId: string): Promise<QuantifyResult> {
+  return withAuth<QuantifyResult>(`/api/projects/${projectId}/estimate-kitchen`, { method: 'POST' })
+}
+
 export interface BoqCreateResult {
   id: string
   version: number

@@ -41,6 +41,59 @@ function decodeXmlEntities(s: string): string {
 const WORD_RE =
   /<word\s+xMin="([\d.]+)"\s+yMin="([\d.]+)"\s+xMax="([\d.]+)"\s+yMax="([\d.]+)">(.*?)<\/word>/g
 
+/**
+ * Read the page width + height (in points) from the `<page width="..."
+ * height="...">` element pdftotext -bbox-layout emits. Used by the
+ * kitchen-crop renderer to translate the bbox computation into pixel
+ * coordinates pdftoppm understands.
+ */
+const PAGE_DIM_RE = /<page\s+width="([\d.]+)"\s+height="([\d.]+)"/
+
+export async function renderPageBboxWithDims(
+  sourceBytes: Buffer,
+  pageNo: number,
+): Promise<{ words: BboxWord[]; pageWidthPt: number; pageHeightPt: number }> {
+  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), `bbox-${pageNo}-`))
+  try {
+    const src = path.join(workDir, 'source.pdf')
+    const out = path.join(workDir, `bbox-${pageNo}.html`)
+    await fs.writeFile(src, sourceBytes)
+    const res = await spawn([
+      'pdftotext',
+      '-bbox-layout',
+      '-f',
+      String(pageNo),
+      '-l',
+      String(pageNo),
+      src,
+      out,
+    ])
+    if (res.exitCode !== 0) {
+      throw new Error(`pdftotext -bbox-layout failed: ${res.stderr}`)
+    }
+    const html = await fs.readFile(out, 'utf-8')
+    const dim = PAGE_DIM_RE.exec(html)
+    const pageWidthPt = dim ? Number.parseFloat(dim[1]!) : 0
+    const pageHeightPt = dim ? Number.parseFloat(dim[2]!) : 0
+    const words: BboxWord[] = []
+    WORD_RE.lastIndex = 0
+    let match: RegExpExecArray | null
+    while ((match = WORD_RE.exec(html)) !== null) {
+      const [, xMin, yMin, xMax, yMax, raw] = match
+      words.push({
+        text: decodeXmlEntities(raw ?? ''),
+        xMin: Number.parseFloat(xMin!),
+        yMin: Number.parseFloat(yMin!),
+        xMax: Number.parseFloat(xMax!),
+        yMax: Number.parseFloat(yMax!),
+      })
+    }
+    return { words, pageWidthPt, pageHeightPt }
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true }).catch(() => undefined)
+  }
+}
+
 export async function renderPageBbox(
   sourceBytes: Buffer,
   pageNo: number,
