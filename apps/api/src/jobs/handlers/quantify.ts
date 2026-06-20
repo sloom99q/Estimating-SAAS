@@ -40,6 +40,7 @@
 import type { Prisma, TakeoffBasis, TakeoffCategory } from '@prisma/client'
 import { prisma } from '../../db'
 import { estimateSkirtingPerimeter, shouldSkirtRoom } from '../../ai/estimateSkirting'
+import { estimateVanityForRoom } from '../../ai/estimateVanity'
 import type { JobHandler, JobRecord } from '../types'
 import { isAreaStatement, selectBillableRooms } from './_roomSelector'
 import { upsertValidationFlag } from '../validationFlagUpsert'
@@ -67,6 +68,12 @@ interface DerivedSummary {
    * Stays out of the BOQ until the reviewer Confirms each line.
    */
   skirting: { suggested: number; skipped: number; totalLm: string }
+  /**
+   * AI-est roadmap #2 — per-bathroom VANITY suggestions. 1 per bathroom
+   * (95% prior). status='AI', basis='ESTIMATED'. Reviewer overrides
+   * qtyFinal for double-vanity master baths before Confirming.
+   */
+  vanity: { suggested: number; skipped: number; totalCount: number }
   wallFeatures: Array<{ code: string; description: string }>
   excludedRooms: string[]
 }
@@ -142,6 +149,7 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
     ceilingGroups: [],
     screed: { emitted: false, totalAreaM2: '0', excludedCodes: [] },
     skirting: { suggested: 0, skipped: 0, totalLm: '0' },
+    vanity: { suggested: 0, skipped: 0, totalCount: 0 },
     staircase: { emitted: false, lm: null },
     wallFeatures: [],
     excludedRooms: [],
@@ -517,6 +525,59 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
     totalLm: skirtingTotalLm.toFixed(2),
   }
 
+  // --- VANITY suggestions (AI-est roadmap #2) -------------------------
+  // ONE stone-top vanity (3400 AED/No) per bathroom. Strong prior: 95%
+  // confidence when both finish=BATHROOM and the name matches the
+  // bathroom pattern, 80% on a single signal. Reviewer overrides
+  // qtyFinal inline for double-vanity master baths before Confirming.
+  // Zero AI tokens — pure deterministic rule on data we already have.
+  let vanitySuggested = 0
+  let vanitySkipped = 0
+  let vanityTotalCount = 0
+  for (const room of rooms) {
+    const meta = (room.meta ?? {}) as Record<string, unknown>
+    const finishCode = typeof meta.finish_code === 'string' ? meta.finish_code : null
+    const name = room.description.split('—')[0]!.trim()
+    const estimate = estimateVanityForRoom(name, finishCode)
+    if (!estimate) {
+      vanitySkipped += 1
+      continue
+    }
+    vanitySuggested += 1
+    vanityTotalCount += estimate.count
+    const tag = `VAN-${room.id.slice(-8)}`
+    emittedDerivedTags.add(tag)
+    await upsertDerived({
+      organizationId: job.organizationId,
+      projectId: payload.projectId,
+      category: 'JOINERY',
+      tag,
+      description: `Vanity (stone-top) — ${name}`,
+      unit: 'No',
+      qty: estimate.count,
+      basis: 'ESTIMATED',
+      confidence: estimate.confidence,
+      sourceNote: estimate.reasoning,
+      meta: {
+        derivedKey: `vanity:${room.id}`,
+        roomId: room.id,
+        roomName: name,
+        floorFinishCode: finishCode,
+        estimationSource: '1-per-bathroom-prior',
+        estimationReasoning: estimate.reasoning,
+        signals: estimate.signals,
+        rateHint: 'VANITY',
+      },
+      summary,
+      status: 'AI',
+    })
+  }
+  summary.vanity = {
+    suggested: vanitySuggested,
+    skipped: vanitySkipped,
+    totalCount: vanityTotalCount,
+  }
+
   // PF-3 housekeeping — soft-delete any derived FF-*/CL-*/WF-* rows that
   // were emitted by a PRIOR quantify run but no longer correspond to a
   // bucket this run. Without this, BOQ generation picks up the stale
@@ -533,6 +594,7 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
         { tag: { startsWith: 'CL-' } },
         { tag: { startsWith: 'WF-' } },
         { tag: { startsWith: 'SK-' } },
+        { tag: { startsWith: 'VAN-' } },
       ],
       // Sweep only AI-still rows: a reviewer-promoted SKIRTING line
       // (EDITED/APPROVED) must NEVER be soft-deleted by a re-run.

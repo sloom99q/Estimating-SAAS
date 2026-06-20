@@ -78,6 +78,14 @@ function rateCodeFor(line: { description: string; unit: string; tag?: string | n
       // Future: branch per floorFinishCode if separate skirting rates
       // get seeded (skirting matches the floor finish in practice).
       return 'SKIRT-PR01'
+    case 'JOINERY': {
+      // AI-est roadmap #2 — VANITY count routes to the VANITY rate
+      // (3400 AED/No, stone-top vanity). Tag-keyed so future joinery
+      // additions (kitchen base / wall lm, wardrobes) plug in alongside
+      // without affecting the vanity routing.
+      if (tag.startsWith('VAN-')) return 'VANITY'
+      return null // KIT-BASE / KIT-WALL / WARDROBE land here when added
+    }
     case 'DOOR': {
       // §8 has three door rates; pick by visible dimensions in the description.
       if (desc.includes('1000') && desc.includes('3000')) return 'DOOR-1000x3000-FN01'
