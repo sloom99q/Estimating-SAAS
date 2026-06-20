@@ -395,7 +395,10 @@ export async function estimateKitchen(
     })
   }
   const res = await callMessages({
-    model: config.anthropicModels.vision,
+    // Per-stage model toggle (2026-06-20 expert call after the Sonnet-vs-
+    // Opus A/B). Geometric reasoning categories use Opus by default; can
+    // be overridden via ANTHROPIC_MODEL_KITCHEN.
+    model: config.anthropicModels.kitchen,
     max_tokens: 1024,
     temperature: 0,
     system: KITCHEN_SYSTEM_PROMPT,

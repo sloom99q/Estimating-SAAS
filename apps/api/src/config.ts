@@ -112,10 +112,35 @@ export const config = {
    * schedule sheets and the legend pass; DEFAULT is the fallback for
    * anything that hasn't been routed yet. Each falls back to
    * `anthropicModel` when its specific env is unset.
+   *
+   * Sonnet-vs-Opus A/B (2026-06-20, run-6 BOH KITCHEN + CORRIDOR finish):
+   * Opus showed meaningfully better STRUCTURAL reasoning on the kitchen
+   * task (recognised L-shape vs U, excluded ramp/skylight zone) but
+   * Sonnet was already adequate on the finish task when given a focused
+   * crop. Cost ratio Opus:Sonnet ≈ 5.5×. Per-stage overrides for the
+   * estimators where geometric reasoning is the bottleneck: KITCHEN +
+   * the upcoming JOINERY / WARDROBES default to claude-opus-4-7. Each
+   * stage still falls back to ANTHROPIC_MODEL_VISION if explicitly set,
+   * keeping the env-driven override path intact for QA.
    */
   anthropicModels: {
     classify: process.env.ANTHROPIC_MODEL_CLASSIFY ?? process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6',
     vision: process.env.ANTHROPIC_MODEL_VISION ?? process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6',
+    kitchen:
+      process.env.ANTHROPIC_MODEL_KITCHEN ??
+      process.env.ANTHROPIC_MODEL_VISION ??
+      process.env.ANTHROPIC_MODEL ??
+      'claude-opus-4-7',
+    joinery:
+      process.env.ANTHROPIC_MODEL_JOINERY ??
+      process.env.ANTHROPIC_MODEL_VISION ??
+      process.env.ANTHROPIC_MODEL ??
+      'claude-opus-4-7',
+    wardrobes:
+      process.env.ANTHROPIC_MODEL_WARDROBES ??
+      process.env.ANTHROPIC_MODEL_VISION ??
+      process.env.ANTHROPIC_MODEL ??
+      'claude-opus-4-7',
     default: process.env.ANTHROPIC_MODEL_DEFAULT ?? process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6',
   },
   aiMode,

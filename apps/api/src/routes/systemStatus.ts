@@ -46,7 +46,8 @@ export function registerSystemStatusRoutes(router: Router): void {
       const disk = await readDiskAiMode()
       const restartRequired = disk !== null && disk !== booted
       const m = config.anthropicModels
-      const modelsAllSame = m.classify === m.vision && m.vision === m.default
+      const stageValues = Object.values(m)
+      const modelsAllSame = stageValues.every((v) => v === stageValues[0])
       return jsonResponse({
         bootedAiMode: booted,
         diskAiMode: disk,
