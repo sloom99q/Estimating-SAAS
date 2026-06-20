@@ -11,7 +11,7 @@ import {
   type UploadDocumentResult,
 } from './takeoff.api'
 
-const TAKEOFF_KEYS = {
+export const TAKEOFF_KEYS = {
   project: (projectId: string) => ['takeoff', 'project', projectId] as const,
   document: (documentId: string) => ['takeoff', 'document', documentId] as const,
 }

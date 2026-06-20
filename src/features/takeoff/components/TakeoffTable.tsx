@@ -264,6 +264,12 @@ export function TakeoffTable({ projectId, bundle, needsReviewOnly }: TakeoffTabl
   const visibleItems = useMemo(() => {
     if (!needsReviewOnly) return bundle.items
     return bundle.items.filter((item) => {
+      // AI-estimation engine: an ESTIMATED row that's still at status=AI
+      // ALWAYS needs review — that's the whole point of "Confirm in the
+      // verify UI". Don't gate it by confidence, because high-confidence
+      // vanities (95) need just as much expert sign-off as low-confidence
+      // ones (80). Once confirmed (status=EDITED/APPROVED), it drops out.
+      if (item.basis === 'ESTIMATED' && item.status === 'AI') return true
       if (item.confidence < NEEDS_REVIEW_CONFIDENCE) return true
       const itemFlags = bundle.flagsByItem[item.id] ?? []
       return itemFlags.some((f) => !f.resolved)

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Alert, Badge, Button, Card, Group, List, Stack, Text } from '@mantine/core'
 import { notifications } from '@mantine/notifications'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { HttpError } from '@/shared/lib/http/client'
 import {
   downloadBoqXlsx,
@@ -12,6 +12,7 @@ import {
   startQuantify,
   type BoqCreateResult,
 } from '../api/takeoff.api'
+import { TAKEOFF_KEYS } from '../api/useTakeoff'
 import { AddProvisionalLineCard } from './AddProvisionalLineCard'
 
 interface DuplicateTakeoffDetails {
@@ -46,6 +47,7 @@ async function waitForJobDone(jobId: string, pollMs = 1_000, maxTries = 240): Pr
 }
 
 export function GenerateBoqCard({ projectId, ready }: { projectId: string; ready: boolean }) {
+  const qc = useQueryClient()
   const [phase, setPhase] = useState<Phase>('idle')
   const [error, setError] = useState<string | null>(null)
   const [duplicates, setDuplicates] = useState<DuplicateTakeoffDetails | null>(null)
@@ -86,12 +88,20 @@ export function GenerateBoqCard({ projectId, ready }: { projectId: string; ready
       setPhase('quantifying')
       const { jobId: quantJob } = await startQuantify(projectId)
       await waitForJobDone(quantJob)
+      // QUANTIFY emits new SKIRTING / JOINERY (vanity) suggestions —
+      // the takeoff bundle's cached list is now stale. Invalidate it
+      // here so the review table picks up the new ESTIMATED rows the
+      // moment QUANTIFY finishes (not after the BOQ + price steps).
+      await qc.invalidateQueries({ queryKey: TAKEOFF_KEYS.project(projectId) })
       setPhase('building')
       const boqResult = await generateBoq(projectId)
       setBoq(boqResult)
       setPhase('pricing')
       const { jobId: priceJob } = await priceBoq(boqResult.id)
       await waitForJobDone(priceJob)
+      // Final invalidation — covers any qty changes the PRICE waterfall
+      // may have written back (none today, but cheap insurance).
+      await qc.invalidateQueries({ queryKey: TAKEOFF_KEYS.project(projectId) })
       setPhase('ready')
     } catch (err) {
       if (err instanceof HttpError && err.status === 409) {
