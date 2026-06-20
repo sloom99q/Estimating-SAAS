@@ -356,8 +356,18 @@ export function TakeoffTable({ projectId, bundle, needsReviewOnly }: TakeoffTabl
                 }
                 const reasoningLine = isEstimated ? meta.estimationReasoning ?? null : null
                 const confirmed = isEstimated && item.status !== 'AI'
+                // Expert call 2026-06-20: row background must make
+                // ESTIMATED status unmistakable. Green confidence chips
+                // were being read as "confirmed" — at-a-glance row tint
+                // removes that confusion. AI = warm yellow tint = work
+                // pending; EDITED/APPROVED = subtle green = done.
+                const rowStyle = !isEstimated
+                  ? undefined
+                  : confirmed
+                  ? { background: 'rgba(64, 192, 87, 0.06)' }
+                  : { background: 'rgba(250, 176, 5, 0.08)' }
                 return (
-                  <Table.Tr key={item.id}>
+                  <Table.Tr key={item.id} style={rowStyle}>
                     <Table.Td>
                       <Text size="sm">{item.tag ?? t('table.groupNoTag')}</Text>
                     </Table.Td>
@@ -399,14 +409,14 @@ export function TakeoffTable({ projectId, bundle, needsReviewOnly }: TakeoffTabl
                     <Table.Td>
                       {isEstimated ? (
                         confirmed ? (
-                          <Badge color="green" variant="filled" size="xs">
-                            ✓ confirmed
+                          <Badge color="green" variant="filled" size="sm" radius="sm">
+                            ✓ CONFIRMED
                           </Badge>
                         ) : (
                           <Button
                             size="xs"
-                            variant="light"
-                            color="blue"
+                            variant="filled"
+                            color="yellow"
                             loading={saving}
                             disabled={saving}
                             onClick={() => {
@@ -421,7 +431,7 @@ export function TakeoffTable({ projectId, bundle, needsReviewOnly }: TakeoffTabl
                               )
                             }}
                           >
-                            Confirm
+                            Confirm pending
                           </Button>
                         )
                       ) : flags.length === 0 ? (

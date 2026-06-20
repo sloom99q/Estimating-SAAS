@@ -120,6 +120,13 @@ const ROOM_NAME_CANONICALIZATIONS: Array<{ re: RegExp; to: string }> = [
   // so "MASTER BATH ROOM" goes BATH ROOM → BATHROOM → BATH and lands
   // alongside "MASTER BATH" (plan-side label).
   { re: /\bBATHROOM\b/g, to: 'BATH' },
+  // Expert call 2026-06-20: BOH KITCHEN ↔ KITCHEN are the same physical
+  // room on residential villa plans (one plan calls it "BOH KITCHEN",
+  // another just "Kitchen"). Larger commercial spaces may have separate
+  // BOH + show kitchens; if a project breaks the assumption the expert
+  // sees one collapsed row and manually splits. Same call as the
+  // MASTER BATH = MASTER BATHROOM collapse.
+  { re: /\bBOH\s+KITCHEN\b/g, to: 'KITCHEN' },
 ]
 
 /**
