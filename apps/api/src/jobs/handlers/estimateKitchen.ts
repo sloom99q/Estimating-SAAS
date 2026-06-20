@@ -232,8 +232,10 @@ export const estimateKitchenHandler: JobHandler = async (job: JobRecord) => {
 
     const baseTag = `KB-${k.roomId.slice(-8)}`
     const wallTag = `KW-${k.roomId.slice(-8)}`
+    const counterTag = `KC-${k.roomId.slice(-8)}`
     const baseReasoning = composeKitchenReasoning('base', est)
     const wallReasoning = composeKitchenReasoning('wall', est)
+    const counterReasoning = composeKitchenReasoning('counter', est)
     const sharedMeta = {
       roomId: k.roomId,
       roomName: k.roomName,
@@ -270,6 +272,23 @@ export const estimateKitchenHandler: JobHandler = async (job: JobRecord) => {
       reasoning: wallReasoning,
       meta: { ...sharedMeta, kind: 'wall', rateHint: 'KIT-WALL', estimationReasoning: wallReasoning },
     })
+    // AI-est roadmap #4b — COUNTERTOP row. Folded into the same Opus
+    // call as base/wall above (no extra token cost). Rate stays NULL —
+    // expert types the per-lm cost since stone-top pricing varies a lot
+    // (600-1500 AED/lm depending on stone). PRICE waterfall returns
+    // null → isProvisional=true → enters BOQ as P/S with the lm count.
+    if (est.countertopLm > 0) {
+      await upsertKitchenItem({
+        organizationId: job.organizationId,
+        projectId: payload.projectId,
+        tag: counterTag,
+        description: `Kitchen countertop — ${k.roomName}`,
+        qtyLm: est.countertopLm,
+        confidence: est.confidence,
+        reasoning: counterReasoning,
+        meta: { ...sharedMeta, kind: 'counter', rateHint: 'KIT-COUNTER', estimationReasoning: counterReasoning },
+      })
+    }
 
     results.push({
       roomId: k.roomId,

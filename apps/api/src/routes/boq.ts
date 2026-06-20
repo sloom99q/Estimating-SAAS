@@ -756,6 +756,32 @@ export function registerBoqRoutes(router: Router): void {
    * upload billing. Costs ~1.5-2k tokens per click; the suggestions
    * land in JOINERY for the expert to Confirm.
    */
+  /**
+   * AI-est roadmap #4a — opt-in ESTIMATE_WARDROBES job. One Opus call
+   * per bedroom; cost scales with bedroom count (~$0.05 each). Same
+   * suggestion-only contract as kitchen.
+   */
+  router.post(
+    '/api/projects/:id/estimate-wardrobes',
+    requireAuth(async (_req, ctx) => {
+      const db = tenantDb(ctx.organizationId)
+      const project = await db.project.findFirst({
+        where: { id: ctx.params.id, deletedAt: null },
+        select: { id: true },
+      })
+      if (!project) return errorResponse(404, 'Project not found')
+      const job = await db.job.create({
+        data: {
+          organizationId: ctx.organizationId,
+          projectId: project.id,
+          type: 'ESTIMATE_WARDROBES',
+          payload: { projectId: project.id } as object,
+        },
+      })
+      return jsonResponse({ jobId: job.id }, 202)
+    }),
+  )
+
   router.post(
     '/api/projects/:id/estimate-kitchen',
     requireAuth(async (_req, ctx) => {

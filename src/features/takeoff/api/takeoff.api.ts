@@ -375,6 +375,15 @@ export async function startEstimateKitchen(projectId: string): Promise<QuantifyR
   return withAuth<QuantifyResult>(`/api/projects/${projectId}/estimate-kitchen`, { method: 'POST' })
 }
 
+/**
+ * AI-est roadmap #4a — opt-in wardrobes per bedroom. Cost scales with
+ * bedroom count: ~$0.05 per bedroom on Opus. Same suggestion-only
+ * contract as kitchen — rows land in JOINERY for the expert to Confirm.
+ */
+export async function startEstimateWardrobes(projectId: string): Promise<QuantifyResult> {
+  return withAuth<QuantifyResult>(`/api/projects/${projectId}/estimate-wardrobes`, { method: 'POST' })
+}
+
 export interface BoqCreateResult {
   id: string
   version: number

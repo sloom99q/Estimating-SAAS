@@ -16,6 +16,7 @@ import { useParams } from 'react-router'
 import { DocumentsListCard } from '../components/DocumentsListCard'
 import { EnvBanner } from '../components/EnvBanner'
 import { EstimateKitchenCard } from '../components/EstimateKitchenCard'
+import { EstimateWardrobesCard } from '../components/EstimateWardrobesCard'
 import { GenerateBoqCard } from '../components/GenerateBoqCard'
 import { TakeoffTable } from '../components/TakeoffTable'
 import { PipelineStatus } from '../components/PipelineStatus'
@@ -125,6 +126,14 @@ export function TakeoffPage() {
       />
 
       <EstimateKitchenCard
+        projectId={projectId}
+        ready={
+          docBundle.data?.document.status === 'READY' ||
+          (takeoff.data?.items.length ?? 0) > 0
+        }
+      />
+
+      <EstimateWardrobesCard
         projectId={projectId}
         ready={
           docBundle.data?.document.status === 'READY' ||

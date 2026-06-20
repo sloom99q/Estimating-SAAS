@@ -87,7 +87,14 @@ function rateCodeFor(line: { description: string; unit: string; tag?: string | n
       //   KW-<roomId> → KIT-WALL  (1100 AED/lm, HPL wall unit)
       if (tag.startsWith('KB-')) return 'KIT-BASE'
       if (tag.startsWith('KW-')) return 'KIT-WALL'
-      return null // WARDROBE et al. land here when seeded
+      // AI-est roadmap #4 — countertop + wardrobes. Per expert call
+      // (2026-06-20): NO GUESSED JOINERY PRICES. Both return null so
+      // PRICE marks the line isProvisional=true; the line enters the
+      // BOQ as P/S with the measured lm count, and the expert types
+      // the per-lm rate at quote time.
+      if (tag.startsWith('KC-')) return null // countertop — expert prices
+      if (tag.startsWith('WD-')) return null // built-in wardrobes — expert prices
+      return null
     }
     case 'DOOR': {
       // §8 has three door rates; pick by visible dimensions in the description.
