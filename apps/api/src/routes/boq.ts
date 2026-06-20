@@ -707,7 +707,7 @@ export function registerBoqRoutes(router: Router): void {
    * BoqLine). Subtract the line's amount + psAmount from the BOQ
    * totals, write a Correction row capturing the deletion.
    */
-  router.delete(
+  router.del(
     '/api/boqs/:id/lines/:lineId',
     requireAuth(async (_req, ctx) => {
       const db = tenantDb(ctx.organizationId)
