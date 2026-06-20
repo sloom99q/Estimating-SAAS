@@ -222,6 +222,51 @@ export async function acceptFinishSuggestions(
 }
 
 /**
+ * Roadmap #5 — estimator-side provisional-sum carry. Posts to the
+ * existing PB-1 add-line endpoint with isProvisional=true + psAmount.
+ * The new BOQ now always carries Section 4.0 Provisional Sums (empty
+ * by default) so this endpoint always has a section to write into.
+ */
+export interface BoqSectionSummary {
+  id: string
+  code: string
+  title: string
+}
+
+export interface AddProvisionalLinePayload {
+  description: string
+  unit: string
+  qty: number
+  psAmount: number
+  brand?: string
+}
+
+export async function fetchBoqSections(boqId: string): Promise<BoqSectionSummary[]> {
+  const boq = await withAuth<{
+    sections: Array<{ id: string; code: string; title: string }>
+  }>(`/api/boqs/${boqId}`, { method: 'GET' })
+  return boq.sections.map((s) => ({ id: s.id, code: s.code, title: s.title }))
+}
+
+export async function addProvisionalBoqLine(
+  boqId: string,
+  sectionId: string,
+  payload: AddProvisionalLinePayload,
+): Promise<void> {
+  await withAuth(`/api/boqs/${boqId}/sections/${sectionId}/lines`, {
+    method: 'POST',
+    body: JSON.stringify({
+      description: payload.description,
+      brand: payload.brand,
+      unit: payload.unit,
+      qty: payload.qty,
+      isProvisional: true,
+      psAmount: payload.psAmount,
+    }),
+  })
+}
+
+/**
  * Sprint-8 S8-7 — owner-runnable BOQ flow from the SPA.
  *
  *   1. quantify  — derives FLOOR/WALL/CEILING totals from rooms+legend

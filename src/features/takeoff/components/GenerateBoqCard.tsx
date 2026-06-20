@@ -12,6 +12,7 @@ import {
   startQuantify,
   type BoqCreateResult,
 } from '../api/takeoff.api'
+import { AddProvisionalLineCard } from './AddProvisionalLineCard'
 
 interface DuplicateTakeoffDetails {
   kind: 'duplicate_takeoff_rows'
@@ -218,6 +219,9 @@ export function GenerateBoqCard({ projectId, ready }: { projectId: string; ready
           <Text size="sm" c="red">
             {error}
           </Text>
+        ) : null}
+        {boq && phase === 'ready' ? (
+          <AddProvisionalLineCard boqId={boq.id} projectId={projectId} />
         ) : null}
       </Stack>
     </Card>

@@ -259,6 +259,16 @@ export function registerBoqRoutes(router: Router): void {
         )
       }
 
+      // Roadmap #5 — Section 4.0 Provisional Sums always present, even
+      // empty, so the SPA's "Add provisional line" button has a section
+      // to write into. The estimator carries windows / lighting /
+      // cladding / facade / MEP here (architect-side line items the
+      // drawing doesn't measure). Empty section is harmless: it renders
+      // with zero lines until the user adds something.
+      if (!sectionBuckets.has('4.0')) {
+        sectionBuckets.set('4.0', [] as typeof items)
+      }
+
       // Next version for this project.
       const latest = await db.boq.findFirst({
         where: { projectId, deletedAt: null },

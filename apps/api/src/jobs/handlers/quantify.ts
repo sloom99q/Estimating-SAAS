@@ -54,6 +54,13 @@ interface DerivedSummary {
   floorGroups: Array<{ finishCode: string; rooms: number; totalAreaM2: string }>
   ceilingGroups: Array<{ code: string; rooms: number; totalAreaM2: string }>
   staircase: { emitted: boolean; lm: number | null }
+  /**
+   * Roadmap #1 — single SCREED-FLR line covering all interior floor area.
+   * Excluded: ST03 (external pavement, no screed under), staircase rooms
+   * (separate stair emission path), and the unassigned bucket (might be
+   * external — reviewer decides).
+   */
+  screed: { emitted: boolean; totalAreaM2: string; excludedCodes: string[] }
   wallFeatures: Array<{ code: string; description: string }>
   excludedRooms: string[]
 }
@@ -127,6 +134,7 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
     flagsRaised: 0,
     floorGroups: [],
     ceilingGroups: [],
+    screed: { emitted: false, totalAreaM2: '0', excludedCodes: [] },
     staircase: { emitted: false, lm: null },
     wallFeatures: [],
     excludedRooms: [],
@@ -244,6 +252,54 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
       rooms: bucket.rooms.length,
       totalAreaM2: bucket.totalArea.toFixed(2),
     })
+  }
+
+  // --- Screed (one line under all interior floors) ---------------------
+  // Every interior floor finish (porcelain, marble, bathroom) sits on a
+  // sand-cement screed bed at SCREED-FLR (90 AED/m²). Sum the per-code
+  // buckets, exclude external (ST03) which sits on a concrete slab with
+  // no screed, exclude the unassigned bucket (reviewer hasn't decided
+  // internal vs external). Staircase rooms aren't in floorGroups to
+  // begin with (skipped earlier by isStaircaseRoom).
+  const SCREED_EXCLUDED_FINISH_CODES = new Set(['ST03', 'unassigned'])
+  let screedArea = 0
+  const screedExcluded: string[] = []
+  for (const [finishCode, bucket] of floorGroups) {
+    if (SCREED_EXCLUDED_FINISH_CODES.has(finishCode)) {
+      screedExcluded.push(finishCode)
+      continue
+    }
+    screedArea += bucket.totalArea
+  }
+  if (screedArea > 0) {
+    const includedCodes = Array.from(floorGroups.keys()).filter(
+      (c) => !SCREED_EXCLUDED_FINISH_CODES.has(c),
+    )
+    emittedDerivedTags.add('SCREED-FLR')
+    await upsertDerived({
+      organizationId: job.organizationId,
+      projectId: payload.projectId,
+      category: 'SCREED',
+      tag: 'SCREED-FLR',
+      description: `Sand-cement screed under interior floor finishes (${includedCodes.join(', ')})`,
+      unit: 'm²',
+      qty: screedArea,
+      basis: 'DERIVED',
+      confidence: 85,
+      sourceNote: `Σ interior floor area = ${screedArea.toFixed(2)} m² across finish codes [${includedCodes.join(', ')}]. Excluded: ${screedExcluded.length > 0 ? screedExcluded.join(', ') : '∅'} (ST03 external pavement = no screed; unassigned = reviewer decides).`,
+      meta: {
+        derivedKey: 'screed:floor',
+        includedFinishCodes: includedCodes,
+        excludedFinishCodes: screedExcluded,
+        totalAreaM2: screedArea,
+      },
+      summary,
+    })
+    summary.screed = {
+      emitted: true,
+      totalAreaM2: screedArea.toFixed(2),
+      excludedCodes: screedExcluded,
+    }
   }
 
   // --- Ceilings (name-rule split, excludes balconies/terraces/garages) -
