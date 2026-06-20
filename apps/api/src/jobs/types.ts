@@ -17,6 +17,8 @@ export const JOB_TYPES = [
   'EXTRACT_SCHEDULES',
   'EXTRACT_ROOMS',
   'QUANTIFY',
+  /** AI-est roadmap #3 — opt-in vision pass for kitchen base/wall lm. */
+  'ESTIMATE_KITCHEN',
   'VALIDATE',
   'PRICE',
   'EXPORT_XLSX',

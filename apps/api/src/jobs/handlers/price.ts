@@ -73,6 +73,22 @@ function rateCodeFor(line: { description: string; unit: string; tag?: string | n
     }
     case 'SCREED':
       return 'SCREED-FLR'
+    case 'SKIRTING':
+      // AI-est roadmap #1 — single skirting rate (SKIRT-PR01 120 AED/lm).
+      // Future: branch per floorFinishCode if separate skirting rates
+      // get seeded (skirting matches the floor finish in practice).
+      return 'SKIRT-PR01'
+    case 'JOINERY': {
+      // AI-est roadmap #2 — VANITY count routes to the VANITY rate
+      // (3400 AED/No, stone-top vanity).
+      if (tag.startsWith('VAN-')) return 'VANITY'
+      // AI-est roadmap #3 — KITCHEN base / wall units.
+      //   KB-<roomId> → KIT-BASE  (1200 AED/lm, HPL base unit)
+      //   KW-<roomId> → KIT-WALL  (1100 AED/lm, HPL wall unit)
+      if (tag.startsWith('KB-')) return 'KIT-BASE'
+      if (tag.startsWith('KW-')) return 'KIT-WALL'
+      return null // WARDROBE et al. land here when seeded
+    }
     case 'DOOR': {
       // §8 has three door rates; pick by visible dimensions in the description.
       if (desc.includes('1000') && desc.includes('3000')) return 'DOOR-1000x3000-FN01'

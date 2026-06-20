@@ -264,6 +264,12 @@ export function TakeoffTable({ projectId, bundle, needsReviewOnly }: TakeoffTabl
   const visibleItems = useMemo(() => {
     if (!needsReviewOnly) return bundle.items
     return bundle.items.filter((item) => {
+      // AI-estimation engine: an ESTIMATED row that's still at status=AI
+      // ALWAYS needs review — that's the whole point of "Confirm in the
+      // verify UI". Don't gate it by confidence, because high-confidence
+      // vanities (95) need just as much expert sign-off as low-confidence
+      // ones (80). Once confirmed (status=EDITED/APPROVED), it drops out.
+      if (item.basis === 'ESTIMATED' && item.status === 'AI') return true
       if (item.confidence < NEEDS_REVIEW_CONFIDENCE) return true
       const itemFlags = bundle.flagsByItem[item.id] ?? []
       return itemFlags.some((f) => !f.resolved)
@@ -338,13 +344,42 @@ export function TakeoffTable({ projectId, bundle, needsReviewOnly }: TakeoffTabl
               {items.map((item) => {
                 const flags = bundle.flagsByItem[item.id] ?? []
                 const saving = savingId === item.id
+                // AI-est roadmap #1 — render an inline reasoning line +
+                // Confirm/✓-confirmed control for SKIRTING (and any future
+                // ESTIMATED basis row). Confirm flips status AI → EDITED
+                // so the line enters the next BOQ generation.
+                const isEstimated = item.basis === 'ESTIMATED'
+                const meta = (item.meta ?? {}) as {
+                  estimationReasoning?: string
+                  priorName?: string
+                  floorFinishCode?: string
+                }
+                const reasoningLine = isEstimated ? meta.estimationReasoning ?? null : null
+                const confirmed = isEstimated && item.status !== 'AI'
+                // Expert call 2026-06-20: row background must make
+                // ESTIMATED status unmistakable. Green confidence chips
+                // were being read as "confirmed" — at-a-glance row tint
+                // removes that confusion. AI = warm yellow tint = work
+                // pending; EDITED/APPROVED = subtle green = done.
+                const rowStyle = !isEstimated
+                  ? undefined
+                  : confirmed
+                  ? { background: 'rgba(64, 192, 87, 0.06)' }
+                  : { background: 'rgba(250, 176, 5, 0.08)' }
                 return (
-                  <Table.Tr key={item.id}>
+                  <Table.Tr key={item.id} style={rowStyle}>
                     <Table.Td>
                       <Text size="sm">{item.tag ?? t('table.groupNoTag')}</Text>
                     </Table.Td>
                     <Table.Td>
-                      <Text size="sm">{item.description}</Text>
+                      <Stack gap={2}>
+                        <Text size="sm">{item.description}</Text>
+                        {reasoningLine ? (
+                          <Text size="xs" c="dimmed">
+                            est: {reasoningLine}
+                          </Text>
+                        ) : null}
+                      </Stack>
                     </Table.Td>
                     <Table.Td>
                       <Text size="sm" className="app-numeric">{item.unit}</Text>
@@ -372,7 +407,34 @@ export function TakeoffTable({ projectId, bundle, needsReviewOnly }: TakeoffTabl
                       <ConfidenceChip confidence={item.confidence} />
                     </Table.Td>
                     <Table.Td>
-                      {flags.length === 0 ? (
+                      {isEstimated ? (
+                        confirmed ? (
+                          <Badge color="green" variant="filled" size="sm" radius="sm">
+                            ✓ CONFIRMED
+                          </Badge>
+                        ) : (
+                          <Button
+                            size="xs"
+                            variant="filled"
+                            color="yellow"
+                            loading={saving}
+                            disabled={saving}
+                            onClick={() => {
+                              setSavingId(item.id)
+                              patch.mutate(
+                                { id: item.id, payload: { status: 'EDITED' } },
+                                {
+                                  onSettled: () => {
+                                    setSavingId((id) => (id === item.id ? null : id))
+                                  },
+                                },
+                              )
+                            }}
+                          >
+                            Confirm pending
+                          </Button>
+                        )
+                      ) : flags.length === 0 ? (
                         <Text size="xs" c="dimmed">—</Text>
                       ) : (
                         <Group gap={4}>

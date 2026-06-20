@@ -348,6 +348,81 @@ export async function extractRooms(input: ExtractRoomsInput): Promise<ExtractRoo
 
 // --- EXTRACT_FINISH_LEGEND (Sprint 6) ------------------------------------
 
+// --- ESTIMATE_KITCHEN (AI-est roadmap #3) ---------------------------------
+
+import {
+  KITCHEN_PROMPT_VERSION,
+  KITCHEN_SYSTEM_PROMPT,
+  KITCHEN_TOOL,
+  normalizeKitchenVision,
+  type KitchenEstimate,
+  type KitchenVisionRaw,
+} from './estimateKitchenPass'
+
+export interface EstimateKitchenInput {
+  documentId: string
+  pageNo: number
+  /** JPEG of the kitchen crop, already sized per computeKitchenCrop. */
+  jpegBase64: string
+  /** Display name used in the user-side text block. */
+  roomName: string
+}
+
+export interface EstimateKitchenOutput {
+  estimate: KitchenEstimate
+  tokensIn: number
+  tokensOut: number
+  promptVersion: string
+}
+
+export async function estimateKitchen(
+  input: EstimateKitchenInput,
+): Promise<EstimateKitchenOutput> {
+  if (isStubMode()) {
+    return zeroTokens({
+      estimate: normalizeKitchenVision({
+        kitchenLayout: 'L',
+        baseLm: 8.4,
+        baseReasoning: 'south wall 4.2 m + west wall 4.2 m = 8.4 lm (stub)',
+        wallLm: 5.2,
+        wallReasoning: 'south wall only — west wall has a window (stub)',
+        hasIsland: false,
+        islandLm: 0,
+        confidence: 55,
+        uncertainty: 'STUB mode — no real vision performed.',
+      }),
+      promptVersion: KITCHEN_PROMPT_VERSION + '.stub',
+    })
+  }
+  const res = await callMessages({
+    model: config.anthropicModels.vision,
+    max_tokens: 1024,
+    temperature: 0,
+    system: KITCHEN_SYSTEM_PROMPT,
+    tools: [KITCHEN_TOOL],
+    tool_choice: { type: 'tool', name: KITCHEN_TOOL.name },
+    messages: [
+      {
+        role: 'user',
+        content: [
+          ...buildImageBlock(input.jpegBase64),
+          {
+            type: 'text',
+            text: `Kitchen plan crop for room "${input.roomName}" on Document=${input.documentId} page=${input.pageNo}.\n\nReturn ONE kitchen_estimate tool call. Be explicit about uncertainty.`,
+          },
+        ],
+      },
+    ],
+  })
+  const raw = findToolInput(res, KITCHEN_TOOL.name) as KitchenVisionRaw
+  return {
+    estimate: normalizeKitchenVision(raw ?? {}),
+    tokensIn: res.usage?.input_tokens ?? 0,
+    tokensOut: res.usage?.output_tokens ?? 0,
+    promptVersion: KITCHEN_PROMPT_VERSION,
+  }
+}
+
 export async function extractFinishLegend(
   input: ExtractFinishLegendInput,
 ): Promise<ExtractFinishLegendOutput> {

@@ -92,41 +92,128 @@ interface ReconciledRoom {
 const KITCHEN_OCR_ALIAS_RE = /\b(?:BOW|BOX|ION|BOY)\s+KITCHEN\b/
 
 /**
- * P5/P6 — architect-side spelling variants observed in cold uploads.
- * Both forms get rewritten to the canonical so the dedup groups them.
- *   - "BED ROOM" (two-word) ↔ "BEDROOM" (one-word) — both forms appear
- *     in the same PDF, frequently on plan vs finish-plan sheets
- *   - "DINNING" ↔ "DINING" — recurring typo
- *   - "LOBBY" / "LOBBYS" — pluralization
- *   - "BATH ROOM" / "BATHROOM" — same pattern as BED ROOM
+ * Architect-side spelling + cross-sheet name variants. Each rule
+ * rewrites both forms into the same canonical so the cross-sheet dedup
+ * collapses them. Rules run in order; one canonical per family.
+ *
+ *   - "BED ROOM"   ↔ "BEDROOM"     → BEDROOM
+ *   - "BATH ROOM"  ↔ "BATHROOM"    → BATH   (canonical short form;
+ *                                              MASTER BATH ↔ MASTER
+ *                                              BATHROOM both → MASTER BATH)
+ *   - "DINNING"    ↔ "DINING"      → DINING
+ *   - "LOBBY"      ↔ "LOBBYS"      → LOBBY
+ *   - "POWDER ROOM"↔ "POWDER"      → POWDER (general ROOM-suffix strip
+ *                                              happens later; this is
+ *                                              the explicit form)
+ *   - "WC"         ↔ "TOILET"       — NOT merged (sometimes different
+ *                                       rooms in larger villas)
+ *
+ * Numeric distinguishers (BATH 01 vs BATH 02) are preserved by every
+ * rule. They survive the token-sort step at the end.
  */
 const ROOM_NAME_CANONICALIZATIONS: Array<{ re: RegExp; to: string }> = [
   { re: /\bBED\s+ROOM\b/g, to: 'BEDROOM' },
   { re: /\bBATH\s+ROOM\b/g, to: 'BATHROOM' },
   { re: /\bDINN?ING\b/g, to: 'DINING' },
   { re: /\bLOBBY?S\b/g, to: 'LOBBY' },
+  // BATHROOM → BATH: shorter canonical. Run AFTER BATH ROOM → BATHROOM
+  // so "MASTER BATH ROOM" goes BATH ROOM → BATHROOM → BATH and lands
+  // alongside "MASTER BATH" (plan-side label).
+  { re: /\bBATHROOM\b/g, to: 'BATH' },
+  // Expert call 2026-06-20: BOH KITCHEN ↔ KITCHEN are the same physical
+  // room on residential villa plans (one plan calls it "BOH KITCHEN",
+  // another just "Kitchen"). Larger commercial spaces may have separate
+  // BOH + show kitchens; if a project breaks the assumption the expert
+  // sees one collapsed row and manually splits. Same call as the
+  // MASTER BATH = MASTER BATHROOM collapse.
+  { re: /\bBOH\s+KITCHEN\b/g, to: 'KITCHEN' },
 ]
 
+/**
+ * Tokens that aren't identity-bearing — strip after canonicalization
+ * so "POWDER ROOM" merges with "POWDER", "FAMILY ROOM" with "FAMILY",
+ * "(FF - Lower)" floor markers vanish. Pure deny-list of generic words
+ * that show up as identity noise on different sheets of the same plan.
+ */
+/**
+ * Tokens stripped from every room name regardless of context.
+ *
+ * Expert review (2026-06-20): LOWER/UPPER and B1/B2/BF are KEPT as
+ * identity-bearing tokens.
+ *   - LOWER/UPPER distinguish stair landings (GF-Lower vs GF-Upper
+ *     are physically distinct floor areas a contractor measures
+ *     individually — same for stair-under stores).
+ *   - B1/B2/BF mark basement rooms (a "B1 BEDROOM" is a basement
+ *     bedroom, distinct from a generic "BEDROOM" on the main floors).
+ */
+const NON_IDENTITY_TOKENS = new Set<string>([
+  'ROOM',
+])
+
+/**
+ * Floor markers stripped ONLY for NORMAL rooms — see STRUCTURAL_NAME_RE.
+ * The S8-2 cross-sheet design intentionally merges a same-named room
+ * across floors (MASTER BATH on plan + Master Bathroom (FF) on finish
+ * plan collapse to one bucket; the row with area + confirmed finish
+ * wins). That convenience is right for living/sleeping/wet rooms.
+ *
+ * But for structural rooms — stair landings, stair-under stores, voids,
+ * shafts — the floor is identity. GF-Lower and FF-Lower are different
+ * concrete pours, billed separately. Keep the floor token in those.
+ */
+const FLOOR_MARKER_TOKENS = new Set<string>([
+  'GF', 'FF', 'RF', 'L1', 'L2',
+])
+
+const STRUCTURAL_NAME_RE = /\b(STAIR|LANDING|STORE|VOID|SHAFT)\b/i
+
+/**
+ * Pro-grade room-name normalizer. Five stages:
+ *
+ *   1. lowercase the floor-decorator suffix ("— GF") — drop it
+ *   2. uppercase, apostrophe normalize, KITCHEN OCR alias
+ *   3. strip room codes (GF-01, FF-12) + punctuation (/&,.;:())
+ *   4. apply canonicalization rules (BED ROOM=BEDROOM, BATH=BATHROOM=BATH,
+ *      DINNING=DINING, LOBBY[S]=LOBBY)
+ *   5. drop non-identity tokens (ROOM suffix, floor markers)
+ *   6. token-sort — "02 BEDROOM" and "BEDROOM 02" normalize identically
+ *
+ * Hard guarantee: numeric distinguishers (BATH 01 vs BATH 02) survive
+ * intact — they're tokens that won't match NON_IDENTITY_TOKENS.
+ *
+ * Reviewer-facing contract (memorized): expected to merge plan-side
+ * "MASTER BATH" with finish-plan-side "Master Bathroom (FF)" because
+ * the villa has ONE master bath. If the villa has separate master
+ * baths on different floors, both will collapse to the same key — the
+ * cross-sheet dedup picks the one with area+finish, the loser is
+ * soft-deleted. For Plot 4357 + similar plans this is the right call;
+ * if a different villa breaks the assumption, the expert sees only
+ * one row and can manually correct.
+ */
 export function normalizeRoomName(raw: string): string {
+  // Detect structural rooms (stair landings, stair-under stores, voids,
+  // shafts) on the ORIGINAL raw text — the canonicalization stage strips
+  // some of these markers, so the test must happen first.
+  const isStructural = STRUCTURAL_NAME_RE.test(raw)
   let s = raw
     .split('—')[0]!
     .toUpperCase()
     .replace(/[‘’ʼ]/g, "'")
     .replace(KITCHEN_OCR_ALIAS_RE, 'BOH KITCHEN')
     .replace(/\b(GF|FF|RF|L1|L2|B1|B2|BF)[\s-]?\d{1,3}\b/g, '')
-    // P5/P6: include `/` so "LAUNDRY / LINEN" merges with "LAUNDRY/LINEN"
-    // and "Entrance / Lobby" merges with "ENTRANCE LOBBY". Cold-upload
-    // dump showed the architect's finish-plan labels use slash-with-spaces
-    // while the floor plan uses the same words separated by a space —
-    // without the strip they keyed to different buckets and the area
-    // and finish_code stayed on separate rows.
-    .replace(/[.,;:()/&]/g, ' ')
+    .replace(/[.,;:()/&-]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
   for (const rule of ROOM_NAME_CANONICALIZATIONS) {
     s = s.replace(rule.re, rule.to)
   }
-  return s
+  const tokens = s
+    .split(' ')
+    .filter(Boolean)
+    .filter((tok) => !NON_IDENTITY_TOKENS.has(tok))
+    .filter((tok) => isStructural || !FLOOR_MARKER_TOKENS.has(tok))
+    .sort()
+  return tokens.join(' ')
 }
 
 function compareNumeric(a: number | null, b: number | null): boolean {

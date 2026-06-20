@@ -37,8 +37,10 @@
  *
  * Idempotent on tag — re-running updates existing derived rows by tag.
  */
-import type { Prisma, TakeoffCategory } from '@prisma/client'
+import type { Prisma, TakeoffBasis, TakeoffCategory } from '@prisma/client'
 import { prisma } from '../../db'
+import { estimateSkirtingPerimeter, shouldSkirtRoom } from '../../ai/estimateSkirting'
+import { estimateVanityForRoom } from '../../ai/estimateVanity'
 import type { JobHandler, JobRecord } from '../types'
 import { isAreaStatement, selectBillableRooms } from './_roomSelector'
 import { upsertValidationFlag } from '../validationFlagUpsert'
@@ -54,6 +56,24 @@ interface DerivedSummary {
   floorGroups: Array<{ finishCode: string; rooms: number; totalAreaM2: string }>
   ceilingGroups: Array<{ code: string; rooms: number; totalAreaM2: string }>
   staircase: { emitted: boolean; lm: number | null }
+  /**
+   * Roadmap #1 — single SCREED-FLR line covering all interior floor area.
+   * Excluded: ST03 (external pavement, no screed under), staircase rooms
+   * (separate stair emission path), and the unassigned bucket (might be
+   * external — reviewer decides).
+   */
+  screed: { emitted: boolean; totalAreaM2: string; excludedCodes: string[] }
+  /**
+   * AI-est roadmap #1 — per-room SKIRTING suggestions. status='AI', basis='ESTIMATED'.
+   * Stays out of the BOQ until the reviewer Confirms each line.
+   */
+  skirting: { suggested: number; skipped: number; totalLm: string }
+  /**
+   * AI-est roadmap #2 — per-bathroom VANITY suggestions. 1 per bathroom
+   * (95% prior). status='AI', basis='ESTIMATED'. Reviewer overrides
+   * qtyFinal for double-vanity master baths before Confirming.
+   */
+  vanity: { suggested: number; skipped: number; totalCount: number }
   wallFeatures: Array<{ code: string; description: string }>
   excludedRooms: string[]
 }
@@ -127,6 +147,9 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
     flagsRaised: 0,
     floorGroups: [],
     ceilingGroups: [],
+    screed: { emitted: false, totalAreaM2: '0', excludedCodes: [] },
+    skirting: { suggested: 0, skipped: 0, totalLm: '0' },
+    vanity: { suggested: 0, skipped: 0, totalCount: 0 },
     staircase: { emitted: false, lm: null },
     wallFeatures: [],
     excludedRooms: [],
@@ -244,6 +267,54 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
       rooms: bucket.rooms.length,
       totalAreaM2: bucket.totalArea.toFixed(2),
     })
+  }
+
+  // --- Screed (one line under all interior floors) ---------------------
+  // Every interior floor finish (porcelain, marble, bathroom) sits on a
+  // sand-cement screed bed at SCREED-FLR (90 AED/m²). Sum the per-code
+  // buckets, exclude external (ST03) which sits on a concrete slab with
+  // no screed, exclude the unassigned bucket (reviewer hasn't decided
+  // internal vs external). Staircase rooms aren't in floorGroups to
+  // begin with (skipped earlier by isStaircaseRoom).
+  const SCREED_EXCLUDED_FINISH_CODES = new Set(['ST03', 'unassigned'])
+  let screedArea = 0
+  const screedExcluded: string[] = []
+  for (const [finishCode, bucket] of floorGroups) {
+    if (SCREED_EXCLUDED_FINISH_CODES.has(finishCode)) {
+      screedExcluded.push(finishCode)
+      continue
+    }
+    screedArea += bucket.totalArea
+  }
+  if (screedArea > 0) {
+    const includedCodes = Array.from(floorGroups.keys()).filter(
+      (c) => !SCREED_EXCLUDED_FINISH_CODES.has(c),
+    )
+    emittedDerivedTags.add('SCREED-FLR')
+    await upsertDerived({
+      organizationId: job.organizationId,
+      projectId: payload.projectId,
+      category: 'SCREED',
+      tag: 'SCREED-FLR',
+      description: `Sand-cement screed under interior floor finishes (${includedCodes.join(', ')})`,
+      unit: 'm²',
+      qty: screedArea,
+      basis: 'DERIVED',
+      confidence: 85,
+      sourceNote: `Σ interior floor area = ${screedArea.toFixed(2)} m² across finish codes [${includedCodes.join(', ')}]. Excluded: ${screedExcluded.length > 0 ? screedExcluded.join(', ') : '∅'} (ST03 external pavement = no screed; unassigned = reviewer decides).`,
+      meta: {
+        derivedKey: 'screed:floor',
+        includedFinishCodes: includedCodes,
+        excludedFinishCodes: screedExcluded,
+        totalAreaM2: screedArea,
+      },
+      summary,
+    })
+    summary.screed = {
+      emitted: true,
+      totalAreaM2: screedArea.toFixed(2),
+      excludedCodes: screedExcluded,
+    }
   }
 
   // --- Ceilings (name-rule split, excludes balconies/terraces/garages) -
@@ -393,6 +464,120 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
     summary.wallFeatures.push({ code, description: name })
   }
 
+  // --- SKIRTING suggestions (AI-est roadmap #1) -----------------------
+  // Per-room skirting lm SUGGESTIONS from the aspect-ratio prior. ONE row
+  // per skirtable room; status='AI' so they stay OUT of the BOQ until
+  // the reviewer Confirms each line in the verify UI (status → EDITED).
+  // Zero AI tokens — pure deterministic math from area + a name-prior.
+  // The reasoning string is stored on meta.estimationReasoning and
+  // surfaced inline in the review table.
+  let skirtingSuggested = 0
+  let skirtingSkipped = 0
+  let skirtingTotalLm = 0
+  for (const room of rooms) {
+    const meta = (room.meta ?? {}) as Record<string, unknown>
+    const finishCode = typeof meta.finish_code === 'string' ? meta.finish_code : null
+    const name = room.description.split('—')[0]!.trim()
+    if (!shouldSkirtRoom(name, finishCode)) {
+      skirtingSkipped += 1
+      continue
+    }
+    const area = num(room.qtyFinal ?? room.qtyAi)
+    const estimate = estimateSkirtingPerimeter(name, area)
+    if (!estimate) {
+      skirtingSkipped += 1
+      continue
+    }
+    skirtingSuggested += 1
+    skirtingTotalLm += estimate.perimeterLm
+    const tag = `SK-${room.id.slice(-8)}`
+    emittedDerivedTags.add(tag)
+    await upsertDerived({
+      organizationId: job.organizationId,
+      projectId: payload.projectId,
+      category: 'SKIRTING',
+      tag,
+      description: `Skirting — ${name} (${finishCode} floor)`,
+      unit: 'lm',
+      qty: Math.round(estimate.perimeterLm * 100) / 100,
+      basis: 'ESTIMATED',
+      confidence: estimate.confidence,
+      sourceNote: estimate.reasoning,
+      meta: {
+        derivedKey: `skirting:${room.id}`,
+        roomId: room.id,
+        roomName: name,
+        floorFinishCode: finishCode,
+        estimationSource: 'aspect-ratio-prior',
+        estimationReasoning: estimate.reasoning,
+        priorName: estimate.priorName,
+        aspectRatio: estimate.aspectRatio,
+        perimeterLm: estimate.perimeterLm,
+      },
+      // SKIRTING is a SUGGESTION — stays out of BOQ until human Confirm.
+      summary,
+      status: 'AI',
+    })
+  }
+  summary.skirting = {
+    suggested: skirtingSuggested,
+    skipped: skirtingSkipped,
+    totalLm: skirtingTotalLm.toFixed(2),
+  }
+
+  // --- VANITY suggestions (AI-est roadmap #2) -------------------------
+  // ONE stone-top vanity (3400 AED/No) per bathroom. Strong prior: 95%
+  // confidence when both finish=BATHROOM and the name matches the
+  // bathroom pattern, 80% on a single signal. Reviewer overrides
+  // qtyFinal inline for double-vanity master baths before Confirming.
+  // Zero AI tokens — pure deterministic rule on data we already have.
+  let vanitySuggested = 0
+  let vanitySkipped = 0
+  let vanityTotalCount = 0
+  for (const room of rooms) {
+    const meta = (room.meta ?? {}) as Record<string, unknown>
+    const finishCode = typeof meta.finish_code === 'string' ? meta.finish_code : null
+    const name = room.description.split('—')[0]!.trim()
+    const estimate = estimateVanityForRoom(name, finishCode)
+    if (!estimate) {
+      vanitySkipped += 1
+      continue
+    }
+    vanitySuggested += 1
+    vanityTotalCount += estimate.count
+    const tag = `VAN-${room.id.slice(-8)}`
+    emittedDerivedTags.add(tag)
+    await upsertDerived({
+      organizationId: job.organizationId,
+      projectId: payload.projectId,
+      category: 'JOINERY',
+      tag,
+      description: `Vanity (stone-top) — ${name}`,
+      unit: 'No',
+      qty: estimate.count,
+      basis: 'ESTIMATED',
+      confidence: estimate.confidence,
+      sourceNote: estimate.reasoning,
+      meta: {
+        derivedKey: `vanity:${room.id}`,
+        roomId: room.id,
+        roomName: name,
+        floorFinishCode: finishCode,
+        estimationSource: '1-per-bathroom-prior',
+        estimationReasoning: estimate.reasoning,
+        signals: estimate.signals,
+        rateHint: 'VANITY',
+      },
+      summary,
+      status: 'AI',
+    })
+  }
+  summary.vanity = {
+    suggested: vanitySuggested,
+    skipped: vanitySkipped,
+    totalCount: vanityTotalCount,
+  }
+
   // PF-3 housekeeping — soft-delete any derived FF-*/CL-*/WF-* rows that
   // were emitted by a PRIOR quantify run but no longer correspond to a
   // bucket this run. Without this, BOQ generation picks up the stale
@@ -403,12 +588,17 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
       organizationId: job.organizationId,
       projectId: payload.projectId,
       deletedAt: null,
-      basis: { in: ['DERIVED', 'PARAMETRIC'] },
+      basis: { in: ['DERIVED', 'PARAMETRIC', 'ESTIMATED'] },
       OR: [
         { tag: { startsWith: 'FF-' } },
         { tag: { startsWith: 'CL-' } },
         { tag: { startsWith: 'WF-' } },
+        { tag: { startsWith: 'SK-' } },
+        { tag: { startsWith: 'VAN-' } },
       ],
+      // Sweep only AI-still rows: a reviewer-promoted SKIRTING line
+      // (EDITED/APPROVED) must NEVER be soft-deleted by a re-run.
+      status: 'AI',
     },
     select: { id: true, tag: true },
   })
@@ -432,14 +622,23 @@ interface UpsertArgs {
   description: string
   unit: string
   qty: number
-  basis: 'DERIVED' | 'PARAMETRIC' | 'PLACEHOLDER'
+  basis: TakeoffBasis
   confidence: number
   sourceNote: string
   meta: Record<string, unknown>
   summary: DerivedSummary
+  /**
+   * Defaults to 'EDITED' (the existing measured/derived contract — auto-
+   * enter the BOQ). SKIRTING and other AI-estimated lines pass 'AI' so
+   * they stay OUT of the BOQ until the reviewer Confirms each line. The
+   * verify UI flips status to EDITED on click; same auto-promotion the
+   * door/schedule path uses.
+   */
+  status?: 'AI' | 'EDITED' | 'APPROVED'
 }
 
 async function upsertDerived(args: UpsertArgs): Promise<{ id: string }> {
+  const status = args.status ?? 'EDITED'
   const existing = await prisma.takeoffItem.findFirst({
     where: {
       organizationId: args.organizationId,
@@ -447,9 +646,15 @@ async function upsertDerived(args: UpsertArgs): Promise<{ id: string }> {
       tag: args.tag,
       deletedAt: null,
     },
-    select: { id: true },
+    select: { id: true, status: true },
   })
   if (existing) {
+    // Idempotency for ESTIMATED rows: if the reviewer already promoted
+    // an existing line to EDITED/APPROVED (clicked Confirm), don't
+    // demote it back to AI on the next QUANTIFY re-run. Re-runs refresh
+    // the suggestion math but respect human review state.
+    const nextStatus =
+      status === 'AI' && existing.status !== 'AI' ? existing.status : status
     await prisma.takeoffItem.update({
       where: { id: existing.id },
       data: {
@@ -462,7 +667,7 @@ async function upsertDerived(args: UpsertArgs): Promise<{ id: string }> {
         confidence: args.confidence,
         sourceNote: args.sourceNote,
         meta: args.meta as Prisma.JsonObject,
-        status: 'EDITED',
+        status: nextStatus,
       },
     })
     args.summary.updated += 1
@@ -482,7 +687,7 @@ async function upsertDerived(args: UpsertArgs): Promise<{ id: string }> {
       confidence: args.confidence,
       sourceNote: args.sourceNote,
       meta: args.meta as Prisma.JsonObject,
-      status: 'EDITED',
+      status,
     },
   })
   args.summary.created += 1

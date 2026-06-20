@@ -46,6 +46,8 @@ const CATEGORY_TO_SECTION: Record<string, string> = {
   WALL_FINISH: '2.9',
   CEILING: '2.9',
   SCREED: '2.9',
+  /** AI-est roadmap #1 — skirting is finishes work. */
+  SKIRTING: '2.9',
   PAINT: '2.9',
   PLASTER: '2.9',
   BLOCKWORK: '2.9',
@@ -257,6 +259,16 @@ export function registerBoqRoutes(router: Router): void {
             ? `Only ROOM items present (${skippedRoomItems}); run QUANTIFY first to derive billable items.`
             : 'No billable takeoff items.',
         )
+      }
+
+      // Roadmap #5 — Section 4.0 Provisional Sums always present, even
+      // empty, so the SPA's "Add provisional line" button has a section
+      // to write into. The estimator carries windows / lighting /
+      // cladding / facade / MEP here (architect-side line items the
+      // drawing doesn't measure). Empty section is harmless: it renders
+      // with zero lines until the user adds something.
+      if (!sectionBuckets.has('4.0')) {
+        sectionBuckets.set('4.0', [] as typeof items)
       }
 
       // Next version for this project.
@@ -562,6 +574,33 @@ export function registerBoqRoutes(router: Router): void {
         })
       }
       return jsonResponse({ id: created.id, itemRef }, 201)
+    }),
+  )
+
+  /**
+   * AI-est roadmap #3 — opt-in ESTIMATE_KITCHEN job. Triggered ONLY by
+   * the SPA "Estimate kitchen" button; no automatic chain, no cold-
+   * upload billing. Costs ~1.5-2k tokens per click; the suggestions
+   * land in JOINERY for the expert to Confirm.
+   */
+  router.post(
+    '/api/projects/:id/estimate-kitchen',
+    requireAuth(async (_req, ctx) => {
+      const db = tenantDb(ctx.organizationId)
+      const project = await db.project.findFirst({
+        where: { id: ctx.params.id, deletedAt: null },
+        select: { id: true },
+      })
+      if (!project) return errorResponse(404, 'Project not found')
+      const job = await db.job.create({
+        data: {
+          organizationId: ctx.organizationId,
+          projectId: project.id,
+          type: 'ESTIMATE_KITCHEN',
+          payload: { projectId: project.id } as object,
+        },
+      })
+      return jsonResponse({ jobId: job.id }, 202)
     }),
   )
 

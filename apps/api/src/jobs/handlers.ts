@@ -1,4 +1,5 @@
 import { classifyHandler } from './handlers/classify'
+import { estimateKitchenHandler } from './handlers/estimateKitchen'
 import { exportXlsxHandler } from './handlers/exportXlsx'
 import { extractFinishLegendHandler } from './handlers/extractFinishLegend'
 import { extractRoomsHandler } from './handlers/extractRooms'
@@ -32,6 +33,7 @@ export const HANDLERS: Record<JobType, JobHandler> = {
   EXTRACT_SCHEDULES: extractSchedulesHandler,
   EXTRACT_ROOMS: extractRoomsHandler,
   QUANTIFY: quantifyHandler,
+  ESTIMATE_KITCHEN: estimateKitchenHandler,
   VALIDATE: notImplemented('VALIDATE', 'Sprint 4'),
   PRICE: priceHandler,
   EXPORT_XLSX: exportXlsxHandler,
