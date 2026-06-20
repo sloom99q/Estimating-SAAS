@@ -37,8 +37,9 @@
  *
  * Idempotent on tag — re-running updates existing derived rows by tag.
  */
-import type { Prisma, TakeoffCategory } from '@prisma/client'
+import type { Prisma, TakeoffBasis, TakeoffCategory } from '@prisma/client'
 import { prisma } from '../../db'
+import { estimateSkirtingPerimeter, shouldSkirtRoom } from '../../ai/estimateSkirting'
 import type { JobHandler, JobRecord } from '../types'
 import { isAreaStatement, selectBillableRooms } from './_roomSelector'
 import { upsertValidationFlag } from '../validationFlagUpsert'
@@ -61,6 +62,11 @@ interface DerivedSummary {
    * external — reviewer decides).
    */
   screed: { emitted: boolean; totalAreaM2: string; excludedCodes: string[] }
+  /**
+   * AI-est roadmap #1 — per-room SKIRTING suggestions. status='AI', basis='ESTIMATED'.
+   * Stays out of the BOQ until the reviewer Confirms each line.
+   */
+  skirting: { suggested: number; skipped: number; totalLm: string }
   wallFeatures: Array<{ code: string; description: string }>
   excludedRooms: string[]
 }
@@ -135,6 +141,7 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
     floorGroups: [],
     ceilingGroups: [],
     screed: { emitted: false, totalAreaM2: '0', excludedCodes: [] },
+    skirting: { suggested: 0, skipped: 0, totalLm: '0' },
     staircase: { emitted: false, lm: null },
     wallFeatures: [],
     excludedRooms: [],
@@ -449,6 +456,67 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
     summary.wallFeatures.push({ code, description: name })
   }
 
+  // --- SKIRTING suggestions (AI-est roadmap #1) -----------------------
+  // Per-room skirting lm SUGGESTIONS from the aspect-ratio prior. ONE row
+  // per skirtable room; status='AI' so they stay OUT of the BOQ until
+  // the reviewer Confirms each line in the verify UI (status → EDITED).
+  // Zero AI tokens — pure deterministic math from area + a name-prior.
+  // The reasoning string is stored on meta.estimationReasoning and
+  // surfaced inline in the review table.
+  let skirtingSuggested = 0
+  let skirtingSkipped = 0
+  let skirtingTotalLm = 0
+  for (const room of rooms) {
+    const meta = (room.meta ?? {}) as Record<string, unknown>
+    const finishCode = typeof meta.finish_code === 'string' ? meta.finish_code : null
+    const name = room.description.split('—')[0]!.trim()
+    if (!shouldSkirtRoom(name, finishCode)) {
+      skirtingSkipped += 1
+      continue
+    }
+    const area = num(room.qtyFinal ?? room.qtyAi)
+    const estimate = estimateSkirtingPerimeter(name, area)
+    if (!estimate) {
+      skirtingSkipped += 1
+      continue
+    }
+    skirtingSuggested += 1
+    skirtingTotalLm += estimate.perimeterLm
+    const tag = `SK-${room.id.slice(-8)}`
+    emittedDerivedTags.add(tag)
+    await upsertDerived({
+      organizationId: job.organizationId,
+      projectId: payload.projectId,
+      category: 'SKIRTING',
+      tag,
+      description: `Skirting — ${name} (${finishCode} floor)`,
+      unit: 'lm',
+      qty: Math.round(estimate.perimeterLm * 100) / 100,
+      basis: 'ESTIMATED',
+      confidence: estimate.confidence,
+      sourceNote: estimate.reasoning,
+      meta: {
+        derivedKey: `skirting:${room.id}`,
+        roomId: room.id,
+        roomName: name,
+        floorFinishCode: finishCode,
+        estimationSource: 'aspect-ratio-prior',
+        estimationReasoning: estimate.reasoning,
+        priorName: estimate.priorName,
+        aspectRatio: estimate.aspectRatio,
+        perimeterLm: estimate.perimeterLm,
+      },
+      // SKIRTING is a SUGGESTION — stays out of BOQ until human Confirm.
+      summary,
+      status: 'AI',
+    })
+  }
+  summary.skirting = {
+    suggested: skirtingSuggested,
+    skipped: skirtingSkipped,
+    totalLm: skirtingTotalLm.toFixed(2),
+  }
+
   // PF-3 housekeeping — soft-delete any derived FF-*/CL-*/WF-* rows that
   // were emitted by a PRIOR quantify run but no longer correspond to a
   // bucket this run. Without this, BOQ generation picks up the stale
@@ -459,12 +527,16 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
       organizationId: job.organizationId,
       projectId: payload.projectId,
       deletedAt: null,
-      basis: { in: ['DERIVED', 'PARAMETRIC'] },
+      basis: { in: ['DERIVED', 'PARAMETRIC', 'ESTIMATED'] },
       OR: [
         { tag: { startsWith: 'FF-' } },
         { tag: { startsWith: 'CL-' } },
         { tag: { startsWith: 'WF-' } },
+        { tag: { startsWith: 'SK-' } },
       ],
+      // Sweep only AI-still rows: a reviewer-promoted SKIRTING line
+      // (EDITED/APPROVED) must NEVER be soft-deleted by a re-run.
+      status: 'AI',
     },
     select: { id: true, tag: true },
   })
@@ -488,14 +560,23 @@ interface UpsertArgs {
   description: string
   unit: string
   qty: number
-  basis: 'DERIVED' | 'PARAMETRIC' | 'PLACEHOLDER'
+  basis: TakeoffBasis
   confidence: number
   sourceNote: string
   meta: Record<string, unknown>
   summary: DerivedSummary
+  /**
+   * Defaults to 'EDITED' (the existing measured/derived contract — auto-
+   * enter the BOQ). SKIRTING and other AI-estimated lines pass 'AI' so
+   * they stay OUT of the BOQ until the reviewer Confirms each line. The
+   * verify UI flips status to EDITED on click; same auto-promotion the
+   * door/schedule path uses.
+   */
+  status?: 'AI' | 'EDITED' | 'APPROVED'
 }
 
 async function upsertDerived(args: UpsertArgs): Promise<{ id: string }> {
+  const status = args.status ?? 'EDITED'
   const existing = await prisma.takeoffItem.findFirst({
     where: {
       organizationId: args.organizationId,
@@ -503,9 +584,15 @@ async function upsertDerived(args: UpsertArgs): Promise<{ id: string }> {
       tag: args.tag,
       deletedAt: null,
     },
-    select: { id: true },
+    select: { id: true, status: true },
   })
   if (existing) {
+    // Idempotency for ESTIMATED rows: if the reviewer already promoted
+    // an existing line to EDITED/APPROVED (clicked Confirm), don't
+    // demote it back to AI on the next QUANTIFY re-run. Re-runs refresh
+    // the suggestion math but respect human review state.
+    const nextStatus =
+      status === 'AI' && existing.status !== 'AI' ? existing.status : status
     await prisma.takeoffItem.update({
       where: { id: existing.id },
       data: {
@@ -518,7 +605,7 @@ async function upsertDerived(args: UpsertArgs): Promise<{ id: string }> {
         confidence: args.confidence,
         sourceNote: args.sourceNote,
         meta: args.meta as Prisma.JsonObject,
-        status: 'EDITED',
+        status: nextStatus,
       },
     })
     args.summary.updated += 1
@@ -538,7 +625,7 @@ async function upsertDerived(args: UpsertArgs): Promise<{ id: string }> {
       confidence: args.confidence,
       sourceNote: args.sourceNote,
       meta: args.meta as Prisma.JsonObject,
-      status: 'EDITED',
+      status,
     },
   })
   args.summary.created += 1

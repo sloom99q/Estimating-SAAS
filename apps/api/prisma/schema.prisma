@@ -71,6 +71,11 @@ enum TakeoffCategory {
   WALL_FINISH
   CEILING
   SCREED
+  /// AI-estimation engine roadmap #1 — per-room skirting suggested
+  /// from an aspect-ratio prior over room area. ESTIMATED basis +
+  /// status=AI; stays OUT of the BOQ until a human confirms in the
+  /// verify UI (status → EDITED).
+  SKIRTING
   PAINT
   PLASTER
   BLOCKWORK
@@ -91,6 +96,11 @@ enum TakeoffBasis {
   VISUAL
   PARAMETRIC
   PLACEHOLDER
+  /// AI-estimation engine — heuristic suggestion from a deterministic
+  /// prior (e.g. aspect-ratio table over room area for skirting). Never
+  /// auto-priced; PRICE only reads APPROVED/EDITED rows, ESTIMATED
+  /// stays AI until the reviewer confirms.
+  ESTIMATED
 }
 
 enum TakeoffStatus {

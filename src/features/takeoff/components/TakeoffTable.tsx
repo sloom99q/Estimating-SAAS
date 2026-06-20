@@ -338,13 +338,32 @@ export function TakeoffTable({ projectId, bundle, needsReviewOnly }: TakeoffTabl
               {items.map((item) => {
                 const flags = bundle.flagsByItem[item.id] ?? []
                 const saving = savingId === item.id
+                // AI-est roadmap #1 — render an inline reasoning line +
+                // Confirm/✓-confirmed control for SKIRTING (and any future
+                // ESTIMATED basis row). Confirm flips status AI → EDITED
+                // so the line enters the next BOQ generation.
+                const isEstimated = item.basis === 'ESTIMATED'
+                const meta = (item.meta ?? {}) as {
+                  estimationReasoning?: string
+                  priorName?: string
+                  floorFinishCode?: string
+                }
+                const reasoningLine = isEstimated ? meta.estimationReasoning ?? null : null
+                const confirmed = isEstimated && item.status !== 'AI'
                 return (
                   <Table.Tr key={item.id}>
                     <Table.Td>
                       <Text size="sm">{item.tag ?? t('table.groupNoTag')}</Text>
                     </Table.Td>
                     <Table.Td>
-                      <Text size="sm">{item.description}</Text>
+                      <Stack gap={2}>
+                        <Text size="sm">{item.description}</Text>
+                        {reasoningLine ? (
+                          <Text size="xs" c="dimmed">
+                            est: {reasoningLine}
+                          </Text>
+                        ) : null}
+                      </Stack>
                     </Table.Td>
                     <Table.Td>
                       <Text size="sm" className="app-numeric">{item.unit}</Text>
@@ -372,7 +391,34 @@ export function TakeoffTable({ projectId, bundle, needsReviewOnly }: TakeoffTabl
                       <ConfidenceChip confidence={item.confidence} />
                     </Table.Td>
                     <Table.Td>
-                      {flags.length === 0 ? (
+                      {isEstimated ? (
+                        confirmed ? (
+                          <Badge color="green" variant="filled" size="xs">
+                            ✓ confirmed
+                          </Badge>
+                        ) : (
+                          <Button
+                            size="xs"
+                            variant="light"
+                            color="blue"
+                            loading={saving}
+                            disabled={saving}
+                            onClick={() => {
+                              setSavingId(item.id)
+                              patch.mutate(
+                                { id: item.id, payload: { status: 'EDITED' } },
+                                {
+                                  onSettled: () => {
+                                    setSavingId((id) => (id === item.id ? null : id))
+                                  },
+                                },
+                              )
+                            }}
+                          >
+                            Confirm
+                          </Button>
+                        )
+                      ) : flags.length === 0 ? (
                         <Text size="xs" c="dimmed">—</Text>
                       ) : (
                         <Group gap={4}>

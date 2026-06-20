@@ -46,6 +46,8 @@ const CATEGORY_TO_SECTION: Record<string, string> = {
   WALL_FINISH: '2.9',
   CEILING: '2.9',
   SCREED: '2.9',
+  /** AI-est roadmap #1 — skirting is finishes work. */
+  SKIRTING: '2.9',
   PAINT: '2.9',
   PLASTER: '2.9',
   BLOCKWORK: '2.9',

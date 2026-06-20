@@ -56,6 +56,7 @@
     "FLOOR_FINISH": "أرضيات",
     "WALL_FINISH": "جدران",
     "CEILING": "أسقف",
+    "SKIRTING": "نعل الجدار (تقدير ذكي — أكّد كل سطر)",
     "SCREED": "صبّات",
     "PAINT": "دهانات",
     "PLASTER": "بلاستر",

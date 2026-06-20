@@ -73,6 +73,11 @@ function rateCodeFor(line: { description: string; unit: string; tag?: string | n
     }
     case 'SCREED':
       return 'SCREED-FLR'
+    case 'SKIRTING':
+      // AI-est roadmap #1 — single skirting rate (SKIRT-PR01 120 AED/lm).
+      // Future: branch per floorFinishCode if separate skirting rates
+      // get seeded (skirting matches the floor finish in practice).
+      return 'SKIRT-PR01'
     case 'DOOR': {
       // §8 has three door rates; pick by visible dimensions in the description.
       if (desc.includes('1000') && desc.includes('3000')) return 'DOOR-1000x3000-FN01'
