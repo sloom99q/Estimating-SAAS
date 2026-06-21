@@ -146,62 +146,71 @@ export async function colorMapFinishesForProject(
   // Aggregate the best assignment across all finish-plan sheets.
   const best = new Map<string, RoomColorAssignment>()
 
-  // The handler is project-scoped, but a project usually has a single
-  // active document; pick the most recent READY one.
-  const document = await prisma.document.findFirst({
+  // MULTI-DOC #1 (2026-06-21) — iterate ALL READY documents in the
+  // project, not just the most recent one. A real drawing set is N
+  // PDFs (architect + revisions + MEP); the finish plans we color-
+  // sample might live in any of them. Each doc contributes its own
+  // anchored I4xx sheets to the assignment pool; the existing
+  // `best.set(...)` aggregator keeps the highest-confidence pick per
+  // room regardless of which document it came from.
+  const documents = await prisma.document.findMany({
     where: { projectId, status: 'READY' },
     orderBy: { updatedAt: 'desc' },
   })
-  if (!document) return result
-  const sheets = await prisma.sheet.findMany({
-    where: { documentId: document.id, sheetType: { in: ['finish_plan', 'legend'] } },
-    orderBy: { pageNo: 'asc' },
-  })
-  const anchored = sheets.filter((s) => FINISH_PLAN_ANCHOR_RE.test(s.drawingNo ?? ''))
-  if (anchored.length === 0) return result
-
+  if (documents.length === 0) return result
   const blob = getBlobStore()
-  const sourceBytes = await blob.get(document.storageKey)
 
-  for (const sheet of anchored) {
-    const image = await renderPageRgb(sourceBytes, sheet.pageNo, { dpi: 220 })
-    const bbox = await renderPageBbox(sourceBytes, sheet.pageNo)
-    const palette = buildPalette(image, bbox.words, FLOOR_FINISH_CODES)
-    for (const [, p] of palette) {
-      if (p.fromDocument) result.paletteSamplesFromDocument += 1
-      else result.paletteSamplesCanonical += 1
-    }
-    const roomBboxes = findRoomBboxes(bbox.words, roomNames)
-    // S10-2(d) coordinate-carry: union the bboxes we can read from the
-    // matching FLOOR plan (A101 ↔ I401, A102 ↔ I402) for room names
-    // missing on the finish plan. Architectural and finish plans share
-    // the same paper grid for ground/first floors on Plot 4357.
-    const carry = COORDINATE_CARRY_PAIRS.find((pair) => pair.to === sheet.drawingNo)
-    if (carry) {
-      const partner = await prisma.sheet.findFirst({
-        where: { documentId: document.id, drawingNo: carry.from },
-      })
-      if (partner) {
-        const partnerBbox = await renderPageBbox(sourceBytes, partner.pageNo)
-        const partnerRoomBboxes = findRoomBboxes(partnerBbox.words, roomNames)
-        const knownNames = new Set(roomBboxes.map((b) => normalizeRoomName(b.name)))
-        for (const candidate of partnerRoomBboxes) {
-          const key = normalizeRoomName(candidate.name)
-          if (knownNames.has(key)) continue
-          roomBboxes.push(candidate)
-          knownNames.add(key)
+  for (const document of documents) {
+    const sheets = await prisma.sheet.findMany({
+      where: { documentId: document.id, sheetType: { in: ['finish_plan', 'legend'] } },
+      orderBy: { pageNo: 'asc' },
+    })
+    const anchored = sheets.filter((s) => FINISH_PLAN_ANCHOR_RE.test(s.drawingNo ?? ''))
+    if (anchored.length === 0) continue
+    const sourceBytes = await blob.get(document.storageKey)
+
+    for (const sheet of anchored) {
+      const image = await renderPageRgb(sourceBytes, sheet.pageNo, { dpi: 220 })
+      const bbox = await renderPageBbox(sourceBytes, sheet.pageNo)
+      const palette = buildPalette(image, bbox.words, FLOOR_FINISH_CODES)
+      for (const [, p] of palette) {
+        if (p.fromDocument) result.paletteSamplesFromDocument += 1
+        else result.paletteSamplesCanonical += 1
+      }
+      const roomBboxes = findRoomBboxes(bbox.words, roomNames)
+      // S10-2(d) coordinate-carry: union the bboxes we can read from
+      // the matching FLOOR plan (A101 ↔ I401, A102 ↔ I402) for room
+      // names missing on the finish plan. Architectural and finish
+      // plans share the same paper grid for ground/first floors on
+      // Plot 4357. Coordinate-carry stays WITHIN THE SAME DOCUMENT —
+      // cross-doc carry would need exact grid alignment we can't assume.
+      const carry = COORDINATE_CARRY_PAIRS.find((pair) => pair.to === sheet.drawingNo)
+      if (carry) {
+        const partner = await prisma.sheet.findFirst({
+          where: { documentId: document.id, drawingNo: carry.from },
+        })
+        if (partner) {
+          const partnerBbox = await renderPageBbox(sourceBytes, partner.pageNo)
+          const partnerRoomBboxes = findRoomBboxes(partnerBbox.words, roomNames)
+          const knownNames = new Set(roomBboxes.map((b) => normalizeRoomName(b.name)))
+          for (const candidate of partnerRoomBboxes) {
+            const key = normalizeRoomName(candidate.name)
+            if (knownNames.has(key)) continue
+            roomBboxes.push(candidate)
+            knownNames.add(key)
+          }
         }
       }
+      if (roomBboxes.length === 0) continue
+      const assignments = mapRoomsToFinishCodes(image, roomBboxes, palette)
+      for (const a of assignments) {
+        if (a.finishCode === null) continue
+        const key = normalizeRoomName(a.roomName)
+        const existing = best.get(key)
+        if (!existing || a.confidence > existing.confidence) best.set(key, a)
+      }
+      result.sheetsProcessed += 1
     }
-    if (roomBboxes.length === 0) continue
-    const assignments = mapRoomsToFinishCodes(image, roomBboxes, palette)
-    for (const a of assignments) {
-      if (a.finishCode === null) continue
-      const key = normalizeRoomName(a.roomName)
-      const existing = best.get(key)
-      if (!existing || a.confidence > existing.confidence) best.set(key, a)
-    }
-    result.sheetsProcessed += 1
   }
 
   for (const room of rooms) {

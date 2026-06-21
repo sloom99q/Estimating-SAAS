@@ -185,27 +185,41 @@ export const estimateWardrobesHandler: JobHandler = async (job: JobRecord) => {
   const payload = (job.payload ?? {}) as EstimateWardrobesPayload
   if (!payload.projectId) throw new Error('ESTIMATE_WARDROBES: payload.projectId required')
 
-  const document = await prisma.document.findFirst({
+  // MULTI-DOC #1 (2026-06-21) — iterate ALL READY documents in the
+  // project, not just the most recent. Newest-first; first-hit-wins
+  // per bedroom roomId so revised drawings beat older revisions.
+  const documents = await prisma.document.findMany({
     where: { projectId: payload.projectId, organizationId: job.organizationId, status: 'READY' },
     orderBy: { updatedAt: 'desc' },
   })
-  if (!document) {
-    return { ok: true, message: 'No READY document; nothing to estimate.', estimates: [] }
+  if (documents.length === 0) {
+    return { ok: true, message: 'No READY documents; nothing to estimate.', estimates: [] }
   }
   const blob = getBlobStore()
-  const sourceBytes = await blob.get(document.storageKey)
-
-  const bedrooms = await locateBedrooms(
-    job.organizationId,
-    payload.projectId,
-    document.id,
-    sourceBytes,
-  )
+  const blobsByDoc = new Map<string, Buffer>()
+  for (const d of documents) {
+    blobsByDoc.set(d.id, await blob.get(d.storageKey))
+  }
+  const seenRoomIds = new Set<string>()
+  const bedrooms: Array<Awaited<ReturnType<typeof locateBedrooms>>[number] & { documentId: string }> = []
+  for (const doc of documents) {
+    const found = await locateBedrooms(
+      job.organizationId,
+      payload.projectId,
+      doc.id,
+      blobsByDoc.get(doc.id)!,
+    )
+    for (const b of found) {
+      if (seenRoomIds.has(b.roomId)) continue
+      seenRoomIds.add(b.roomId)
+      bedrooms.push({ ...b, documentId: doc.id })
+    }
+  }
   if (bedrooms.length === 0) {
     return {
       ok: true,
       message:
-        'No bedroom rooms found in extraction OR bedroom labels could not be located on the A1xx plans.',
+        'No bedroom rooms found in extraction OR bedroom labels could not be located on any document.',
       estimates: [],
     }
   }
@@ -235,9 +249,10 @@ export const estimateWardrobesHandler: JobHandler = async (job: JobRecord) => {
       sheetPointWidth: b.pageWidthPt,
       sheetPointHeight: b.pageHeightPt,
     })
+    const docBytes = blobsByDoc.get(b.documentId)!
     let jpegBase64: string
     try {
-      jpegBase64 = await renderPageCropJpeg(sourceBytes, {
+      jpegBase64 = await renderPageCropJpeg(docBytes, {
         pageNo: b.pageNo,
         x: crop.x,
         y: crop.y,
@@ -251,7 +266,7 @@ export const estimateWardrobesHandler: JobHandler = async (job: JobRecord) => {
     }
 
     const visionRes = await estimateWardrobe({
-      documentId: document.id,
+      documentId: b.documentId,
       pageNo: b.pageNo,
       jpegBase64,
       roomName: b.roomName,
