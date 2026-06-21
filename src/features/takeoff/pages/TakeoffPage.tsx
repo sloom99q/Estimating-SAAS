@@ -115,14 +115,23 @@ export function TakeoffPage() {
 
       <GenerateBoqCard
         projectId={projectId}
-        // PE-1 — render whenever the project has either a READY document
-        // OR an existing takeoff (a previous run's data carries through
-        // even if the doc selection is stale). The card itself shows the
-        // existing-BOQ download path so this is the right gate.
+        // PE-1 — render the card whenever the project has either a READY
+        // document OR an existing takeoff (a previous run's data carries
+        // through even if the doc selection is stale). The download path
+        // for any existing BOQ is the right surface here.
         ready={
           docBundle.data?.document.status === 'READY' ||
           (takeoff.data?.items.length ?? 0) > 0
         }
+        // MULTI-DOC #1 (2026-06-21) — block Re-run BOQ while any doc is
+        // still mid-pipeline. Partial BOQs from half-ingested drawing
+        // sets are the problem this is fixing.
+        pendingDocsCount={
+          (documents.data ?? []).filter(
+            (d) => d.status !== 'READY' && d.status !== 'FAILED',
+          ).length
+        }
+        totalDocsCount={(documents.data ?? []).length}
       />
 
       <EstimateKitchenCard

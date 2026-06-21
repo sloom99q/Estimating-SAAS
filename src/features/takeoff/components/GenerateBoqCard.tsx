@@ -46,7 +46,22 @@ async function waitForJobDone(jobId: string, pollMs = 1_000, maxTries = 240): Pr
   throw new Error(`${jobId} timed out after ${maxTries * pollMs / 1000}s`)
 }
 
-export function GenerateBoqCard({ projectId, ready }: { projectId: string; ready: boolean }) {
+export function GenerateBoqCard({
+  projectId,
+  ready,
+  pendingDocsCount = 0,
+  totalDocsCount = 0,
+}: {
+  projectId: string
+  ready: boolean
+  /**
+   * MULTI-DOC #1 — number of project documents not yet READY (and not
+   * FAILED). Re-run BOQ is blocked while > 0 so a half-ingested drawing
+   * set can't silently produce a partial BOQ.
+   */
+  pendingDocsCount?: number
+  totalDocsCount?: number
+}) {
   const qc = useQueryClient()
   const [phase, setPhase] = useState<Phase>('idle')
   const [error, setError] = useState<string | null>(null)
@@ -152,6 +167,16 @@ export function GenerateBoqCard({ projectId, ready }: { projectId: string; ready
       ? 'Re-run BOQ'
       : 'Retry'
 
+  // MULTI-DOC #1 — block Generate while any doc is still mid-pipeline
+  // so the user can't accidentally produce a partial BOQ from a half-
+  // ingested drawing set. The existing-BOQ download stays available
+  // regardless (an older BOQ is a valid artefact to grab).
+  const generateBlocked = pendingDocsCount > 0
+  const blockReason =
+    generateBlocked
+      ? `${pendingDocsCount} of ${totalDocsCount} documents still processing — wait before regenerating`
+      : null
+
   return (
     <Card withBorder>
       <Stack gap="sm">
@@ -162,7 +187,11 @@ export function GenerateBoqCard({ projectId, ready }: { projectId: string; ready
           </Text>
         ) : (
           <Group>
-            <Button onClick={run} loading={phase !== 'idle' && phase !== 'ready' && phase !== 'error'}>
+            <Button
+              onClick={run}
+              loading={phase !== 'idle' && phase !== 'ready' && phase !== 'error'}
+              disabled={generateBlocked}
+            >
               {label}
             </Button>
             {boq && phase === 'ready' ? (
@@ -187,6 +216,11 @@ export function GenerateBoqCard({ projectId, ready }: { projectId: string; ready
             ) : null}
           </Group>
         )}
+        {blockReason ? (
+          <Alert color="yellow" variant="light">
+            {blockReason}. Existing BOQ (if any) is still downloadable above.
+          </Alert>
+        ) : null}
         {boq && phase === 'ready' ? (
           <Text size="sm" c="dimmed">
             BOQ v{boq.version} ready. Subtotal {boq.subtotal ?? '—'} AED · P/S {boq.totalProvisional ?? '—'}.
