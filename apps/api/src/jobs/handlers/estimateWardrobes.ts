@@ -91,6 +91,19 @@ async function locateBedrooms(
   const targetSheets = archSheets.filter((s) => ARCH_PLAN_DRAWING_RE.test(s.drawingNo ?? ''))
   if (targetSheets.length === 0) return []
 
+  // Perf fix (2026-06-21): cache the pdftotext-bbox output per sheet.
+  // Previous impl called pdftotext per bedroom per sheet — for 5
+  // bedrooms × 3 plans = 15 calls (each ~1-2 s). Now: one call per
+  // sheet, scanned in-memory against every bedroom. Drops the locator
+  // phase from ~30 s to ~5 s on a typical villa.
+  const sheetBbox = new Map<
+    string,
+    Awaited<ReturnType<typeof renderPageBboxWithDims>>
+  >()
+  for (const sheet of targetSheets) {
+    sheetBbox.set(sheet.id, await renderPageBboxWithDims(sourceBytes, sheet.pageNo))
+  }
+
   const out: BedroomLocation[] = []
   for (const r of bedrooms) {
     const wantName = normalizeRoomName(r.description)
@@ -101,7 +114,8 @@ async function locateBedrooms(
       pageHeightPt: number
     } | null = null
     for (const sheet of targetSheets) {
-      const { words, pageWidthPt, pageHeightPt } = await renderPageBboxWithDims(sourceBytes, sheet.pageNo)
+      const cached = sheetBbox.get(sheet.id)!
+      const { words, pageWidthPt, pageHeightPt } = cached
       for (let i = 0; i < words.length; i += 1) {
         const w = words[i]!
         let nameBox: { xMin: number; yMin: number; xMax: number; yMax: number } | null = null
