@@ -820,11 +820,19 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
   // best score: area populated > no area, code populated > no code, higher
   // confidence wins ties. Losers are soft-deleted.
   // ---------------------------------------------------------------------
-  const allRoomItems = await prisma.takeoffItem.findMany({
+  // MULTI-DOC #3 (2026-06-21) — fetch BOTH ROOM and AREA_STATEMENT.
+  // Area statements ("Proposed Villa", "PLAN AREA — GF", roof labels)
+  // were previously excluded from this dedup loop, so the same
+  // statement on multiple sheets (intra-doc) AND across docs piled up
+  // as separate rows. They have no BOQ price impact (the selector
+  // skips AREA_STATEMENT) but they polluted the review table at 3×
+  // expected count after a multi-doc upload. Group key includes the
+  // category so ROOM and AREA_STATEMENT never cross-collapse.
+  const allDedupableItems = await prisma.takeoffItem.findMany({
     where: {
       organizationId: job.organizationId,
       projectId: document.projectId,
-      category: 'ROOM',
+      category: { in: ['ROOM', AREA_STATEMENT_CATEGORY] },
       deletedAt: null,
     },
     orderBy: { createdAt: 'asc' },
@@ -837,13 +845,23 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
   // best-scored row win and drops the duplicate noise. Real same-named
   // rooms across floors (rare in this fixture) are still distinguishable
   // via their tag (FF-NN / GF-NN) on the surviving row.
-  const groups = new Map<string, typeof allRoomItems>()
-  for (const item of allRoomItems) {
-    const name = normalizeRoomName(item.description)
-    if (!name) continue
-    const bucket = groups.get(name)
+  //
+  // For AREA_STATEMENT we key on the upper-case description (no
+  // normalizeRoomName — those rules collapse "MASTER BEDROOM L1" to
+  // "MASTER BEDROOM" which is wrong for area statements where "PLAN
+  // AREA — GF" vs "PLAN AREA — FF" are genuinely different lines).
+  const groups = new Map<string, typeof allDedupableItems>()
+  const allRoomItems = allDedupableItems // keep variable name for the rest of the function
+  for (const item of allDedupableItems) {
+    const rawKey =
+      item.category === AREA_STATEMENT_CATEGORY
+        ? item.description.trim().toUpperCase().replace(/\s+/g, ' ')
+        : normalizeRoomName(item.description)
+    if (!rawKey) continue
+    const key = `${item.category}|${rawKey}`
+    const bucket = groups.get(key)
     if (bucket) bucket.push(item)
-    else groups.set(name, [item])
+    else groups.set(key, [item])
   }
   const survivors: typeof allRoomItems = []
   let collapsedRoomDuplicates = 0
@@ -927,8 +945,13 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
   // still exists so a human reviewer can promote it if it's actually a
   // missed measurement, but the Space is only created when the area was
   // recovered (text-layer, bbox-spatial, or vision-confirmed).
+  //
+  // MULTI-DOC #3 (2026-06-21) — survivors now also includes
+  // AREA_STATEMENT rows (added so they dedup too). Spaces are
+  // room-level; skip AREA_STATEMENT explicitly here.
   let unmeasuredSurvivors = 0
   for (const survivor of survivors) {
+    if (survivor.category === AREA_STATEMENT_CATEGORY) continue
     if (survivor.qtyAi === null) {
       unmeasuredSurvivors += 1
       continue
@@ -1070,8 +1093,12 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
     })
   }
   // S8-5 unique room areas — sum of the post-dedup survivors.
+  // MULTI-DOC #3 — exclude AREA_STATEMENT survivors (they're plot/
+  // building-level totals, not per-room areas; summing them with
+  // rooms would double the validator's BUA check).
   const uniqueRoomAreas: number[] = []
   for (const s of survivors) {
+    if (s.category === AREA_STATEMENT_CATEGORY) continue
     if (s.qtyAi !== null) uniqueRoomAreas.push(Number(s.qtyAi.toString()))
   }
   const validatorCtx: ValidatorContext = {

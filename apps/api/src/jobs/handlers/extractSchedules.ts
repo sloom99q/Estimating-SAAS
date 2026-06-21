@@ -291,10 +291,19 @@ export const extractSchedulesHandler: JobHandler = async (job: JobRecord) => {
       // both facts explicitly.
       if (visionFromStub) meta.stub = true
       const category = kind === 'DOOR' ? 'DOOR' : 'WINDOW'
-      // S7-1 natural-key upsert: (documentId via sourceSheet, category, tag).
-      // Re-runs of the same schedule REPLACE the existing row rather than
-      // appending — the Sprint-6 chain-retry "every door twice" failure mode
-      // is now impossible at the data layer.
+      // S7-1 natural-key upsert: (project, category, tag).
+      //
+      // MULTI-DOC #3 (2026-06-21) — previously also scoped to
+      // `sourceSheet.documentId = document.id`, which meant D01 in
+      // doc-A and D01 in doc-B were treated as different rows. One
+      // project = one villa (the BOQ generator already assumes this);
+      // the same tag across docs IS the same door. Dropping the doc
+      // filter makes the natural key match what the legend handler
+      // already does. The UPDATE branch below overwrites with the
+      // current doc's values (newest-wins, per user verdict): the
+      // most recent extraction owns the row, and the sourceSheet
+      // pointer lands on the freshest sheet so the trace stays
+      // current.
       const existing = await prisma.takeoffItem.findFirst({
         where: {
           organizationId: job.organizationId,
@@ -302,7 +311,6 @@ export const extractSchedulesHandler: JobHandler = async (job: JobRecord) => {
           deletedAt: null,
           category,
           tag: row.tag,
-          sourceSheet: { documentId: document.id },
         },
         select: { id: true },
       })
