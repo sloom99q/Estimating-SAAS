@@ -6,7 +6,7 @@
   "upload": {
     "cta": "رفع PDF",
     "dropHere": "أسقط ملف PDF هنا أو اضغط للاختيار",
-    "help": "application/pdf، حتى ٥٠ ميجابايت",
+    "help": "application/pdf، حتى ٢٠٠ ميجابايت لكل ملف",
     "uploading": "جاري الرفع…",
     "uploaded": "تم الرفع. تتم المعالجة في الخلفية…"
   },

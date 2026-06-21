@@ -204,6 +204,14 @@ export async function tick(): Promise<JobRecord | null> {
         data: { status: 'FAILED', error: message, finishedAt: new Date() },
       })
       await bumpUsage(job.organizationId, { jobsFailed: 1 })
+      // MULTI-DOC #1 (2026-06-21) — pipeline-job FAILED → mark the
+      // Document FAILED too. Previously a crash in INGEST / CLASSIFY /
+      // EXTRACT_* left the Document stuck at PROCESSING forever, which
+      // blocked the multi-doc GenerateBoqCard gate (the gate releases
+      // on READY OR FAILED — but never gets either if the doc is
+      // stuck). Now any pipeline failure surfaces clearly in
+      // DocumentsListCard and the user can retry the one bad doc.
+      await markDocumentFailedIfPipeline(job, message).catch(() => undefined)
     } else {
       const backoffSec = Math.pow(2, job.attempts) * BACKOFF_BASE_SECONDS
       await prisma.job.update({
@@ -217,6 +225,43 @@ export async function tick(): Promise<JobRecord | null> {
     }
   }
   return job
+}
+
+/**
+ * MULTI-DOC #1 — pipeline-job FAILED handlers should flip the related
+ * Document to FAILED so the SPA gate releases. We grep the payload for
+ * a documentId and flip iff the job type is one of the pipeline stages
+ * that owns the document's lifecycle. Other job types (QUANTIFY, PRICE,
+ * ESTIMATE_*, EXPORT_*) don't touch Document.status.
+ */
+const DOCUMENT_LIFECYCLE_TYPES = new Set<string>([
+  'INGEST',
+  'CLASSIFY',
+  'EXTRACT_FINISH_LEGEND',
+  'EXTRACT_SCHEDULES',
+  'EXTRACT_ROOMS',
+])
+
+async function markDocumentFailedIfPipeline(
+  job: { type: string; payload: unknown; organizationId: string },
+  reason: string,
+): Promise<void> {
+  if (!DOCUMENT_LIFECYCLE_TYPES.has(job.type)) return
+  const payload = (job.payload ?? {}) as { documentId?: unknown }
+  const documentId = typeof payload.documentId === 'string' ? payload.documentId : null
+  if (!documentId) return
+  const doc = await prisma.document.findFirst({
+    where: { id: documentId, organizationId: job.organizationId },
+    select: { id: true, status: true },
+  })
+  // Don't downgrade a READY doc — a stale failing job on an already-
+  // processed document shouldn't undo the good state.
+  if (!doc || doc.status === 'READY' || doc.status === 'FAILED') return
+  await prisma.document.update({
+    where: { id: doc.id },
+    data: { status: 'FAILED' },
+  })
+  console.log(`[runner] doc ${documentId} → FAILED after ${job.type} crash: ${reason.slice(0, 120)}`)
 }
 
 async function bumpUsage(

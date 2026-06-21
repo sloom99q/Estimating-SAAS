@@ -6,7 +6,7 @@
   "upload": {
     "cta": "Upload PDF",
     "dropHere": "Drop a PDF here or click to choose",
-    "help": "application/pdf, up to 50 MB",
+    "help": "application/pdf, up to 200 MB per file",
     "uploading": "Uploading…",
     "uploaded": "Uploaded. Processing in the background…"
   },

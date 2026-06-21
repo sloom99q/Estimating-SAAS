@@ -6,7 +6,25 @@ import { requireAuth } from '../middleware/auth'
 import type { Router } from './router'
 import { errorResponse, jsonResponse } from '../utils/json'
 
-const MAX_UPLOAD_BYTES = 50 * 1024 * 1024 // 50 MB
+/**
+ * Per-file upload ceiling. Bumped 50 MB → 200 MB (2026-06-21) — real
+ * finishes packs (full I400 set on a complete villa) routinely hit
+ * 60-100 MB, larger drawing sets with embedded renderings push past
+ * 150 MB. 200 MB keeps us under the practical limit of in-memory blob
+ * processing on the worker (Bun handles ~1 GB buffers but 200 MB is
+ * a sane single-file cap; users with bigger sets should split docs).
+ *
+ * Override via env: UPLOAD_MAX_BYTES (raw bytes). Useful for
+ * temporary lifts on a known-big project.
+ */
+const MAX_UPLOAD_BYTES = (() => {
+  const raw = process.env.UPLOAD_MAX_BYTES
+  if (raw) {
+    const n = Number.parseInt(raw, 10)
+    if (Number.isFinite(n) && n > 0) return n
+  }
+  return 200 * 1024 * 1024
+})()
 const PDF_MAGIC = '%PDF'
 const PIPELINE_TYPES = ['INGEST', 'CLASSIFY', 'EXTRACT_SCHEDULES', 'EXTRACT_ROOMS'] as const
 
@@ -135,7 +153,12 @@ export function registerDocumentRoutes(router: Router): void {
       const file = fileEntry as { name?: string; type?: string; size: number; arrayBuffer(): Promise<ArrayBuffer> }
       if (file.size === 0) return errorResponse(400, 'Empty file')
       if (file.size > MAX_UPLOAD_BYTES) {
-        return errorResponse(413, `File exceeds ${MAX_UPLOAD_BYTES} bytes`)
+        const fileMb = Math.ceil(file.size / 1024 / 1024)
+        const limitMb = Math.floor(MAX_UPLOAD_BYTES / 1024 / 1024)
+        return errorResponse(
+          413,
+          `File is ${fileMb} MB; per-file cap is ${limitMb} MB. Split the document or raise UPLOAD_MAX_BYTES on the server.`,
+        )
       }
       // Belt + braces: trust the magic bytes, not just the content-type. Read
       // the whole thing into memory once (we'd need to anyway for the blob put).
