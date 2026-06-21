@@ -853,10 +853,23 @@ export const extractRoomsHandler: JobHandler = async (job: JobRecord) => {
   const groups = new Map<string, typeof allDedupableItems>()
   const allRoomItems = allDedupableItems // keep variable name for the rest of the function
   for (const item of allDedupableItems) {
-    const rawKey =
-      item.category === AREA_STATEMENT_CATEGORY
-        ? item.description.trim().toUpperCase().replace(/\s+/g, ' ')
-        : normalizeRoomName(item.description)
+    let rawKey: string
+    if (item.category === AREA_STATEMENT_CATEGORY) {
+      rawKey = item.description.trim().toUpperCase().replace(/\s+/g, ' ')
+    } else {
+      // MULTI-DOC #3 (2026-06-21) — for ROOM, prefer the normalized
+      // name (collapses "MASTER BATH" / "Master Bathroom" / case
+      // variants). But when normalize returns empty — e.g. the room
+      // description is just a floor-code like "FF-12" because the
+      // vision pass only captured the code, not the name — fall back
+      // to the raw description (upper-cased) as the dedup key. Without
+      // this fallback, every "FF-12" stays as its own row and silently
+      // duplicates measured area into SCREED / floor-finish math. Pro
+      // estimators want the area kept; the dedup just needs a key.
+      rawKey =
+        normalizeRoomName(item.description) ||
+        item.description.trim().toUpperCase().replace(/\s+/g, ' ')
+    }
     if (!rawKey) continue
     const key = `${item.category}|${rawKey}`
     const bucket = groups.get(key)
