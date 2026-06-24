@@ -39,6 +39,7 @@ import {
   parseRoomLabel,
   parseTagLabel,
 } from '../../dxf/textParse'
+import { normalizeRoomName } from './extractRooms'
 import { upsertValidationFlag } from '../validationFlagUpsert'
 import type { JobHandler, JobRecord } from '../types'
 
@@ -544,13 +545,20 @@ export const parseDxfHandler: JobHandler = async (job: JobRecord) => {
     })
   }
 
-  // Cross-source dedup for ROOMs only.
-  // DXF rows have basis=MEASURED and a tag (the architect's code).
-  // Vision rows typically have basis=VISUAL or DERIVED with tag=null.
-  // Group by normalized name; if any MEASURED-basis row is in the
-  // group, soft-delete the non-MEASURED peers. The vision row's
-  // finish_code (when set) is preserved on the survivor — we copy
-  // meta.finishSuggestion across before the delete.
+  // Cross-source dedup for ROOMs — DXF wins.
+  //
+  // Why the SAME normalizer extractRooms uses (not a local one):
+  // run-6 showed vision had stored rooms with token-sorted normalized
+  // forms ("MASTER BEDROOM — L1" → key "BEDROOM MASTER"). A simpler
+  // local norm produced "MASTER BEDROOM" → would have missed the
+  // pair and left both rows surviving. Importing normalizeRoomName
+  // keeps the key contract identical between the two handlers.
+  //
+  // Tie-breaker: when a group has multiple MEASURED rows (vision had
+  // some MEASURED rooms via the bbox-spatial pass; DXF adds more),
+  // prefer the one whose meta.sourceFormat === 'DXF' — the architect's
+  // explicit number beats vision's measurement. Falls back to highest
+  // confidence when neither is DXF.
   const allRoomItems = await prisma.takeoffItem.findMany({
     where: {
       organizationId: job.organizationId,
@@ -568,54 +576,88 @@ export const parseDxfHandler: JobHandler = async (job: JobRecord) => {
       meta: true,
     },
   })
-  // Simple normaliser local to this pass — full normalizer lives in
-  // extractRooms.ts but we don't need its richness here (we're
-  // joining DXF "GF-04 LIVING" with vision "LIVING — GF" / "Living
-  // Room — GF" etc.).
-  const norm = (s: string): string =>
-    s
-      .split('—')[0]!
-      .toUpperCase()
-      .replace(/[‘’ʼ]/g, "'")
-      .replace(/[.,;:()/&-]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim()
   const groups = new Map<string, typeof allRoomItems>()
   for (const r of allRoomItems) {
-    const k = norm(r.description)
+    const k = normalizeRoomName(r.description)
     if (!k) continue
     if (!groups.has(k)) groups.set(k, [])
     groups.get(k)!.push(r)
   }
+  const isDxfSource = (row: (typeof allRoomItems)[number]): boolean => {
+    const m = (row.meta ?? {}) as Record<string, unknown>
+    return m.sourceFormat === 'DXF'
+  }
+  const sourceScore = (row: (typeof allRoomItems)[number]): number =>
+    (isDxfSource(row) ? 1000 : 0) +
+    (row.basis === 'MEASURED' ? 100 : row.basis === 'DERIVED' ? 50 : 0) +
+    row.confidence
   let visionLosersSoftDeleted = 0
   for (const [, group] of groups) {
     if (group.length === 1) continue
-    const hasMeasured = group.some((r) => r.basis === 'MEASURED')
-    if (!hasMeasured) continue
-    const losers = group.filter((r) => r.basis !== 'MEASURED')
+    // Survivor = highest sourceScore. Losers = the rest, but only if
+    // a MEASURED or DXF row is in the group — never soft-delete an
+    // unrelated row.
+    const hasAuthoritative = group.some((r) => isDxfSource(r) || r.basis === 'MEASURED')
+    if (!hasAuthoritative) continue
+    const sorted = group.slice().sort((a, b) => sourceScore(b) - sourceScore(a))
+    const survivor = sorted[0]!
+    const losers = sorted.slice(1)
     if (losers.length === 0) continue
-    // Carry finishSuggestion from any loser into the MEASURED survivor
-    // if the survivor doesn't have one already.
-    const survivor = group.find((r) => r.basis === 'MEASURED')!
+    // Carry CONFIRMED finish_code AND finishSuggestion from losers
+    // to the survivor. The confirmed code matters more — QUANTIFY
+    // groups rooms into floor-finish lines by meta.finish_code; if
+    // the survivor lacks it, the room drops into the UNASSIGNED
+    // bucket (was the regression on the first DXF thread into
+    // run-6: LIVING's confirmed ST01 didn't follow the soft-delete
+    // and SCREED stayed at 304.77 instead of becoming 427.70).
+    //
+    // Two donors, picked independently:
+    //  - finish_code donor = first loser with meta.finish_code set
+    //    (the human's confirmed assignment).
+    //  - finishSuggestion donor = first loser with a non-null
+    //    finishSuggestion.code (the AI's proposal — only if no
+    //    confirmed code exists).
     const survivorMeta = (survivor.meta ?? {}) as Record<string, unknown>
-    if (!survivorMeta.finishSuggestion) {
-      const donor = losers.find((l) => {
-        const lm = (l.meta ?? {}) as Record<string, unknown>
-        const ls = lm.finishSuggestion as { code?: string | null } | null | undefined
-        return !!ls?.code
-      })
-      if (donor) {
-        const dm = donor.meta as Record<string, unknown>
+    const survivorHasFinishCode =
+      typeof survivorMeta.finish_code === 'string' && survivorMeta.finish_code.length > 0
+    const survivorHasSuggestion = !!(
+      survivorMeta.finishSuggestion as { code?: string } | undefined
+    )?.code
+    if (!survivorHasFinishCode || !survivorHasSuggestion) {
+      const finishCodeDonor = !survivorHasFinishCode
+        ? losers.find((l) => {
+            const lm = (l.meta ?? {}) as Record<string, unknown>
+            return typeof lm.finish_code === 'string' && (lm.finish_code as string).length > 0
+          })
+        : undefined
+      const suggestionDonor = !survivorHasSuggestion
+        ? losers.find((l) => {
+            const lm = (l.meta ?? {}) as Record<string, unknown>
+            const ls = lm.finishSuggestion as { code?: string | null } | null | undefined
+            return !!ls?.code
+          })
+        : undefined
+      if (finishCodeDonor || suggestionDonor) {
+        const codeDm = (finishCodeDonor?.meta ?? {}) as Record<string, unknown>
+        const suggDm = (suggestionDonor?.meta ?? {}) as Record<string, unknown>
+        const mergedMeta: Record<string, unknown> = { ...survivorMeta }
+        if (finishCodeDonor) {
+          mergedMeta.finish_code = codeDm.finish_code
+          if (codeDm.finish_evidence !== undefined && !mergedMeta.finish_evidence) {
+            mergedMeta.finish_evidence = codeDm.finish_evidence
+          }
+          mergedMeta.finishCodeCarriedFromTakeoffItemId = finishCodeDonor.id
+        }
+        if (suggestionDonor) {
+          mergedMeta.finishSuggestion = suggDm.finishSuggestion
+          if (suggDm.finish_evidence !== undefined && !mergedMeta.finish_evidence) {
+            mergedMeta.finish_evidence = suggDm.finish_evidence
+          }
+          mergedMeta.finishSuggestionCarriedFromTakeoffItemId = suggestionDonor.id
+        }
         await prisma.takeoffItem.update({
           where: { id: survivor.id },
-          data: {
-            meta: {
-              ...survivorMeta,
-              finishSuggestion: dm.finishSuggestion,
-              finish_evidence: dm.finish_evidence ?? null,
-              finishSuggestionCarriedFromTakeoffItemId: donor.id,
-            } as object,
-          },
+          data: { meta: mergedMeta as object },
         })
       }
     }
