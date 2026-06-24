@@ -21,6 +21,14 @@ export const JOB_TYPES = [
   'ESTIMATE_KITCHEN',
   /** AI-est roadmap #4a — opt-in vision pass for wardrobe lm per bedroom. */
   'ESTIMATE_WARDROBES',
+  /**
+   * DXF MVP — parse an uploaded DXF Document and emit measured
+   * ROOM / DOOR / WINDOW TakeoffItems. Single-shot handler (no chain
+   * — DXF doesn't need CLASSIFY / LEGEND / SCHEDULES passes). Enqueued
+   * by PATCH /api/projects/:id/layer-map after the estimator confirms
+   * the layer map.
+   */
+  'PARSE_DXF',
   'VALIDATE',
   'PRICE',
   'EXPORT_XLSX',

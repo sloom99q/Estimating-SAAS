@@ -72,8 +72,22 @@ const ROLE_TOKENS: Record<keyof LayerReport['suggested'], string[]> = {
   // suggest itself for the role. Order is preference: earlier
   // candidates score higher. Single-character tokens are excluded —
   // they over-match.
-  roomBounds: ['AREA-ROOM', 'AREA', 'ROOM', 'WALL'],
-  roomLabels: ['ANNO-ROOM', 'ROOM-IDEN', 'ROOM-NAMES', 'TEXT-ROOM', 'ANNO-NOTE'],
+  //
+  // DXF MVP follow-up (2026-06-24) — real LAMI Architects files use
+  // 'IDEN' / 'AREA-IDEN' / 'FLOR-IDEN' for label layers; widened the
+  // roomLabels token set so the modal auto-suggests them instead of
+  // dropping the role to empty.
+  roomBounds: ['AREA-ROOM', 'ROOM', 'WALL'],
+  roomLabels: [
+    'AREA-IDEN',   // LAMI-A-AREA-IDEN — preferred when present
+    'FLOR-IDEN',   // alt label layer some firms use
+    'ROOM-IDEN',
+    'ANNO-ROOM',
+    'ROOM-NAMES',
+    'TEXT-ROOM',
+    'ANNO-NOTE',
+    'IDEN',         // fallback — any *-IDEN layer beats nothing
+  ],
   doors: ['DOOR'],
   windows: ['GLAZ', 'WINDOW'],
   walls: ['WALL'],
@@ -224,6 +238,27 @@ export function introspectDxf(bytes: string): LayerReport {
       // Layers with zero entities can't have been a real role layer;
       // drop them to avoid noisy suggestions.
       .filter((x) => x.s.entityCount > 0)
+      // DXF MVP follow-up (2026-06-24) — a layer with no closed
+      // polygons can't be a room-bounds layer no matter how cleanly
+      // its name matches "AREA" or "ROOM". On the LAMI files
+      // `LAMI-A-AREA-IDEN` scored 90 here (contains AREA) but had
+      // zero closed LWPOLYLINEs — it's labels only. Drop that case
+      // so the modal doesn't pre-fill the user into a guaranteed
+      // zero-rooms outcome.
+      .filter((x) =>
+        role === 'roomBounds' ? x.s.closedPolylineCount > 0 : true,
+      )
+      // Same idea symmetrically — a roomLabels candidate should have
+      // at least one TEXT / MTEXT entity.
+      .filter((x) =>
+        role === 'roomLabels' ? x.s.textCount > 0 : true,
+      )
+      // doors / windows candidates should have at least one INSERT.
+      .filter((x) =>
+        role === 'doors' || role === 'windows'
+          ? (x.s.entityTypes['INSERT'] ?? 0) > 0
+          : true,
+      )
     scored.sort((a, b) => b.score - a.score || b.s.entityCount - a.s.entityCount)
     suggested[role] = scored.map((x) => x.s.name)
     // Decorate the summary so the modal can label badges per layer.

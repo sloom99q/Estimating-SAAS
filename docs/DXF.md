@@ -155,67 +155,118 @@ configured layer names, groups by geometric inside-ness.
 
 ---
 
-## 4. Room polygon extraction algorithm
+## 4. Room area extraction — MTEXT-label path (MVP)
 
-Given the parsed entity tree:
+**Revised 2026-06-24** — original §4 assumed every architect draws
+rooms as closed `LWPOLYLINE`s on a single bounds layer. The first
+real-file test (LAMI Architects, LM1929 villa) returned **zero**
+closed polylines anywhere in A101: walls are individual `LINE`
+segments on `LAMI-A-WALL-EXTR`, no `HATCH` fills, no polygon room
+boundaries. The polygon-area algorithm would have produced zero rooms.
 
-1. **Collect room polygons.** Filter `entities[]` where
-   `type ∈ {LWPOLYLINE, POLYLINE, HATCH-boundary}` AND `layer` matches the
-   configured **room-bounds layer**. Each polygon becomes a `Room` candidate
-   with vertices `[(x₁,y₁), …, (xₙ,yₙ)]`.
+But probing further showed the architect **writes the measured area
+directly into the room label**: every room has two paired `MTEXT`
+entities on `LAMI-A-AREA-IDEN`, offset by ~23 mm:
 
-2. **Compute area and perimeter** per candidate:
-   - Area: signed shoelace, `½ |Σᵢ (xᵢ·yᵢ₊₁ − xᵢ₊₁·yᵢ)|`.
-   - Perimeter: `Σᵢ √((xᵢ₊₁−xᵢ)² + (yᵢ₊₁−yᵢ)²)`.
-   - For polylines with `bulge` on edges (curved walls), compute the arc
-     length and substitute. The shoelace formula stays usable if we
-     subdivide the arc into N segments (N=16 is plenty for area; for
-     perimeter the closed-form `bulge → chord → arc-length` is one line
-     of trig).
+```
+"GF-04 58.82 m²"        ← code + architect-measured area
+"LIVING"                ← human-readable name
+```
 
-3. **Collect label TEXT/MTEXT entities** whose `layer` matches the
-   configured **room-label layer** (commonly `A-ANNO-ROOM`,
-   `ROOM-NAMES`, `TEXT-ROOMS`).
+So instead of computing area from geometry, we **read it from the
+text**. The architect's stated number is more authoritative than
+anything we could compute (they signed the drawing with it) and the
+extraction becomes deterministic text-processing rather than fragile
+polygon math. The pivot is a net win on every axis: simpler code,
+exact numbers, no XREF / LINE-soup / bulge-arc edge cases.
 
-4. **Associate label → polygon** by point-in-polygon test (ray casting,
-   O(n) per check; N rooms × M labels ≈ 100×200 = 20k ops — trivially
-   fast). If a label is inside exactly one polygon, that's the room
-   name. If inside multiple (annotated rooms inside a parent area), the
-   smallest containing polygon wins.
+### 4.1 Algorithm
 
-5. **Emit TakeoffItem rows** at category=`ROOM`, basis=`MEASURED`,
-   confidence=`98`, with `meta.area_m2`, `meta.perimeter_lm`,
-   `meta.polygon` (the vertex array, useful for future debugging /
-   visualization). `sourceSheet` points to the DXF as a pseudo-sheet
-   (see §7).
+Given the parsed entity tree and the project's `LayerMap`:
 
-6. **Unlabelled polygons** → still emit a row, description=`(unnamed
-   room ${i})`, confidence=`75`, requires human review. Don't drop
-   them — total area sanity-check matters.
+1. **Collect label entities** — `MTEXT` and `TEXT` on
+   `layerMap.roomLabels`. Apply `cleanMText()` to each — AutoCAD wraps
+   labels in formatting codes like `\pxqc,t0.83333,1.66667,...;` which
+   must be stripped before regex.
 
-### 4.1 Edge cases
+2. **Classify each cleaned label** by regex:
+   - `/^([A-Z]+-\d+)\s+([\d.]+)\s*m²?/` → matches `GF-04 58.82 m²` →
+     `{ code: 'GF-04', areaM2: 58.82 }` (a "code+area" label).
+   - Anything else (single word, multi-word phrase) → a "name" label.
 
-- **Polygons that aren't rooms** (e.g. floor-finish hatch boundaries,
-  furniture outlines, the building outline itself). Two filters:
-  (a) layer match (their hatches live on different layers);
-  (b) min/max area gate (a 0.5 m² polygon is furniture; a 800 m²
-  polygon is the building outline). Default gates: `0.8 m² ≤ area ≤
-  500 m²` for an interior room.
-- **Non-LWPOLYLINE room bounds** — old drawings use separate LINE
-  entities forming a closed loop. Detect: gather all LINE entities on
-  the room-bounds layer, build a graph by endpoint adjacency, find
-  closed cycles. Implementation cost ≈ 1 day. **Defer to phase 2** if
-  the user's test DWGs are modern LWPOLYLINE-based.
-- **XREFs** (external references). Many large projects have walls in a
-  separate XREF DWG. If the architect supplies just the host file
-  without the XREF, walls vanish. **Detection:** parse the `BLOCKS`
-  section; any block whose name starts with `*XREF` flags a missing
-  XREF and we emit a project-level WARNING flag asking the user to
-  upload the linked file. MVP: detect-and-warn only; full XREF
-  resolution is phase 2.
-- **Block-instance polygons** — rooms drawn inside a layout/viewport.
-  Detect by checking if the polygon's `ownerHandle` points into a
-  paperspace block; skip paperspace, only process modelspace.
+3. **Pair each `code+area` with its nearest `name`** by Euclidean
+   distance between insertion points. The architect's offset is
+   consistent within a drawing — on LM1929 it's 23 mm — so
+   nearest-neighbour pairing is robust. Compute and log the median +
+   max pair distance per file; flag if max > 5× median (suggests a
+   layout the heuristic misclassifies).
+
+4. **Emit ROOM TakeoffItem** per paired row:
+   - `tag = code` (e.g. `GF-04`)
+   - `description = name` (e.g. `LIVING`)
+   - `qtyAi = areaM2`, `unit = 'm²'`
+   - `basis = MEASURED` (architect's own number)
+   - `confidence = 98`
+   - `status = EDITED` (no human round-trip needed — the architect
+     already approved the number when they put it on the drawing)
+   - `meta = { code, area_m2, sourceFormat: 'DXF', textRaw, textClean,
+              pairDistanceMm }`
+
+5. **Unpaired `code+area` rows** → still emit a TakeoffItem with
+   `description = '(unnamed)'`, `confidence = 75`, `status = AI`.
+   Estimator names it in the review table. Don't drop — the area is
+   real.
+
+6. **Unpaired `name` rows** → emit a TakeoffItem at `qtyAi = null`,
+   `confidence = 60`, `status = AI`. These are usually corridors /
+   stairs the architect didn't label with an area (the GF-12/13/15
+   gaps in LM1929). The estimator either provides the area (manual
+   measurement / SCREED accepts UNASSIGNED) or deletes the row.
+
+### 4.2 Door / window tag extraction
+
+Same MTEXT-pairing idea on the door/window layers. A101's
+`LAMI-A-DOOR-IDEN` has 14 `INSERT` entities + 14 `MTEXT` entities —
+one MTEXT carries each door's schedule tag (`D01`, `D02`, …) next to
+its INSERT.
+
+1. **Collect INSERTs** on `layerMap.doors`, `layerMap.windows`.
+2. **Collect MTEXT/TEXT** on the same layers (architects place the
+   tag right next to the INSERT).
+3. **Pair each INSERT with its nearest MTEXT**; extract the tag via
+   `/^([A-Z]+\d+)$/`.
+4. **Group by tag** → count per tag.
+5. **Emit DOOR / WINDOW TakeoffItem** per unique tag, matching the
+   vision schedule shape (`tag = 'D01'`, `qtyAi = count`,
+   `basis = MEASURED`, `conf = 98`).
+
+This matches the existing schedule-row format exactly, so the §8 merge
+precedence collapses DXF doors against vision-extracted doors on
+`(project, category, tag)` (the natural key the schedule handler
+already uses post-MULTI-DOC #3).
+
+### 4.3 Sheets that don't have rooms
+
+Not every DXF is a floor plan. Elevations / sections / details / RCPs
+won't have room labels. Detection is a single check: zero matched
+`code+area` MTEXT after step 2 → emit a project flag "no rooms found
+in this DXF — likely an elevation / detail / RCP sheet, skipped" and
+exit the handler cleanly. The Document still goes to `READY`; the
+estimator can verify or delete.
+
+### 4.4 Shelved to phase 2
+
+- **Polygon-based area** — the original §4 algorithm (shoelace + bulge
+  + point-in-polygon labels) is preserved as a fallback for files
+  where the architect did NOT label areas. Implementation cost
+  unchanged (~1 day); we just don't need it yet.
+- **LINE-graph room reconstruction** — for architects who neither
+  label areas nor draw closed polylines. Same deferral as before.
+- **Wall length extraction** for paint — phase 2 (Q7 verdict).
+- **HATCH-based room polygons** — confirmed absent in LAMI files.
+  Worth a probe if a different firm's files have hatched rooms.
+- **XREF resolution** — moot for the MTEXT-area path; we don't need
+  wall geometry at all.
 
 ---
 
@@ -510,23 +561,30 @@ they don't dedup against each other. This already works for vision
 
 ## 14. Acceptance criteria for "MVP shipped"
 
-On the plot4357 villa test set (3 PDFs + the DWG once you export it):
+On the LM1929 villa test set (A101 ground floor + A102 first floor
+DXFs, exported from the architect's DWGs):
 
-1. PARSE_DXF runs end-to-end on the GF DWG, emits ≥ 20 rooms with
-   measured area, ≥ 10 doors with counts per tag, ≥ 15 windows.
-2. Areas agree with the I400 finish-plan PDF schedule within ±0.5%
-   per room (we have ground truth from the contractor's BOQ —
-   compare).
-3. Door counts per tag match the schedule extraction within ±1 (vision
-   schedule may miscount; DXF wins).
+1. PARSE_DXF runs end-to-end on A101 + A102, emits the rooms the
+   architect labelled (LM1929 has 13 GF + 10 FF = 23 labelled rooms).
+2. **Areas match the architect's stated values exactly** — every
+   extracted `qtyAi` equals the number on the label, to the cent.
+   `LIVING = 58.82 m²`, `MASTER BEDROOM = 38.35 m²`. The ±0.5% bar of
+   the original spec becomes 0% by construction under MTEXT-area
+   parsing — we're reading the architect's number, not computing one.
+3. Door counts per tag (D01, D02, …) match the vision schedule
+   extraction within ±1; on conflict, DXF wins.
 4. The dedup pipeline soft-deletes vision ROOM rows that lose to DXF
    rows; the final review table shows MEASURED-basis rooms with the
    vision-suggested finish code carried forward.
-5. BOQ generates from the MEASURED rooms — SCREED-FLR sum within ±0.5%
-   of the I400 plan area.
-6. Confidence > 95 on every DXF-derived row.
+5. BOQ generates from the MEASURED rooms — SCREED-FLR sum equals the
+   sum of architect-stated areas exactly (modulo the UNASSIGNED bucket
+   for unlabelled corridors / stairs, which is the existing #127
+   backlog item, not a DXF regression).
+6. Confidence ≥ 95 on every DXF-derived row.
+7. Full room list (code, area, name) for A101 + A102 delivered to the
+   estimator for eyeball review against the contractor's BOQ.
 
-When all 6 land, MVP is done. Anything beyond goes to phase 2.
+When all 7 land, MVP is done. Anything beyond goes to phase 2.
 
 ---
 
