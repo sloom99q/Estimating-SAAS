@@ -126,9 +126,14 @@ export function TakeoffPage() {
         // MULTI-DOC #1 (2026-06-21) — block Re-run BOQ while any doc is
         // still mid-pipeline. Partial BOQs from half-ingested drawing
         // sets are the problem this is fixing.
+        //
+        // DXF-BLOCK (2026-06-24) — SKIPPED is also a terminal state
+        // (DXF the user cancelled, or a non-room-bearing DXF the
+        // upload introspector auto-excluded). Treat it the same as
+        // FAILED so the gate releases when only-SKIPPED docs remain.
         pendingDocsCount={
           (documents.data ?? []).filter(
-            (d) => d.status !== 'READY' && d.status !== 'FAILED',
+            (d) => d.status !== 'READY' && d.status !== 'FAILED' && d.status !== 'SKIPPED',
           ).length
         }
         totalDocsCount={(documents.data ?? []).length}

@@ -53,6 +53,14 @@ enum DocumentStatus {
   PROCESSING
   READY
   FAILED
+  /// DXF-BLOCK / DXF-AUTO-SKIP — document is uploaded but deliberately
+  /// excluded from extraction. Set when (a) the upload introspector
+  /// found no room-label MTEXTs (elevation / detail / RCP sheets), or
+  /// (b) the user cancelled the LayerMapModal. The multi-doc gate
+  /// treats SKIPPED like FAILED — does NOT block BOQ generation. A
+  /// SKIPPED doc can be re-promoted by uploading the file again or by
+  /// re-opening the layer-map modal from DocumentsListCard.
+  SKIPPED
 }
 
 // Brief lists "WIGHT" between DOOR and FLOOR_FINISH — that's a typo for

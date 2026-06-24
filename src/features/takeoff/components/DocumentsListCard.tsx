@@ -100,9 +100,16 @@ export function DocumentsListCard({
                         ? 'red'
                         : d.status === 'PROCESSING'
                         ? 'blue'
+                        : d.status === 'SKIPPED'
+                        ? 'gray'
                         : 'gray'
                     }
                     variant={d.jobs.failed > 0 ? 'filled' : 'light'}
+                    title={
+                      d.status === 'SKIPPED'
+                        ? 'Excluded from extraction — no room labels detected, or layer mapping was cancelled'
+                        : undefined
+                    }
                   >
                     {d.jobs.failed > 0 ? 'FAILED' : d.status}
                   </Badge>

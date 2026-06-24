@@ -14,7 +14,7 @@ export interface DocumentDto {
   filename: string
   storageKey: string
   pageCount: number | null
-  status: 'UPLOADED' | 'PROCESSING' | 'READY' | 'FAILED'
+  status: 'UPLOADED' | 'PROCESSING' | 'READY' | 'FAILED' | 'SKIPPED'
   createdAt: string
   updatedAt: string
 }
