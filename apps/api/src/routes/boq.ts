@@ -275,9 +275,31 @@ export function registerBoqRoutes(router: Router): void {
       const latest = await db.boq.findFirst({
         where: { projectId, deletedAt: null },
         orderBy: { version: 'desc' },
-        select: { version: true },
+        select: { id: true, version: true },
       })
       const nextVersion = (latest?.version ?? 0) + 1
+
+      // P/S PERSISTENCE (2026-06-24) — manual P/S lines the estimator
+      // typed in via AddProvisionalLineCard live on the PRIOR BOQ as
+      // BoqLines with `takeoffItemId IS NULL` (the generator below
+      // only creates lines where takeoffItemId points back at a
+      // TakeoffItem). Without carry-forward, every regenerate creates
+      // a fresh empty BOQ and the estimator's ~1.8M of P/S (windows
+      // 300k, lighting 70k, cladding 120k, facade 100k, MEP 300k,
+      // sanitary 200k, …) silently disappears. Fix: fetch prior
+      // manual lines + re-insert into matching new-BOQ sections.
+      //
+      // Deletion semantics correct by construction: deleting a P/S
+      // line on the prior BOQ hard-deletes it (#128); on the next
+      // regenerate it's no longer in the prior set, so it doesn't
+      // come back.
+      const priorManualLines = latest
+        ? await db.boqLine.findMany({
+            where: { boqId: latest.id, takeoffItemId: null },
+            include: { section: { select: { code: true } } },
+            orderBy: { sortOrder: 'asc' },
+          })
+        : []
 
       const boqId = await db.$transaction(async (tx) => {
         const boq = await tx.boq.create({
@@ -289,6 +311,8 @@ export function registerBoqRoutes(router: Router): void {
             currency: 'AED',
           },
         })
+
+        const sectionsByCode = new Map<string, string>()
 
         for (const [sectionCode, sectionItems] of sectionBuckets) {
           const def = SECTIONS[sectionCode]
@@ -302,6 +326,7 @@ export function registerBoqRoutes(router: Router): void {
               sortOrder: def.sortOrder,
             },
           })
+          sectionsByCode.set(def.code, section.id)
           await tx.boqLine.createMany({
             data: sectionItems.map((item, i) => ({
               organizationId: ctx.organizationId,
@@ -318,6 +343,91 @@ export function registerBoqRoutes(router: Router): void {
             })),
           })
         }
+
+        // Carry forward manual P/S. A prior section we don't have in
+        // the new BOQ (rare — categories changed) gets created on
+        // demand so we don't drop the line.
+        if (priorManualLines.length > 0) {
+          // Group by section code so itemRef numbering continues
+          // after the auto-generated lines.
+          const linesBySection = new Map<string, typeof priorManualLines>()
+          for (const l of priorManualLines) {
+            const code = l.section.code
+            if (!linesBySection.has(code)) linesBySection.set(code, [])
+            linesBySection.get(code)!.push(l)
+          }
+
+          let carriedTotal = 0
+          let carriedProvisional = 0
+
+          for (const [sectionCode, lines] of linesBySection) {
+            let sectionId = sectionsByCode.get(sectionCode)
+            if (!sectionId) {
+              const def = SECTIONS[sectionCode]
+              if (!def) continue
+              const section = await tx.boqSection.create({
+                data: {
+                  organizationId: ctx.organizationId,
+                  boqId: boq.id,
+                  code: def.code,
+                  title: def.title,
+                  sortOrder: def.sortOrder,
+                },
+              })
+              sectionsByCode.set(def.code, section.id)
+              sectionId = section.id
+            }
+            // Continue numbering after the auto lines in this section.
+            const existingCount = await tx.boqLine.count({
+              where: { sectionId },
+            })
+            for (let i = 0; i < lines.length; i += 1) {
+              const l = lines[i]!
+              const refIndex = existingCount + i + 1
+              const itemRef = `${sectionCode}/${refIndex.toString().padStart(3, '0')}`
+              // amount + psAmount get re-computed by PRICE; we
+              // copy them through so the unpriced BOQ shows them
+              // immediately (the SPA renders pre-price totals).
+              const amount = l.amount ? Number(l.amount.toString()) : 0
+              const ps = l.psAmount ? Number(l.psAmount.toString()) : 0
+              carriedTotal += amount
+              carriedProvisional += ps
+              await tx.boqLine.create({
+                data: {
+                  organizationId: ctx.organizationId,
+                  boqId: boq.id,
+                  sectionId,
+                  itemRef,
+                  description: l.description,
+                  brand: l.brand,
+                  unit: l.unit,
+                  qty: l.qty,
+                  rate: l.rate,
+                  amount: l.amount,
+                  isProvisional: l.isProvisional,
+                  psAmount: l.psAmount,
+                  confidence: l.confidence,
+                  // takeoffItemId stays NULL — marks as "manual" so
+                  // the NEXT regenerate carries it forward too.
+                  sortOrder: existingCount + i,
+                },
+              })
+            }
+          }
+
+          if (carriedTotal !== 0 || carriedProvisional !== 0) {
+            await tx.boq.update({
+              where: { id: boq.id },
+              data: {
+                ...(carriedTotal !== 0 ? { subtotal: { increment: carriedTotal } } : {}),
+                ...(carriedProvisional !== 0
+                  ? { totalProvisional: { increment: carriedProvisional } }
+                  : {}),
+              },
+            })
+          }
+        }
+
         return boq.id
       })
 
