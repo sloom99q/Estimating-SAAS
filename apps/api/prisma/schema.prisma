@@ -184,6 +184,9 @@ model Organization {
   boqSections            BoqSection[]
   boqLines               BoqLine[]
   quotations             Quotation[]
+  // LIB-1 — material library navigator.
+  brands                 Brand[]
+  boqReviewNotes         BoqReviewNote[]
 
   @@map("organizations")
 }
@@ -290,6 +293,10 @@ model Material {
   wastePct       Decimal   @db.Decimal(5, 2)
   currency       String    @default("AED")
   supplier       String?
+  /// LIB-1 (2026-06-24) — optional Brand pointer for Library
+  /// navigation (Brand → System → Component). Pre-existing
+  /// Materials default to null = "ungrouped" in the SPA.
+  brandId        String?
   notes          String?
   imageUrl       String?
   active         Boolean   @default(true)
@@ -298,13 +305,41 @@ model Material {
   deletedAt      DateTime? @db.Timestamptz(6)
 
   organization        Organization            @relation(fields: [organizationId], references: [id])
+  brand               Brand?                  @relation(fields: [brandId], references: [id])
   supplierPrices      MaterialSupplierPrice[]
   priceSnapshots      PriceSnapshot[]
   assemblyComponents  AssemblyComponent[]
 
   @@index([organizationId, name])
   @@index([organizationId, category])
+  @@index([organizationId, brandId])
   @@map("materials")
+}
+
+/// LIB-1 (2026-06-24) — Brand for the Material Library navigator.
+/// First-class entity rather than free-text on Material.supplier so
+/// the SPA can group / filter / pin a brand's preferred status.
+model Brand {
+  id             String    @id @default(cuid())
+  organizationId String
+  name           String
+  /// 'paint' | 'sanitary' | 'tile' | 'gypsum' | 'electrical' |
+  /// 'lighting' | 'joinery' | 'mep' | 'other'
+  category       String
+  website        String?
+  notes          String?
+  active         Boolean   @default(true)
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime? @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  systems      Assembly[]
+  materials    Material[]
+
+  @@unique([organizationId, name, category])
+  @@index([organizationId, category, active])
+  @@map("brands")
 }
 
 // ---------------------------------------------------------------------------
@@ -606,20 +641,39 @@ model Assembly {
   id             String              @id @default(cuid())
   organizationId String
   name           String
-  /// 'WALL' | 'FLOOR' | 'CEILING' | 'GENERIC'
+  /// 'WALL' | 'FLOOR' | 'CEILING' | 'GENERIC' — legacy routing
+  /// signal kept alongside `takeoffCategory` until existing rows
+  /// are migrated. PRICE checks `takeoffCategory` first; falls
+  /// back to `appliesTo` when null.
   appliesTo      String
   outputUnit     String
   notes          String?
+  /// LIB-1 (2026-06-24) — Library routing fields.
+  brandId        String?
+  /// Which TakeoffItem category this system bills against. When
+  /// non-null, PRICE matches by this instead of the loose
+  /// `appliesTo` string.
+  takeoffCategory TakeoffCategory?
+  /// Finish codes this system is the default for (e.g. ['WP01',
+  /// 'WP02']). Empty array = applies to ANY code in the matching
+  /// takeoffCategory.
+  defaultForFinishCodes String[] @default([])
+  /// When multiple systems match a line, lowest sortOrder wins.
+  /// 100 = "house" default; lower numbers = more specific overrides.
+  sortOrder      Int                 @default(100)
   createdAt      DateTime            @default(now()) @db.Timestamptz(6)
   updatedAt      DateTime            @updatedAt @db.Timestamptz(6)
   deletedAt      DateTime?           @db.Timestamptz(6)
 
   organization Organization         @relation(fields: [organizationId], references: [id])
+  brand        Brand?               @relation(fields: [brandId], references: [id])
   components   AssemblyComponent[]
   boqLines     BoqLine[]
 
   @@index([organizationId, name])
   @@index([organizationId, appliesTo])
+  @@index([organizationId, takeoffCategory, sortOrder])
+  @@index([organizationId, brandId])
   @@map("assemblies")
 }
 
@@ -693,6 +747,12 @@ model Boq {
   subtotal           Decimal?      @db.Decimal(14, 2)
   totalProvisional   Decimal?      @db.Decimal(14, 2)
   generatedFromJobId String?
+  /// LIB-1 (2026-06-24) — JSON snapshot of every Assembly +
+  /// AssemblyComponent used to price this BOQ. Written at generate
+  /// time, never mutated. Lets historical BOQs render their recipes
+  /// even after the live Library changes prices. SHA of this is
+  /// surfaced in the XLSX header so two exports diff cleanly.
+  libraryFingerprint Json?
   createdAt          DateTime      @default(now()) @db.Timestamptz(6)
   updatedAt          DateTime      @updatedAt @db.Timestamptz(6)
   deletedAt          DateTime?     @db.Timestamptz(6)
@@ -702,10 +762,44 @@ model Boq {
   sections     BoqSection[]
   lines        BoqLine[]
   quotations   Quotation[]
+  reviewNotes  BoqReviewNote[]
 
   @@unique([organizationId, projectId, version])
   @@index([organizationId, projectId])
   @@map("boqs")
+}
+
+/// LIB-1 (2026-06-24) — pricing/BOQ-time concerns surfaced to the
+/// estimator before sign-off. Distinct from ValidationFlag (which is
+/// a broader extraction-time signal) because notes have a dismissal
+/// lifecycle and survive regenerate via `noteKey`.
+model BoqReviewNote {
+  id             String   @id @default(cuid())
+  organizationId String
+  projectId      String
+  boqId          String
+  /// SHA(rule + boqLineId) — stable across regenerate so a
+  /// dismissed note doesn't reappear on the next BOQ version when
+  /// the same line + rule combo recurs.
+  noteKey        String
+  /// 'PRICE_FALLBACK_TO_GLOBAL' | 'PRICE_FALLBACK_TO_PS' |
+  /// 'LIBRARY_COMPONENT_MISSING_PRICE' | 'SYSTEM_OVERRIDDEN' | ...
+  rule           String
+  /// 'WARN' | 'INFO'
+  severity       String
+  message        String
+  boqLineId      String?
+  resolvedAt     DateTime? @db.Timestamptz(6)
+  resolvedBy     String?
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  boq          Boq          @relation(fields: [boqId], references: [id])
+
+  @@unique([projectId, boqId, noteKey])
+  @@index([projectId, resolvedAt])
+  @@index([organizationId, projectId])
+  @@map("boq_review_notes")
 }
 
 /// Triple-A grouping: '1.0 General', '2.5 Metal', '2.6 Wood', '2.8 Doors-
