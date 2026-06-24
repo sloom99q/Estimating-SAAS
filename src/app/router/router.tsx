@@ -123,6 +123,15 @@ export const router = createBrowserRouter([
               return { Component: AdminOrgsPage }
             },
           },
+          {
+            path: '/dxf/preview/:projectId/:documentId',
+            lazy: async () => {
+              const { DxfLayerMapPreviewPage } = await import(
+                '@/app/pages/dxf/DxfLayerMapPreviewPage'
+              )
+              return { Component: DxfLayerMapPreviewPage }
+            },
+          },
         ],
       },
     ],

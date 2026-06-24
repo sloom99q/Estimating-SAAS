@@ -28,6 +28,38 @@ const MAX_UPLOAD_BYTES = (() => {
 const PDF_MAGIC = '%PDF'
 const PIPELINE_TYPES = ['INGEST', 'CLASSIFY', 'EXTRACT_SCHEDULES', 'EXTRACT_ROOMS'] as const
 
+/**
+ * DXF MVP — fuzzy DXF detection.
+ *
+ * DXF is plain text. The R12+ ASCII DXF format always opens with the
+ * group code `0` on the first line, then `SECTION`, then `2`, then
+ * `HEADER`. Whitespace handling varies by exporter (some emit leading
+ * spaces or CRLF). We:
+ *   1. Sniff the first ~256 bytes for the literal `SECTION` and the
+ *      group-code-`0` pattern.
+ *   2. Require the filename to end `.dxf` (case-insensitive) OR the
+ *      content-type to be one of the dxf MIME variants.
+ * Both checks must pass — magic alone false-positives on any text
+ * file that happens to contain "SECTION".
+ */
+function detectDxf(buf: Buffer, filename: string, contentType: string | null | undefined): boolean {
+  const head = buf.slice(0, 512).toString('utf-8').trimStart()
+  const looksLikeDxfMagic =
+    /^0\s+SECTION\s+2\s+HEADER/i.test(head) ||
+    /^999/.test(head) || // some exporters write a leading 999 comment line
+    head.includes('AutoCAD')
+  if (!looksLikeDxfMagic) return false
+  const filenameOk = /\.dxf$/i.test(filename)
+  const contentTypeOk =
+    !contentType ||
+    contentType === '' ||
+    contentType === 'application/dxf' ||
+    contentType === 'image/vnd.dxf' ||
+    contentType === 'application/octet-stream' ||
+    contentType === 'text/plain'
+  return filenameOk && contentTypeOk
+}
+
 function documentDto(row: {
   id: string
   organizationId: string
@@ -162,38 +194,69 @@ export function registerDocumentRoutes(router: Router): void {
       }
       // Belt + braces: trust the magic bytes, not just the content-type. Read
       // the whole thing into memory once (we'd need to anyway for the blob put).
+      //
+      // DXF MVP (2026-06-24) — accept .dxf as a second valid kind.
+      // DXF is plain text; magic detection is fuzzy. We require the
+      // first non-whitespace lines to look like `0\n SECTION` AND the
+      // filename to end .dxf as a tiebreaker. PDF detection unchanged.
       const buf = Buffer.from(await file.arrayBuffer())
       const headStr = buf.slice(0, 4).toString('latin1')
-      const looksLikePdf = headStr === PDF_MAGIC
-      const contentTypeOk = file.type === 'application/pdf' || file.type === '' || file.type == null
-      if (!looksLikePdf || !contentTypeOk) {
-        return errorResponse(415, 'Only application/pdf is accepted')
+      const filename = file.name || 'document'
+      const isPdf =
+        headStr === PDF_MAGIC &&
+        (file.type === 'application/pdf' || file.type === '' || file.type == null)
+      const isDxf = detectDxf(buf, filename, file.type)
+      if (!isPdf && !isDxf) {
+        return errorResponse(
+          415,
+          'Only application/pdf or DXF (.dxf) files are accepted',
+        )
       }
 
       // Create Document FIRST so we have its cuid for the blob key. If the
       // blob write fails we leave a stub row in UPLOADED — INGEST will mark it
       // FAILED on retry. (Alternative would be tx + rollback but the blob is
       // outside the DB transaction anyway.)
-      const filename = file.name || 'document.pdf'
+      const fileExt = isDxf ? 'source.dxf' : 'source.pdf'
+      const contentType = isDxf ? 'application/dxf' : 'application/pdf'
+      const safeFilename = file.name || (isDxf ? 'document.dxf' : 'document.pdf')
       const created = await db.document.create({
         data: {
           // Compiler-required but extension-overridden — see tenantDb.ts.
           organizationId: ctx.organizationId,
           projectId: project.id,
-          filename,
+          filename: safeFilename,
           // Pre-compute the storage key from a known-good seed; we patch it
           // below with the real id (it lines up because cuid).
           storageKey: 'pending',
           status: 'UPLOADED',
         },
       })
-      const key = documentKey(ctx.organizationId, project.id, created.id, 'source.pdf')
-      await getBlobStore().put(key, buf, 'application/pdf')
+      const key = documentKey(ctx.organizationId, project.id, created.id, fileExt)
+      await getBlobStore().put(key, buf, contentType)
 
       const document = await db.document.update({
         where: { id: created.id },
         data: { storageKey: key },
       })
+
+      // DXF MVP — DXF uploads do NOT auto-enqueue PARSE_DXF. The SPA
+      // first calls the layer-introspect route, shows the
+      // LayerMapModal, the user confirms, the modal PATCHes
+      // Project.layerMap, then enqueues PARSE_DXF. Until that
+      // happens we leave the Document in UPLOADED status — the
+      // multi-doc gate treats it the same as a stuck doc, but the
+      // SPA knows to open the modal instead of polling.
+      if (isDxf) {
+        return jsonResponse(
+          {
+            document: { ...documentDto(document), sourceFormat: 'DXF' },
+            needsLayerMap: !((await db.project.findUnique({ where: { id: project.id }, select: { layerMap: true } }))?.layerMap),
+          },
+          202,
+        )
+      }
+
       const ingestJob = await db.job.create({
         data: {
           organizationId: ctx.organizationId,

@@ -144,6 +144,11 @@ model Organization {
   name            String
   slug            String    @unique
   defaultCurrency String    @default("AED")
+  /// DXF MVP — saved org-level layer map applied to new projects on
+  /// creation. Confirm-modal offers "save as my firm's default" after
+  /// the first successful DXF mapping in the org; the LayerMap JSON
+  /// payload matches apps/api/src/dxf/layerMap.ts.
+  defaultLayerMap Json?
   createdAt       DateTime  @default(now()) @db.Timestamptz(6)
   updatedAt       DateTime  @updatedAt @db.Timestamptz(6)
   deletedAt       DateTime? @db.Timestamptz(6)
@@ -210,6 +215,11 @@ model Project {
   /// document has no recognisable BUA declaration (in which case the
   /// validator skips, not fails).
   buaM2          Decimal?  @db.Decimal(10, 2)
+  /// DXF MVP — per-project LayerMap (see apps/api/src/dxf/layerMap.ts).
+  /// Null until the first DXF is uploaded and the user confirms which
+  /// layer holds rooms, doors, etc. After confirmation, PARSE_DXF uses
+  /// this map for every subsequent DXF in the same project.
+  layerMap       Json?
   createdAt      DateTime  @default(now()) @db.Timestamptz(6)
   updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
   deletedAt      DateTime? @db.Timestamptz(6)

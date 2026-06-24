@@ -5,6 +5,7 @@ import { registerAssemblyRoutes } from './routes/assemblies'
 import { registerAuthRoutes } from './routes/auth'
 import { registerBoqRoutes } from './routes/boq'
 import { registerDocumentRoutes } from './routes/documents'
+import { registerDxfRoutes } from './routes/dxf'
 import { registerQuotationRoutes } from './routes/quotations'
 import { registerJobRoutes } from './routes/jobs'
 import { registerMaterialRoutes } from './routes/materials'
@@ -28,6 +29,7 @@ registerPriceRoutes(router)
 registerUserRoutes(router)
 registerJobRoutes(router)
 registerDocumentRoutes(router)
+registerDxfRoutes(router)
 registerTakeoffRoutes(router)
 registerAssemblyRoutes(router)
 registerBoqRoutes(router)
