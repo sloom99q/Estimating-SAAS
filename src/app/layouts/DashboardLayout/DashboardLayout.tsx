@@ -2,6 +2,8 @@ import { AppShell } from '@mantine/core'
 import { useDisclosure } from '@mantine/hooks'
 import { Outlet } from 'react-router'
 import { useNavCollapsed } from '@/shared/store/uiStore'
+import { useDxfModalStore } from '@/shared/store/dxfModalStore'
+import { LayerMapModal } from '@/features/dxf'
 import { DashboardHeader } from './Header'
 import { Sidebar } from './Sidebar'
 
@@ -13,6 +15,10 @@ import { Sidebar } from './Sidebar'
 export function DashboardLayout() {
   const [mobileOpened, { toggle: toggleMobile, close: closeMobile }] = useDisclosure(false)
   const navCollapsed = useNavCollapsed()
+  // DXF MVP — global mount for the LayerMapModal. UploadCard fires the
+  // open signal via the shared dxfModalStore on a .dxf upload, this
+  // shell renders the modal independent of route.
+  const dxfModal = useDxfModalStore()
 
   return (
     <AppShell
@@ -33,6 +39,15 @@ export function DashboardLayout() {
       <AppShell.Main>
         <Outlet />
       </AppShell.Main>
+      {dxfModal.projectId && dxfModal.documentId ? (
+        <LayerMapModal
+          opened={dxfModal.opened}
+          onClose={dxfModal.close}
+          projectId={dxfModal.projectId}
+          documentId={dxfModal.documentId}
+          filename={dxfModal.filename}
+        />
+      ) : null}
     </AppShell>
   )
 }

@@ -286,24 +286,42 @@ async function bumpUsage(
   })
 }
 
-let timer: ReturnType<typeof setInterval> | null = null
+let running = false
+let stopRequested = false
 
 /**
  * Boot the worker loop inside the API process. Idempotent; safe to call from
  * `index.ts`. To run the worker as a separate process later, call this from
  * its own entrypoint without booting the HTTP server.
+ *
+ * 2026-06-24 — replaced `setInterval(tick, TICK_MS)` with a sequential
+ * loop that awaits each tick before sleeping. The old pattern fired
+ * the next tick regardless of whether the previous one had finished,
+ * so two jobs could run concurrently within the same worker. That
+ * triggered a findFirst→create race in PARSE_DXF where two
+ * documents' jobs both checked for a tag, both missed, both created
+ * (the D02 dup during the LM1929 thread). The fix here is the right
+ * place: serialize at the tick level. PARSE_DXF's post-write dedup
+ * stays as belt-and-braces.
  */
 export function startWorker(): void {
-  if (timer) return
-  timer = setInterval(() => {
-    void tick().catch((err) => console.error('[worker] tick failed:', err))
-  }, TICK_MS)
-  console.log(`[worker] started — tick every ${TICK_MS}ms`)
+  if (running) return
+  running = true
+  stopRequested = false
+  console.log(`[worker] started — tick every ${TICK_MS}ms (sequential)`)
+  void (async () => {
+    while (!stopRequested) {
+      try {
+        await tick()
+      } catch (err) {
+        console.error('[worker] tick failed:', err)
+      }
+      await new Promise((r) => setTimeout(r, TICK_MS))
+    }
+    running = false
+  })()
 }
 
 export function stopWorker(): void {
-  if (timer) {
-    clearInterval(timer)
-    timer = null
-  }
+  stopRequested = true
 }

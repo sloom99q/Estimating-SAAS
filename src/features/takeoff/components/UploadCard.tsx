@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Alert, Badge, Button, Card, Group, List, Loader, Stack, Text } from '@mantine/core'
 import { useTranslation } from 'react-i18next'
+import { dxfModalActions } from '@/shared/store/dxfModalStore'
 import { useUploadProjectDocument } from '../api/useTakeoff'
 
 interface UploadCardProps {
@@ -73,6 +74,20 @@ export function UploadCard({ projectId, onUploaded }: UploadCardProps) {
             ),
           )
           onUploaded?.(result.document.id)
+          // DXF MVP — DXF uploads don't auto-chain INGEST. They need
+          // the LayerMapModal so the estimator confirms which DXF
+          // layer holds rooms/doors/windows before PARSE_DXF can run.
+          // Fire the open signal on the shared store; the app shell
+          // mounts the modal.
+          const isDxf =
+            (result.document as { sourceFormat?: string }).sourceFormat === 'DXF'
+          if (isDxf) {
+            dxfModalActions.open({
+              projectId,
+              documentId: result.document.id,
+              filename: file.name,
+            })
+          }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           setQueue((prev) =>
@@ -96,8 +111,14 @@ export function UploadCard({ projectId, onUploaded }: UploadCardProps) {
   const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault()
     setDragOver(false)
+    // Accept PDFs and DXFs — the server's magic-byte sniff + size cap
+    // is the authoritative gate; this filter just keeps obvious
+    // garbage (folders, images) out of the queue UI.
     const files = Array.from(e.dataTransfer.files ?? []).filter(
-      (f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name),
+      (f) =>
+        f.type === 'application/pdf' ||
+        /\.pdf$/i.test(f.name) ||
+        /\.dxf$/i.test(f.name),
     )
     await uploadFiles(files)
   }
@@ -129,8 +150,9 @@ export function UploadCard({ projectId, onUploaded }: UploadCardProps) {
             <Text size="xs" c="dimmed">
               {t('upload.help')}
               {' · '}
-              Drop multiple PDFs at once, or use the button to pick a batch. Each file uploads
-              individually and processes in the background.
+              Drop PDFs or DXFs at once, or use the button to pick a batch. PDFs go through the
+              vision pipeline; DXFs open a one-time layer-map confirm modal per project, then
+              parse instantly with exact areas.
             </Text>
           </Stack>
           <Button onClick={handlePick} loading={isUploading}>
@@ -140,7 +162,7 @@ export function UploadCard({ projectId, onUploaded }: UploadCardProps) {
         <input
           ref={inputRef}
           type="file"
-          accept="application/pdf"
+          accept="application/pdf,.pdf,.dxf,application/dxf"
           multiple
           style={{ display: 'none' }}
           onChange={handleChange}

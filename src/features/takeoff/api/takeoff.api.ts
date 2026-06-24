@@ -552,8 +552,17 @@ export async function fetchProjectDocuments(projectId: string): Promise<Document
  * compute the multipart boundary instead.
  */
 export interface UploadDocumentResult {
-  document: DocumentDto
-  ingestJobId: string
+  document: DocumentDto & { sourceFormat?: 'DXF' }
+  /** Present for PDF uploads (the INGEST job kicks off the pipeline). */
+  ingestJobId?: string
+  /**
+   * DXF MVP — present for DXF uploads. When true, the SPA must open
+   * the LayerMapModal before PARSE_DXF can be enqueued. When false,
+   * the project already has a saved LayerMap from a prior DXF in
+   * this project and the SPA can enqueue PARSE_DXF directly via
+   * PATCH /api/projects/:id/layer-map with `enqueueDocumentId`.
+   */
+  needsLayerMap?: boolean
 }
 
 export async function uploadProjectDocument(
