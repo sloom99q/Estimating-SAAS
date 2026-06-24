@@ -113,3 +113,16 @@ export async function saveLayerMap(
     body: JSON.stringify(payload),
   })
 }
+
+/**
+ * DXF-AUTO-SKIP — modal Cancel uses this to mark the DXF document
+ * SKIPPED so the multi-doc gate releases.
+ */
+export async function skipDxfDocument(
+  projectId: string,
+  documentId: string,
+): Promise<{ ok: boolean; status: string }> {
+  return withAuth(`/api/projects/${projectId}/dxf/${documentId}/skip`, {
+    method: 'POST',
+  })
+}

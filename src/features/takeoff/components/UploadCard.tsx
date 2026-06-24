@@ -74,14 +74,22 @@ export function UploadCard({ projectId, onUploaded }: UploadCardProps) {
             ),
           )
           onUploaded?.(result.document.id)
-          // DXF MVP — DXF uploads don't auto-chain INGEST. They need
-          // the LayerMapModal so the estimator confirms which DXF
-          // layer holds rooms/doors/windows before PARSE_DXF can run.
-          // Fire the open signal on the shared store; the app shell
-          // mounts the modal.
+          // DXF MVP — DXF uploads don't auto-chain INGEST.
+          //
+          // DXF-AUTO-SKIP (2026-06-24) — the server now introspects
+          // every DXF upload inline. If it finds zero room-label
+          // MTEXTs (the LAMI-A-AREA-IDEN "GF-04 58.82 m²" pattern),
+          // the server auto-marks the doc SKIPPED and returns
+          // `autoSkipped: true`. We must NOT open the modal in that
+          // case — that's the whole point. Only plan sheets open
+          // the modal.
           const isDxf =
             (result.document as { sourceFormat?: string }).sourceFormat === 'DXF'
-          if (isDxf) {
+          const autoSkipped =
+            (result as { autoSkipped?: boolean }).autoSkipped === true
+          const needsLayerMap =
+            (result as { needsLayerMap?: boolean }).needsLayerMap === true
+          if (isDxf && !autoSkipped && needsLayerMap) {
             dxfModalActions.open({
               projectId,
               documentId: result.document.id,

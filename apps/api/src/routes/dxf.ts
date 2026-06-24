@@ -183,4 +183,39 @@ export function registerDxfRoutes(router: Router): void {
       return jsonResponse({ ok: true, parseDxfQueued, parseDxfJobId })
     }),
   )
+
+  /**
+   * DXF-AUTO-SKIP — modal Cancel calls this. Marks the document as
+   * SKIPPED so the multi-doc gate releases. The doc can be
+   * re-promoted later by re-uploading the file (or, future work, by
+   * a "re-open layer-map" affordance in DocumentsListCard).
+   */
+  router.post(
+    '/api/projects/:projectId/dxf/:documentId/skip',
+    requireAuth(async (_req, ctx) => {
+      const db = tenantDb(ctx.organizationId)
+      const document = await db.document.findFirst({
+        where: {
+          id: ctx.params.documentId,
+          projectId: ctx.params.projectId,
+          deletedAt: null,
+        },
+        select: { id: true, status: true, filename: true },
+      })
+      if (!document) return errorResponse(404, 'Document not found')
+      // Don't skip a doc that's already processing or done — would be
+      // surprising. Only UPLOADED-status docs are eligible.
+      if (document.status !== 'UPLOADED' && document.status !== 'SKIPPED') {
+        return errorResponse(
+          409,
+          `Document is in status ${document.status}; only UPLOADED docs can be skipped.`,
+        )
+      }
+      await db.document.update({
+        where: { id: document.id },
+        data: { status: 'SKIPPED' },
+      })
+      return jsonResponse({ ok: true, status: 'SKIPPED' })
+    }),
+  )
 }

@@ -558,11 +558,22 @@ export interface UploadDocumentResult {
   /**
    * DXF MVP — present for DXF uploads. When true, the SPA must open
    * the LayerMapModal before PARSE_DXF can be enqueued. When false,
-   * the project already has a saved LayerMap from a prior DXF in
-   * this project and the SPA can enqueue PARSE_DXF directly via
-   * PATCH /api/projects/:id/layer-map with `enqueueDocumentId`.
+   * either (a) the project already has a saved LayerMap from a
+   * prior DXF in this project (SPA can enqueue PARSE_DXF directly
+   * via PATCH /api/projects/:id/layer-map with `enqueueDocumentId`)
+   * OR (b) the file was auto-skipped (see autoSkipped below).
    */
   needsLayerMap?: boolean
+  /**
+   * DXF-AUTO-SKIP — true when the upload introspector found zero
+   * room-label MTEXTs in the file (elevation / detail / RCP /
+   * finishes / bathroom-views sheet — not a floor plan). The doc
+   * is already at Document.status='SKIPPED'; the SPA must NOT open
+   * the layer-map modal. DocumentsListCard renders SKIPPED.
+   */
+  autoSkipped?: boolean
+  autoSkipReason?: 'no_room_labels' | 'parse_error'
+  plausibleRoomLabelCount?: number
 }
 
 export async function uploadProjectDocument(

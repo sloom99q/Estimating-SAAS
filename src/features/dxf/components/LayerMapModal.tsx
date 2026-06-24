@@ -37,6 +37,7 @@ import {
   fetchLayerMap,
   fetchLayerReport,
   saveLayerMap,
+  skipDxfDocument,
   type LayerMap,
   type LayerSummary,
 } from '../api/dxf.api'
@@ -374,8 +375,24 @@ export function LayerMapModal({ opened, onClose, projectId, documentId, filename
         )}
 
         <Group justify="flex-end">
-          <Button variant="subtle" onClick={onClose}>
-            Cancel
+          <Button
+            variant="subtle"
+            onClick={async () => {
+              // DXF-AUTO-SKIP — cancel means "don't extract rooms
+              // from this DXF". Mark the doc SKIPPED so the
+              // multi-doc gate releases, then close. Best-effort:
+              // if the skip call fails (network etc.), still close
+              // — the user explicitly chose to dismiss.
+              try {
+                await skipDxfDocument(projectId, documentId)
+                void qc.invalidateQueries({ queryKey: ['documents', 'list', projectId] })
+              } catch {
+                // ignore — close anyway
+              }
+              onClose()
+            }}
+          >
+            Cancel &amp; skip this DXF
           </Button>
           <Button
             onClick={() => saveMut.mutate()}

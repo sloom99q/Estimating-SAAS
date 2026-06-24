@@ -23,6 +23,7 @@
  */
 import DxfParser from 'dxf-parser'
 import { AIA_NCS_DEFAULT, type LayerMap } from './layerMap'
+import { cleanMText, parseRoomLabel } from './textParse'
 
 /** Per-layer rollup the modal renders. */
 export interface LayerSummary {
@@ -65,6 +66,18 @@ export interface LayerReport {
     LayerMap,
     'roomBounds' | 'roomLabels' | 'doors' | 'windows' | 'walls'
   >
+  /**
+   * DXF-AUTO-SKIP — count of MTEXT entities on ANY suggested room-
+   * label layer whose cleaned text matches the `CODE areaM²` pattern
+   * (e.g. "GF-04 58.82 m²"). If this is zero, the DXF is NOT a plan
+   * sheet (it's an elevation, section, detail, RCP, finish key, etc.)
+   * and the upload route auto-marks the document as SKIPPED instead
+   * of opening the LayerMapModal.
+   *
+   * Threshold for "is a plan sheet": >= 1 here. Most real plan sheets
+   * have 8-25; an elevation has 0.
+   */
+  plausibleRoomLabelCount: number
 }
 
 const ROLE_TOKENS: Record<keyof LayerReport['suggested'], string[]> = {
@@ -131,6 +144,7 @@ export function introspectDxf(bytes: string): LayerReport {
       totalLayers: 0,
       layers: [],
       suggested: { roomBounds: [], roomLabels: [], doors: [], windows: [], walls: [] },
+      plausibleRoomLabelCount: 0,
     }
   }
   if (!parsed) {
@@ -142,6 +156,7 @@ export function introspectDxf(bytes: string): LayerReport {
       totalLayers: 0,
       layers: [],
       suggested: { roomBounds: [], roomLabels: [], doors: [], windows: [], walls: [] },
+      plausibleRoomLabelCount: 0,
     }
   }
 
@@ -275,6 +290,22 @@ export function introspectDxf(bytes: string): LayerReport {
       ? (parsed.header['$INSUNITS'] as number)
       : null
 
+  // DXF-AUTO-SKIP — count `CODE areaM²` MTEXT matches on any
+  // suggested room-label layer. Cheap: O(MTEXT count) and we only
+  // iterate the small fraction of entities that are text. A real
+  // plan sheet returns 8-25; elevation/detail/RCP sheets return 0.
+  const roomLabelLayerSet = new Set<string>(suggested.roomLabels)
+  let plausibleRoomLabelCount = 0
+  if (roomLabelLayerSet.size > 0) {
+    for (const e of parsed.entities) {
+      if (e.type !== 'MTEXT' && e.type !== 'TEXT') continue
+      if (!roomLabelLayerSet.has(e.layer)) continue
+      const raw = String((e as { text?: string }).text ?? '')
+      const parsedLabel = parseRoomLabel(cleanMText(raw))
+      if (parsedLabel.kind === 'code-area') plausibleRoomLabelCount += 1
+    }
+  }
+
   return {
     ok: true,
     error: null,
@@ -283,6 +314,7 @@ export function introspectDxf(bytes: string): LayerReport {
     totalLayers: layers.length,
     layers,
     suggested,
+    plausibleRoomLabelCount,
   }
 }
 

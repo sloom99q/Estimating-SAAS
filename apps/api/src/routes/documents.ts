@@ -243,15 +243,74 @@ export function registerDocumentRoutes(router: Router): void {
       // DXF MVP — DXF uploads do NOT auto-enqueue PARSE_DXF. The SPA
       // first calls the layer-introspect route, shows the
       // LayerMapModal, the user confirms, the modal PATCHes
-      // Project.layerMap, then enqueues PARSE_DXF. Until that
-      // happens we leave the Document in UPLOADED status — the
-      // multi-doc gate treats it the same as a stuck doc, but the
-      // SPA knows to open the modal instead of polling.
+      // Project.layerMap, then enqueues PARSE_DXF.
+      //
+      // DXF-AUTO-SKIP (2026-06-24) — real drawing sets are 20-50
+      // files. Most are not plan sheets (elevations, sections,
+      // details, RCPs, finish keys). We do NOT want to open the
+      // layer-map modal 50 times. Run the introspector inline; if
+      // it finds zero CODE-AREA MTEXT labels we know there are no
+      // rooms to extract and auto-mark the doc SKIPPED so the gate
+      // releases without estimator interaction. The user can still
+      // upload finishes/elevation PDFs separately (vision pipeline)
+      // for finish-mapping; PARSE_DXF only cares about room geometry.
       if (isDxf) {
+        const { introspectDxf } = await import('../dxf/introspect')
+        let report: ReturnType<typeof introspectDxf>
+        try {
+          report = introspectDxf(buf.toString('utf-8'))
+        } catch (err) {
+          // Parse failure — surface as FAILED so the gate releases
+          // and DocumentsListCard shows the error to the operator.
+          await db.document.update({
+            where: { id: document.id },
+            data: { status: 'FAILED' },
+          })
+          return jsonResponse(
+            {
+              document: { ...documentDto({ ...document, status: 'FAILED' }), sourceFormat: 'DXF' },
+              needsLayerMap: false,
+              autoSkipped: false,
+              parseError: err instanceof Error ? err.message : String(err),
+            },
+            202,
+          )
+        }
+
+        const isPlanSheet = report.ok && report.plausibleRoomLabelCount >= 1
+
+        if (!isPlanSheet) {
+          // Auto-skip: not a plan sheet, nothing to extract.
+          await db.document.update({
+            where: { id: document.id },
+            data: { status: 'SKIPPED' },
+          })
+          return jsonResponse(
+            {
+              document: { ...documentDto({ ...document, status: 'SKIPPED' }), sourceFormat: 'DXF' },
+              needsLayerMap: false,
+              autoSkipped: true,
+              autoSkipReason: report.ok
+                ? 'no_room_labels'
+                : 'parse_error',
+              plausibleRoomLabelCount: report.plausibleRoomLabelCount,
+            },
+            202,
+          )
+        }
+
+        // Plan sheet — surface to the SPA so the modal opens (or skips
+        // straight to enqueue if the project's LayerMap already exists).
+        const proj = await db.project.findUnique({
+          where: { id: project.id },
+          select: { layerMap: true },
+        })
         return jsonResponse(
           {
             document: { ...documentDto(document), sourceFormat: 'DXF' },
-            needsLayerMap: !((await db.project.findUnique({ where: { id: project.id }, select: { layerMap: true } }))?.layerMap),
+            needsLayerMap: !proj?.layerMap,
+            autoSkipped: false,
+            plausibleRoomLabelCount: report.plausibleRoomLabelCount,
           },
           202,
         )
