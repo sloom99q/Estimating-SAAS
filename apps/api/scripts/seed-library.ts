@@ -38,10 +38,12 @@
 import { prisma } from '../src/db'
 
 const apply = process.argv.includes('--apply')
+const reseed = process.argv.includes('--reseed')
 const orgIdx = process.argv.indexOf('--org')
 const orgFilter = orgIdx >= 0 ? process.argv[orgIdx + 1] : null
 
 console.log('[seed-library] mode:', apply ? 'APPLY' : 'dry-run')
+if (reseed) console.log('[seed-library] --reseed: existing seeded systems will be REPLACED')
 if (orgFilter) console.log('[seed-library] scoped to org:', orgFilter)
 
 const orgs = await prisma.organization.findMany({
@@ -97,7 +99,11 @@ const SYSTEMS: SystemSpec[] = [
     sortOrder: 100,
     notes:
       'Two-coat stucco + two-coat finish system. ' +
-      'Per-m² cost ≈ 20.40 AED on bare wall area. ' +
+      'Per-m² cost ≈ 13.63 AED on bare wall area. ' +
+      'Reading B per estimator verdict: bag/tin coverage already ' +
+      'accounts for both coats (40 m² of stucco includes the ' +
+      '2-coat build-up, 50 m² of paint same). coats=1 in the ' +
+      'engine — multiplying by 2 would double-count. ' +
       'Tools (roller, masking tape) modeled as MATERIAL kind ' +
       'with coverage — same math as TOOL_FIXED amortised, ' +
       'cleaner for per-area billing.',
@@ -112,18 +118,18 @@ const SYSTEMS: SystemSpec[] = [
       },
       {
         kind: 'MATERIAL',
-        label: 'Stucco (bag) × 2 coats',
+        label: 'Stucco (bag) — 2-coat coverage',
         unitPrice: 55,
         coverage: 40,
-        coats: 2,
+        coats: 1,
         wastagePct: 0,
       },
       {
         kind: 'MATERIAL',
-        label: 'Top-coat paint (tin) × 2 coats',
+        label: 'Top-coat paint (tin) — 2-coat coverage',
         unitPrice: 270,
         coverage: 50,
-        coats: 2,
+        coats: 1,
         wastagePct: 0,
       },
       {
@@ -347,15 +353,26 @@ for (const org of orgs) {
     }
 
     // Assembly: only seed if (org, name) doesn't exist. We never
-    // overwrite an estimator's edits.
+    // overwrite an estimator's edits — UNLESS --reseed is set, in
+    // which case the named seed systems are hard-replaced (used to
+    // converge to a new spec without manual delete).
     const existing = await prisma.assembly.findFirst({
       where: { organizationId: org.id, name: spec.systemName, deletedAt: null },
       select: { id: true },
     })
     if (existing) {
-      systemsSkipped += 1
-      console.log(`  · System ${spec.systemName} already exists — skipping`)
-      continue
+      if (!reseed) {
+        systemsSkipped += 1
+        console.log(`  · System ${spec.systemName} already exists — skipping (pass --reseed to replace)`)
+        continue
+      }
+      console.log(`  ↻ System ${spec.systemName} exists — REPLACING (--reseed)`)
+      if (apply) {
+        await prisma.$transaction(async (tx) => {
+          await tx.assemblyComponent.deleteMany({ where: { assemblyId: existing.id } })
+          await tx.assembly.delete({ where: { id: existing.id } })
+        })
+      }
     }
 
     console.log(`  + System ${spec.systemName}  [${spec.takeoffCategory}]  ${spec.components.length} components`)

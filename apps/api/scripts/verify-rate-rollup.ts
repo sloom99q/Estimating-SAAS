@@ -111,14 +111,17 @@ console.log('  wall area  ' + wallArea_m2.toFixed(2) + ' m²')
 console.log('  × rate     ' + unitCost.toFixed(4) + ' AED/m²')
 console.log('  = total    ' + lineTotal.toFixed(2) + ' AED')
 
-// ── Cross-check against design doc §1 ───────────────────────────
-// §1 worked example: 50 m² × 20.40 AED/m² = 1,020.00 AED.
-const expectedUnitCostStr = '20.4000'
+// ── Cross-check against estimator's locked Reading B ────────────
+// Reading B (2026-06-24): coats=1 on stucco + paint because the
+// bag/tin coverage already accounts for both coats.
+//   Primer 0.6500 + Stucco 1.3750 + Paint 5.4000
+//   + Labor 6.0000 + Roller 0.1000 + Tape 0.1000 = 13.6250
+const expectedUnitCostStr = '13.6250'
 const actualUnitCostStr = unitCost.toFixed(4)
 const matches = actualUnitCostStr === expectedUnitCostStr
 console.log('')
-console.log('=== Cross-check vs MATERIAL_LIBRARY.md §1 ===')
-console.log('  expected unit cost: ' + expectedUnitCostStr + ' AED/m² (design doc Jotun example)')
+console.log('=== Cross-check vs Reading B (coats=1) ===')
+console.log('  expected unit cost: ' + expectedUnitCostStr + ' AED/m² (estimator-locked Reading B)')
 console.log('  actual   unit cost: ' + actualUnitCostStr + ' AED/m²')
 console.log('  ' + (matches ? '✓ MATCH — schema + seed + engine all align' : '✗ MISMATCH — investigate'))
 if (!matches) process.exit(1)

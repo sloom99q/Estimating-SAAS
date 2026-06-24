@@ -74,6 +74,15 @@ interface DerivedSummary {
    * qtyFinal for double-vanity master baths before Confirming.
    */
   vanity: { suggested: number; skipped: number; totalCount: number }
+  /**
+   * LIB-4 — per-room PAINT suggestions. status='EDITED' so they go
+   * into the BOQ on Generate without an extra Accept click — paint
+   * is a near-universal scope and the estimator can zero / delete
+   * the rare exceptions in the review table. Quantity = perimeter
+   * (from aspect prior) × ceiling height. PRICE routes via the
+   * Library system on takeoffCategory=PAINT.
+   */
+  paint: { suggested: number; skipped: number; totalWallAreaM2: string }
   wallFeatures: Array<{ code: string; description: string }>
   excludedRooms: string[]
 }
@@ -150,6 +159,7 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
     screed: { emitted: false, totalAreaM2: '0', excludedCodes: [] },
     skirting: { suggested: 0, skipped: 0, totalLm: '0' },
     vanity: { suggested: 0, skipped: 0, totalCount: 0 },
+    paint: { suggested: 0, skipped: 0, totalWallAreaM2: '0' },
     staircase: { emitted: false, lm: null },
     wallFeatures: [],
     excludedRooms: [],
@@ -523,6 +533,88 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
     suggested: skirtingSuggested,
     skipped: skirtingSkipped,
     totalLm: skirtingTotalLm.toFixed(2),
+  }
+
+  // --- WALL PAINT (LIB-4 / Material Library phase 1) -----------------
+  // Per-room wall area derivation. Each ROOM with a confirmed
+  // finish_code that passes shouldSkirtRoom (= interior, non-bath,
+  // non-stair, non-balcony) gets a PAINT TakeoffItem so the Library's
+  // Jotun system can bill it (LIB-5 routes via Assembly.takeoffCategory).
+  //
+  // Quantity = aspect-prior perimeter × ceiling height. The 2.8 m
+  // default ceiling height is a project-wide constant for now; the
+  // design doc proposes Project.defaultCeilingHeightM as an override
+  // (deferred to a future migration — not material to phase-1 paint
+  // proof).
+  //
+  // Status = EDITED so PAINT lines drop straight into the BOQ without
+  // an Accept-per-row gate. Paint is near-universal scope; the
+  // estimator zeros / deletes the rare exceptions in the review table.
+  // This differs from SKIRTING which stays AI because skirting choice
+  // is more variable per room.
+  //
+  // Bathrooms are excluded here because their wall paint is a
+  // different system (waterproof) over a partial area (above tile
+  // band). Phase-2 work adds a separate BATH_WALL emitter.
+  const CEILING_HEIGHT_M = 2.8
+  let paintSuggested = 0
+  let paintSkipped = 0
+  let paintTotalWallAreaM2 = 0
+  for (const room of rooms) {
+    const meta = (room.meta ?? {}) as Record<string, unknown>
+    const finishCode = typeof meta.finish_code === 'string' ? meta.finish_code : null
+    const name = room.description.split('—')[0]!.trim()
+    if (!shouldSkirtRoom(name, finishCode)) {
+      paintSkipped += 1
+      continue
+    }
+    const area = num(room.qtyFinal ?? room.qtyAi)
+    const estimate = estimateSkirtingPerimeter(name, area)
+    if (!estimate) {
+      paintSkipped += 1
+      continue
+    }
+    const wallAreaM2 = estimate.perimeterLm * CEILING_HEIGHT_M
+    paintSuggested += 1
+    paintTotalWallAreaM2 += wallAreaM2
+    const tag = `PAINT-${room.id.slice(-8)}`
+    emittedDerivedTags.add(tag)
+    await upsertDerived({
+      organizationId: job.organizationId,
+      projectId: payload.projectId,
+      category: 'PAINT',
+      tag,
+      description: `Wall paint — ${name} (interior, 2-coat stucco + 2-coat finish)`,
+      unit: 'm²',
+      qty: Math.round(wallAreaM2 * 100) / 100,
+      basis: 'DERIVED',
+      confidence: estimate.confidence,
+      sourceNote:
+        `${estimate.reasoning} × ${CEILING_HEIGHT_M} m ceiling = ` +
+        `${wallAreaM2.toFixed(2)} m² wall paint area`,
+      meta: {
+        derivedKey: `paint:${room.id}`,
+        roomId: room.id,
+        roomName: name,
+        floorFinishCode: finishCode,
+        perimeterLm: estimate.perimeterLm,
+        ceilingHeightM: CEILING_HEIGHT_M,
+        wallAreaM2,
+        priorName: estimate.priorName,
+        aspectRatio: estimate.aspectRatio,
+        estimationSource: 'aspect-ratio-prior',
+        estimationReasoning: estimate.reasoning,
+      },
+      summary,
+      // PAINT lines go into the BOQ on the next Generate without an
+      // extra Accept click — see comment block above.
+      status: 'EDITED',
+    })
+  }
+  summary.paint = {
+    suggested: paintSuggested,
+    skipped: paintSkipped,
+    totalWallAreaM2: paintTotalWallAreaM2.toFixed(2),
   }
 
   // --- VANITY suggestions (AI-est roadmap #2) -------------------------

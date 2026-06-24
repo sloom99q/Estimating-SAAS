@@ -195,6 +195,19 @@ export const priceHandler: JobHandler = async (job: JobRecord) => {
     if (bucket) bucket.push(a)
     else assembliesByApplies.set(k, [a])
   }
+  // LIB-5 (2026-06-24) — Library routing. Group by takeoffCategory
+  // for the new tier-1 lookup. Within each group, sort by sortOrder
+  // ASC so finish-code-specific systems beat the org "house" default.
+  const assembliesByTakeoffCategory = new Map<string, typeof assemblies>()
+  for (const a of assemblies) {
+    if (!a.takeoffCategory) continue
+    const bucket = assembliesByTakeoffCategory.get(a.takeoffCategory) ?? []
+    bucket.push(a)
+    assembliesByTakeoffCategory.set(a.takeoffCategory, bucket)
+  }
+  for (const bucket of assembliesByTakeoffCategory.values()) {
+    bucket.sort((x, y) => x.sortOrder - y.sortOrder)
+  }
   // ADR-014 + S6-4 unit lexicon. The extractors emit 'nr' / 'm²' / 'm', while
   // SPEC.md §8 writes 'No' / 'm²' / 'lm'. We canonicalise both sides so the
   // unit-match check survives those legitimate synonyms.
@@ -240,25 +253,58 @@ export const priceHandler: JobHandler = async (job: JobRecord) => {
       let rate: Prisma.Decimal | null = null
       let rateSource: string | null = null
 
-      // Tier 1 — Assembly match (in-memory). ADR-014: assembly.outputUnit
-      // must equal line.unit. A WALL assembly with outputUnit='m²' cannot
-      // price a window line with unit='nr'.
+      // Tier 1 — Assembly match (in-memory). Two routing paths.
+      //
+      // LIB-5 (2026-06-24) — new takeoffCategory routing. When an
+      // Assembly carries `takeoffCategory`, it matches lines whose
+      // takeoff item is of that category, with optional finish-code
+      // narrowing via `defaultForFinishCodes`. Sorted by sortOrder
+      // ASC; the first compatible match wins.
+      //
+      // Legacy `appliesTo` routing kept as a fallback for older
+      // assemblies that haven't been migrated to takeoffCategory yet
+      // (defence: a seeded org might have a WALL assembly without the
+      // new field).
+      //
+      // ADR-014: assembly.outputUnit must equal line.unit. A WALL
+      // assembly with outputUnit='m²' cannot price a window line with
+      // unit='nr'.
+      //
       // Sprint-7 S7-0: wall feature legend lines (tag pattern WF-<code>,
-      // where <code> ≠ PAINT) bypass the assembly tier — they're specific
-      // products with their own rates, not generic paint surfaces. Jotun
-      // (the only seeded wall assembly) is for paint only.
-      const appliesTo = appliesToForCategory(category)
+      // where <code> ≠ PAINT) bypass the assembly tier — they're
+      // specific products with their own rates, not generic paint
+      // surfaces.
       const isWallFeatureLine =
         category === 'WALL_FINISH' &&
         typeof sourceTag === 'string' &&
         sourceTag.startsWith('WF-') &&
         sourceTag !== 'WF-PAINT'
-      if (appliesTo && !isWallFeatureLine) {
-        const candidates = (assembliesByApplies.get(appliesTo) ?? [])
-          .concat(assembliesByApplies.get('GENERIC') ?? [])
+
+      // Resolve the takeoff item's finish_code, when available — drives
+      // the defaultForFinishCodes narrowing for the new routing path.
+      const takeoffMeta = line.takeoffItemId
+        ? (takeoffItems.find((t) => t.id === line.takeoffItemId)?.meta as
+            | Record<string, unknown>
+            | null
+            | undefined) ?? null
+        : null
+      const lineFinishCode =
+        takeoffMeta && typeof takeoffMeta.finish_code === 'string'
+          ? (takeoffMeta.finish_code as string)
+          : null
+
+      if (!isWallFeatureLine) {
+        // (1) New routing: takeoffCategory match, finish-code-narrowed,
+        // sortOrder-resolved.
+        const tcCandidates = (assembliesByTakeoffCategory.get(category) ?? [])
           .filter((a) => unitsMatch(a.outputUnit, line.unit))
-        if (candidates.length === 1) {
-          const a = candidates[0]!
+          .filter((a) => {
+            const codes = a.defaultForFinishCodes ?? []
+            if (codes.length === 0) return true // org "house" default
+            return lineFinishCode !== null && codes.includes(lineFinishCode)
+          })
+        if (tcCandidates.length > 0) {
+          const a = tcCandidates[0]! // already sorted by sortOrder ASC
           const cost = computeAssemblyUnitCost(
             a.components.map((c) => ({
               kind: c.kind as 'MATERIAL' | 'LABOR' | 'TOOL_FIXED',
@@ -272,6 +318,35 @@ export const priceHandler: JobHandler = async (job: JobRecord) => {
           )
           rate = cost.unitCost
           rateSource = `assembly:${a.id}`
+        }
+
+        // (2) Legacy appliesTo path — only if the new path didn't match.
+        if (rate === null) {
+          const appliesTo = appliesToForCategory(category)
+          if (appliesTo) {
+            const candidates = (assembliesByApplies.get(appliesTo) ?? [])
+              .concat(assembliesByApplies.get('GENERIC') ?? [])
+              // Don't double-fire: an assembly already considered via
+              // takeoffCategory shouldn't also fire here.
+              .filter((a) => !a.takeoffCategory)
+              .filter((a) => unitsMatch(a.outputUnit, line.unit))
+            if (candidates.length === 1) {
+              const a = candidates[0]!
+              const cost = computeAssemblyUnitCost(
+                a.components.map((c) => ({
+                  kind: c.kind as 'MATERIAL' | 'LABOR' | 'TOOL_FIXED',
+                  label: c.label,
+                  unitPrice: c.unitPrice,
+                  coverage: c.coverage,
+                  coats: c.coats,
+                  wastagePct: c.wastagePct,
+                  fixedCost: c.fixedCost,
+                })),
+              )
+              rate = cost.unitCost
+              rateSource = `assembly:${a.id}`
+            }
+          }
         }
       }
 
