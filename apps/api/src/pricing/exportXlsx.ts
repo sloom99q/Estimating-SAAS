@@ -250,38 +250,79 @@ export async function renderBoqXlsx(boq: XlsxBoq, options: XlsxOptions = {}): Pr
   splitRow.getCell(2).alignment = { wrapText: true, vertical: 'middle' }
 
   summary.addRow([])
-  summary.addRow(['Section', 'Title', 'Subtotal — priced (AED)']).font = { bold: true }
-  let runningSubtotal = 0
+  // SUMMARY-PS (2026-06-25) — the per-section table now shows
+  // BOTH priced and P/S columns. Prior versions wrote only the
+  // priced subtotal so Section 4.0 appeared as 0 even though its
+  // tab clearly had a 1,090,000 P/S total. Estimator reading the
+  // Summary as the source of truth got a contradictory roll-up.
+  summary.columns = [
+    { width: 10 },
+    { width: 48 },
+    { width: 20 },
+    { width: 20 },
+  ]
+  summary.addRow(['Section', 'Title', 'Priced (AED)', 'P/S (AED)']).font = { bold: true }
+  let runningPriced = 0
+  let runningProvisional = 0
   for (const section of boq.sections) {
-    // PF-1: compute from priced lines, not from section.subtotal which
-    // can drift from line state after manual patches.
-    const sub = section.lines
+    // PF-1: compute from line state, not from cached section.subtotal —
+    // it can drift after manual patches. Same logic the per-section
+    // tab uses.
+    const pricedSub = section.lines
       .filter((l) => !l.isProvisional)
       .reduce((sum, l) => sum + num(l.amount), 0)
-    summary.addRow([section.code, section.title, sub]).getCell(3).numFmt = AED_FORMAT
-    runningSubtotal += sub
+    const psSub = section.lines
+      .filter((l) => l.isProvisional)
+      .reduce((sum, l) => sum + (l.psAmount === null ? 0 : num(l.psAmount)), 0)
+    const row = summary.addRow([
+      section.code,
+      section.title,
+      pricedSub,
+      psSub,
+    ])
+    row.getCell(3).numFmt = AED_FORMAT
+    row.getCell(4).numFmt = AED_FORMAT
+    runningPriced += pricedSub
+    runningProvisional += psSub
   }
   summary.addRow([])
-  summary.addRow(['', 'Subtotal (priced only)', runningSubtotal]).getCell(3).numFmt = AED_FORMAT
+
+  // Sub-totals split, then GRAND TOTAL = priced (post-disc/VAT) + P/S.
+  const measuredRow = summary.addRow(['', 'Measured / priced subtotal', runningPriced, ''])
+  measuredRow.getCell(3).numFmt = AED_FORMAT
+  measuredRow.font = { italic: true }
+
   const discount = num(options.discount)
   if (discount > 0) {
-    summary.addRow(['', 'Discount', -discount]).getCell(3).numFmt = AED_FORMAT
+    summary.addRow(['', 'Discount (priced only)', -discount, '']).getCell(3).numFmt = AED_FORMAT
   }
-  const afterDiscount = runningSubtotal - discount
+  const afterDiscount = runningPriced - discount
   const vatPct = num(options.vatPct)
+  let pricedAllIn = afterDiscount
   if (vatPct > 0) {
     const vat = afterDiscount * (vatPct / 100)
-    summary.addRow(['', `VAT (${vatPct}%)`, vat]).getCell(3).numFmt = AED_FORMAT
-    summary.addRow(['', 'GRAND TOTAL', afterDiscount + vat]).font = { bold: true, size: 12 }
-  } else {
-    summary.addRow(['', 'GRAND TOTAL', afterDiscount]).font = { bold: true, size: 12 }
+    summary.addRow(['', `VAT on priced (${vatPct}%)`, vat, '']).getCell(3).numFmt = AED_FORMAT
+    pricedAllIn = afterDiscount + vat
+    const pricedAfterRow = summary.addRow(['', 'Priced subtotal (after discount + VAT)', pricedAllIn, ''])
+    pricedAfterRow.getCell(3).numFmt = AED_FORMAT
+    pricedAfterRow.font = { italic: true }
   }
-  summary.lastRow!.getCell(3).numFmt = AED_FORMAT
 
-  if (num(boq.totalProvisional) > 0) {
-    summary.addRow([])
-    summary.addRow(['', 'Of which Provisional Sums', num(boq.totalProvisional)]).getCell(3).numFmt = AED_FORMAT
-  }
+  // Always show the P/S running total explicitly, even if zero —
+  // makes the absence visible rather than implicit.
+  const psRow = summary.addRow(['', 'Provisional sums', '', runningProvisional])
+  psRow.getCell(4).numFmt = AED_FORMAT
+  psRow.font = { italic: true }
+
+  // GRAND TOTAL = priced all-in + P/S. The number an estimator
+  // hands to the client as the bid figure.
+  const grand = pricedAllIn + runningProvisional
+  summary.addRow([])
+  const grandRow = summary.addRow(['', 'GRAND TOTAL (priced + P/S)', '', grand])
+  grandRow.font = { bold: true, size: 14 }
+  grandRow.getCell(4).numFmt = AED_FORMAT
+  // Slight emphasis on the priced + P/S cells to make the split readable
+  grandRow.getCell(2).font = { bold: true, size: 14 }
 
   const buffer = await wb.xlsx.writeBuffer()
   return Buffer.from(buffer as ArrayBuffer)
