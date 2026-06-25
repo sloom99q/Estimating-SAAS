@@ -23,6 +23,7 @@
 import { Prisma } from '@prisma/client'
 import { prisma } from '../../db'
 import { computeAssemblyUnitCost } from '../../pricing/assemblyEngine'
+import { recomputeBoqTotals } from '../../pricing/recomputeBoqTotals'
 import type { JobHandler, JobRecord } from '../types'
 
 interface PricePayload {
@@ -232,6 +233,7 @@ export const priceHandler: JobHandler = async (job: JobRecord) => {
     rateSource: string | null
     amount: Prisma.Decimal
     isProvisional: boolean
+    psAmount: Prisma.Decimal | null
   }
   const pending: PendingUpdate[] = []
   let pricedLines = 0
@@ -373,6 +375,21 @@ export const priceHandler: JobHandler = async (job: JobRecord) => {
       if (rate !== null) pricedLines += 1
       if (isProvisional) provisionalLines += 1
 
+      // PS-AGG-2 (2026-06-25) — preserve manual P/S psAmount across
+      // PRICE. A "manual" P/S line is one the user typed in via
+      // AddProvisionalLineCard: takeoffItemId IS NULL + isProvisional
+      // was already true going in. The pre-existing PRICE write
+      // unconditionally set psAmount=null which broke the
+      // delete-line decrement (delete subtracted 0, aggregate stayed
+      // inflated forever — the 1,090,000 ghost on Lami). Manual P/S
+      // gets its existing psAmount preserved; only auto-routed P/S
+      // (a takeoff item that fell through every rate tier) gets the
+      // psAmount=null sentinel that tells the commercial team to
+      // type the carry.
+      const isManualPs =
+        line.takeoffItemId === null && line.isProvisional === true
+      const preservedPsAmount = isManualPs ? line.psAmount : null
+
       pending.push({
         id: line.id,
         sectionId: section.id,
@@ -380,11 +397,15 @@ export const priceHandler: JobHandler = async (job: JobRecord) => {
         rateSource,
         amount,
         isProvisional,
+        psAmount: preservedPsAmount,
       })
 
       sectionSubtotal = sectionSubtotal.plus(amount)
       if (isProvisional) {
-        totalProvisional = totalProvisional.plus(line.psAmount ?? 0)
+        // Sum manual P/S amounts (just preserved) into the running
+        // total; auto-routed P/S contributes nothing until the
+        // operator types a carry.
+        totalProvisional = totalProvisional.plus(preservedPsAmount ?? 0)
       }
     }
     sectionSubtotals.set(section.id, sectionSubtotal)
@@ -407,7 +428,9 @@ export const priceHandler: JobHandler = async (job: JobRecord) => {
             rateSource: u.rateSource,
             amount: u.amount,
             isProvisional: u.isProvisional,
-            psAmount: null,
+            // PS-AGG-2 — manual P/S psAmount preserved (was set on
+            // pending above); auto-routed P/S gets null sentinel.
+            psAmount: u.psAmount,
           },
         }),
       ),

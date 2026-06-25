@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { tenantDb } from '../db/tenantDb'
 import { requireAuth } from '../middleware/auth'
 import { renderBoqXlsx, type XlsxBoq } from '../pricing/exportXlsx'
+import { recomputeBoqTotals } from '../pricing/recomputeBoqTotals'
 import { upsertValidationFlag } from '../jobs/validationFlagUpsert'
 import type { Router } from './router'
 import { errorResponse, jsonResponse } from '../utils/json'
@@ -441,23 +442,23 @@ export function registerBoqRoutes(router: Router): void {
               sectionLineCount.set(sectionCode, existingCount + lines.length)
             }
 
-            if (carriedTotal !== 0 || carriedProvisional !== 0) {
-              await tx.boq.update({
-                where: { id: boq.id },
-                data: {
-                  ...(carriedTotal !== 0 ? { subtotal: { increment: carriedTotal } } : {}),
-                  ...(carriedProvisional !== 0
-                    ? { totalProvisional: { increment: carriedProvisional } }
-                    : {}),
-                },
-              })
-            }
+            // PS-AGG-2 — totals are now self-healing via
+            // recomputeBoqTotals (called below). Maintained-increment
+            // logic kept here is redundant; left as a single source-of-
+            // truth recompute outside this block.
           }
 
           return boq.id
         },
         { timeout: 60_000, maxWait: 10_000 },
       )
+
+      // PS-AGG-2 — derive subtotal + totalProvisional from actual
+      // BoqLine rows. Single source of truth; no more drift between
+      // the aggregate and the lines no matter which mutation path
+      // (generate / carry-forward / price / addLine / deleteLine /
+      // patchLine) wrote what.
+      await recomputeBoqTotals(db, boqId)
 
       const full = await db.boq.findFirstOrThrow({
         where: { id: boqId },
@@ -694,23 +695,10 @@ export function registerBoqRoutes(router: Router): void {
           userId: ctx.user.id,
         },
       })
-      // Bump the BOQ subtotal optimistically; the next PRICE run owns
-      // the canonical recompute.
-      if (amount !== null) {
-        await db.boq.update({
-          where: { id: boq.id },
-          data: {
-            subtotal: { increment: amount },
-          },
-        })
-      } else if (body.data.psAmount !== undefined) {
-        await db.boq.update({
-          where: { id: boq.id },
-          data: {
-            totalProvisional: { increment: body.data.psAmount },
-          },
-        })
-      }
+      // PS-AGG-2 — recompute totals from actual lines. Same as the
+      // delete + patch paths now: single source of truth, no
+      // maintained deltas to drift.
+      await recomputeBoqTotals(db, boq.id)
       return jsonResponse({ id: created.id, itemRef }, 201)
     }),
   )
@@ -804,18 +792,9 @@ export function registerBoqRoutes(router: Router): void {
         data: update,
       })
 
-      // Subtotal / totalProvisional adjustments.
-      const amountDelta = (newAmount ?? 0) - oldAmount
-      const psDelta = (newPs ?? 0) - oldPs
-      if (amountDelta !== 0 || psDelta !== 0) {
-        await db.boq.update({
-          where: { id: boq.id },
-          data: {
-            ...(amountDelta !== 0 ? { subtotal: { increment: amountDelta } } : {}),
-            ...(psDelta !== 0 ? { totalProvisional: { increment: psDelta } } : {}),
-          },
-        })
-      }
+      // PS-AGG-2 — derive totals from actual lines instead of
+      // maintaining deltas. By construction the aggregate matches.
+      await recomputeBoqTotals(db, boq.id)
 
       // Audit: record what changed. One Correction per request — the
       // human-side reason text summarises which fields moved.
@@ -863,15 +842,11 @@ export function registerBoqRoutes(router: Router): void {
       const oldPs = line.psAmount ? Number(line.psAmount.toString()) : 0
 
       await db.boqLine.delete({ where: { id: line.id } })
-      if (oldAmount !== 0 || oldPs !== 0) {
-        await db.boq.update({
-          where: { id: boq.id },
-          data: {
-            ...(oldAmount !== 0 ? { subtotal: { decrement: oldAmount } } : {}),
-            ...(oldPs !== 0 ? { totalProvisional: { decrement: oldPs } } : {}),
-          },
-        })
-      }
+      // PS-AGG-2 — recompute from actual lines. The old decrement
+      // logic broke when PRICE had zeroed the line's psAmount
+      // earlier: deleting it then decremented by 0, leaving the
+      // aggregate inflated (root cause of the 1,090,000 ghost).
+      await recomputeBoqTotals(db, boq.id)
       await db.correction.create({
         data: {
           organizationId: ctx.organizationId,

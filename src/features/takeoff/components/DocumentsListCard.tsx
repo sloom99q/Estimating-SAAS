@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { Alert, Badge, Button, Card, Group, Stack, Table, Text } from '@mantine/core'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { notifications } from '@mantine/notifications'
@@ -17,6 +18,7 @@ export function DocumentsListCard({
   onSelect: (documentId: string) => void
 }) {
   const qc = useQueryClient()
+  const [skippedExpanded, setSkippedExpanded] = useState(false)
   const docs = useQuery({
     queryKey: ['documents', 'list', projectId],
     queryFn: () => fetchProjectDocuments(projectId),
@@ -61,6 +63,14 @@ export function DocumentsListCard({
   }
   const anyFailed = rows.some((r) => r.jobs.failed > 0)
 
+  // SPA-SKIPPED (2026-06-25) — real drawing sets are 20–50 DXFs;
+  // most non-floor-plan files auto-skip. Showing 50 grey SKIPPED
+  // rows above the actually-active docs makes the table unusable.
+  // Render active docs in the main table; collapse SKIPPED into one
+  // "N sheets skipped — click to expand" row at the bottom.
+  const activeRows = rows.filter((r) => r.status !== 'SKIPPED')
+  const skippedRows = rows.filter((r) => r.status === 'SKIPPED')
+
   return (
     <Card withBorder>
       <Stack gap="sm">
@@ -83,7 +93,7 @@ export function DocumentsListCard({
             </Table.Tr>
           </Table.Thead>
           <Table.Tbody>
-            {rows.map((d) => (
+            {activeRows.map((d) => (
               <Table.Tr key={d.id}>
                 <Table.Td>
                   <Button variant="subtle" size="xs" onClick={() => onSelect(d.id)}>
@@ -151,6 +161,74 @@ export function DocumentsListCard({
                 </Table.Td>
               </Table.Tr>
             ))}
+
+            {/* SPA-SKIPPED — collapse SKIPPED docs (elevations,
+                sections, RCPs, bathroom details, finish keys, etc.
+                auto-skipped by DXF introspection because they have
+                no room labels) into one row; click to expand. */}
+            {skippedRows.length > 0 && !skippedExpanded ? (
+              <Table.Tr>
+                <Table.Td colSpan={5}>
+                  <Group justify="space-between">
+                    <Text size="sm" c="dimmed">
+                      <strong>{skippedRows.length}</strong> sheets skipped (elevations, sections, details — no room labels detected)
+                    </Text>
+                    <Button
+                      size="xs"
+                      variant="subtle"
+                      onClick={() => setSkippedExpanded(true)}
+                    >
+                      Expand all
+                    </Button>
+                  </Group>
+                </Table.Td>
+              </Table.Tr>
+            ) : null}
+            {skippedRows.length > 0 && skippedExpanded
+              ? skippedRows.map((d, idx) => (
+                  <Table.Tr key={d.id}>
+                    <Table.Td>
+                      {idx === 0 ? (
+                        <Group gap="xs">
+                          <Button
+                            variant="subtle"
+                            size="xs"
+                            onClick={() => onSelect(d.id)}
+                            style={{ opacity: 0.7 }}
+                          >
+                            {d.filename}
+                          </Button>
+                          <Button
+                            size="xs"
+                            variant="subtle"
+                            color="gray"
+                            onClick={() => setSkippedExpanded(false)}
+                          >
+                            Collapse {skippedRows.length} skipped
+                          </Button>
+                        </Group>
+                      ) : (
+                        <Button
+                          variant="subtle"
+                          size="xs"
+                          onClick={() => onSelect(d.id)}
+                          style={{ opacity: 0.7 }}
+                        >
+                          {d.filename}
+                        </Button>
+                      )}
+                    </Table.Td>
+                    <Table.Td>{d.pageCount ?? '—'}</Table.Td>
+                    <Table.Td>
+                      <Badge color="gray" variant="light">SKIPPED</Badge>
+                    </Table.Td>
+                    <Table.Td>
+                      <Text size="xs" c="dimmed">—</Text>
+                    </Table.Td>
+                    <Table.Td />
+                  </Table.Tr>
+                ))
+              : null}
           </Table.Tbody>
         </Table>
       </Stack>
