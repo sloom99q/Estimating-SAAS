@@ -301,135 +301,150 @@ export function registerBoqRoutes(router: Router): void {
           })
         : []
 
-      const boqId = await db.$transaction(async (tx) => {
-        const boq = await tx.boq.create({
-          data: {
-            organizationId: ctx.organizationId,
-            projectId,
-            version: nextVersion,
-            status: 'DRAFT',
-            currency: 'AED',
-          },
-        })
-
-        const sectionsByCode = new Map<string, string>()
-
-        for (const [sectionCode, sectionItems] of sectionBuckets) {
-          const def = SECTIONS[sectionCode]
-          if (!def) continue
-          const section = await tx.boqSection.create({
+      // BOQ-500 fix (2026-06-25) — the carry-forward loop used to
+      // do sequential per-line tx.boqLine.create + tx.boqLine.count
+      // calls inside the transaction. Over Neon's ~50ms round-trip,
+      // with a Lami-sized P/S list (~20+ lines), the interactive
+      // transaction blew past Prisma's default 5s timeout and threw
+      // P2028 "Transaction not found" — surfacing in the SPA as
+      // a 500. Two changes:
+      //   1. Pre-compute itemRefs + sortOrders in-memory, then ONE
+      //      createMany per section (no per-line round-trips).
+      //   2. Bump the transaction timeout to 60s + maxWait to 10s,
+      //      a comfortable headroom for very large BOQs.
+      const boqId = await db.$transaction(
+        async (tx) => {
+          const boq = await tx.boq.create({
             data: {
               organizationId: ctx.organizationId,
-              boqId: boq.id,
-              code: def.code,
-              title: def.title,
-              sortOrder: def.sortOrder,
+              projectId,
+              version: nextVersion,
+              status: 'DRAFT',
+              currency: 'AED',
             },
           })
-          sectionsByCode.set(def.code, section.id)
-          await tx.boqLine.createMany({
-            data: sectionItems.map((item, i) => ({
-              organizationId: ctx.organizationId,
-              boqId: boq.id,
-              sectionId: section.id,
-              itemRef: `${def.code}/${(i + 1).toString().padStart(3, '0')}`,
-              description: item.description,
-              unit: item.unit,
-              qty: item.qtyFinal ?? item.qtyAi ?? 0,
-              isProvisional: item.category === 'STRUCTURE_PROV' || item.category === 'MEP_PROV',
-              confidence: item.confidence,
-              takeoffItemId: item.id,
-              sortOrder: i,
-            })),
-          })
-        }
 
-        // Carry forward manual P/S. A prior section we don't have in
-        // the new BOQ (rare — categories changed) gets created on
-        // demand so we don't drop the line.
-        if (priorManualLines.length > 0) {
-          // Group by section code so itemRef numbering continues
-          // after the auto-generated lines.
-          const linesBySection = new Map<string, typeof priorManualLines>()
-          for (const l of priorManualLines) {
-            const code = l.section.code
-            if (!linesBySection.has(code)) linesBySection.set(code, [])
-            linesBySection.get(code)!.push(l)
-          }
+          const sectionsByCode = new Map<string, string>()
+          // Track how many lines each section already has so the
+          // carry-forward pass can extend the itemRef numbering
+          // without a per-line tx.boqLine.count round-trip.
+          const sectionLineCount = new Map<string, number>()
 
-          let carriedTotal = 0
-          let carriedProvisional = 0
-
-          for (const [sectionCode, lines] of linesBySection) {
-            let sectionId = sectionsByCode.get(sectionCode)
-            if (!sectionId) {
-              const def = SECTIONS[sectionCode]
-              if (!def) continue
-              const section = await tx.boqSection.create({
-                data: {
-                  organizationId: ctx.organizationId,
-                  boqId: boq.id,
-                  code: def.code,
-                  title: def.title,
-                  sortOrder: def.sortOrder,
-                },
-              })
-              sectionsByCode.set(def.code, section.id)
-              sectionId = section.id
-            }
-            // Continue numbering after the auto lines in this section.
-            const existingCount = await tx.boqLine.count({
-              where: { sectionId },
-            })
-            for (let i = 0; i < lines.length; i += 1) {
-              const l = lines[i]!
-              const refIndex = existingCount + i + 1
-              const itemRef = `${sectionCode}/${refIndex.toString().padStart(3, '0')}`
-              // amount + psAmount get re-computed by PRICE; we
-              // copy them through so the unpriced BOQ shows them
-              // immediately (the SPA renders pre-price totals).
-              const amount = l.amount ? Number(l.amount.toString()) : 0
-              const ps = l.psAmount ? Number(l.psAmount.toString()) : 0
-              carriedTotal += amount
-              carriedProvisional += ps
-              await tx.boqLine.create({
-                data: {
-                  organizationId: ctx.organizationId,
-                  boqId: boq.id,
-                  sectionId,
-                  itemRef,
-                  description: l.description,
-                  brand: l.brand,
-                  unit: l.unit,
-                  qty: l.qty,
-                  rate: l.rate,
-                  amount: l.amount,
-                  isProvisional: l.isProvisional,
-                  psAmount: l.psAmount,
-                  confidence: l.confidence,
-                  // takeoffItemId stays NULL — marks as "manual" so
-                  // the NEXT regenerate carries it forward too.
-                  sortOrder: existingCount + i,
-                },
-              })
-            }
-          }
-
-          if (carriedTotal !== 0 || carriedProvisional !== 0) {
-            await tx.boq.update({
-              where: { id: boq.id },
+          for (const [sectionCode, sectionItems] of sectionBuckets) {
+            const def = SECTIONS[sectionCode]
+            if (!def) continue
+            const section = await tx.boqSection.create({
               data: {
-                ...(carriedTotal !== 0 ? { subtotal: { increment: carriedTotal } } : {}),
-                ...(carriedProvisional !== 0
-                  ? { totalProvisional: { increment: carriedProvisional } }
-                  : {}),
+                organizationId: ctx.organizationId,
+                boqId: boq.id,
+                code: def.code,
+                title: def.title,
+                sortOrder: def.sortOrder,
               },
             })
+            sectionsByCode.set(def.code, section.id)
+            sectionLineCount.set(def.code, sectionItems.length)
+            await tx.boqLine.createMany({
+              data: sectionItems.map((item, i) => ({
+                organizationId: ctx.organizationId,
+                boqId: boq.id,
+                sectionId: section.id,
+                itemRef: `${def.code}/${(i + 1).toString().padStart(3, '0')}`,
+                description: item.description,
+                unit: item.unit,
+                qty: item.qtyFinal ?? item.qtyAi ?? 0,
+                isProvisional:
+                  item.category === 'STRUCTURE_PROV' || item.category === 'MEP_PROV',
+                confidence: item.confidence,
+                takeoffItemId: item.id,
+                sortOrder: i,
+              })),
+            })
           }
-        }
 
-        return boq.id
-      })
+          // Carry forward manual P/S. A prior section we don't have
+          // in the new BOQ (rare — categories changed) gets created
+          // on demand so we don't drop the line.
+          if (priorManualLines.length > 0) {
+            // Group by section code so itemRef numbering continues
+            // after the auto-generated lines.
+            const linesBySection = new Map<string, typeof priorManualLines>()
+            for (const l of priorManualLines) {
+              const code = l.section.code
+              if (!linesBySection.has(code)) linesBySection.set(code, [])
+              linesBySection.get(code)!.push(l)
+            }
+
+            let carriedTotal = 0
+            let carriedProvisional = 0
+
+            for (const [sectionCode, lines] of linesBySection) {
+              let sectionId = sectionsByCode.get(sectionCode)
+              if (!sectionId) {
+                const def = SECTIONS[sectionCode]
+                if (!def) continue
+                const section = await tx.boqSection.create({
+                  data: {
+                    organizationId: ctx.organizationId,
+                    boqId: boq.id,
+                    code: def.code,
+                    title: def.title,
+                    sortOrder: def.sortOrder,
+                  },
+                })
+                sectionsByCode.set(def.code, section.id)
+                sectionLineCount.set(def.code, 0)
+                sectionId = section.id
+              }
+              const existingCount = sectionLineCount.get(sectionCode) ?? 0
+              // BATCH the insert — single round-trip per section.
+              await tx.boqLine.createMany({
+                data: lines.map((l, i) => {
+                  const refIndex = existingCount + i + 1
+                  const amount = l.amount ? Number(l.amount.toString()) : 0
+                  const ps = l.psAmount ? Number(l.psAmount.toString()) : 0
+                  carriedTotal += amount
+                  carriedProvisional += ps
+                  return {
+                    organizationId: ctx.organizationId,
+                    boqId: boq.id,
+                    sectionId: sectionId!,
+                    itemRef: `${sectionCode}/${refIndex.toString().padStart(3, '0')}`,
+                    description: l.description,
+                    brand: l.brand,
+                    unit: l.unit,
+                    qty: l.qty,
+                    rate: l.rate,
+                    amount: l.amount,
+                    isProvisional: l.isProvisional,
+                    psAmount: l.psAmount,
+                    confidence: l.confidence,
+                    // takeoffItemId stays NULL — marks as "manual" so
+                    // the NEXT regenerate carries it forward too.
+                    sortOrder: existingCount + i,
+                  }
+                }),
+              })
+              sectionLineCount.set(sectionCode, existingCount + lines.length)
+            }
+
+            if (carriedTotal !== 0 || carriedProvisional !== 0) {
+              await tx.boq.update({
+                where: { id: boq.id },
+                data: {
+                  ...(carriedTotal !== 0 ? { subtotal: { increment: carriedTotal } } : {}),
+                  ...(carriedProvisional !== 0
+                    ? { totalProvisional: { increment: carriedProvisional } }
+                    : {}),
+                },
+              })
+            }
+          }
+
+          return boq.id
+        },
+        { timeout: 60_000, maxWait: 10_000 },
+      )
 
       const full = await db.boq.findFirstOrThrow({
         where: { id: boqId },
