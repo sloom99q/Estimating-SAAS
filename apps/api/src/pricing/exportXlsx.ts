@@ -149,20 +149,48 @@ export async function renderBoqXlsx(boq: XlsxBoq, options: XlsxOptions = {}): Pr
     // the section row that doubled into the GRAND TOTAL. Computing
     // from lines on render keeps the AMOUNT total honest no matter
     // what state the section row is in.
+    //
+    // BUG-2 fix (2026-06-25) — render three subtotal rows per
+    // section so P/S is visible at the section level too:
+    //   "Subtotal — priced"     priced lines only (existing)
+    //   "Subtotal — P/S"        sum of psAmount on P/S lines
+    //   "Section total"         priced + P/S
+    // The estimator was reading the prior "Subtotal — priced only"
+    // as the section's full total and missing 590k of P/S.
     const sectionPriced = section.lines
       .filter((l) => !l.isProvisional)
       .reduce((sum, l) => sum + num(l.amount), 0)
-    const subtotalRow = sheet.addRow([
-      '',
-      '',
-      '',
-      '',
-      `Subtotal — ${section.code} (priced only)`,
+    const sectionPs = section.lines
+      .filter((l) => l.isProvisional)
+      .reduce((sum, l) => sum + (l.psAmount === null ? 0 : num(l.psAmount)), 0)
+    const sectionTotal = sectionPriced + sectionPs
+
+    const pricedRow = sheet.addRow([
+      '', '', '', '',
+      `Subtotal — ${section.code} priced`,
       sectionPriced,
     ])
-    subtotalRow.getCell(5).font = { bold: true }
-    subtotalRow.getCell(6).font = { bold: true }
-    subtotalRow.getCell(6).numFmt = AED_FORMAT
+    pricedRow.getCell(5).font = { italic: true }
+    pricedRow.getCell(6).numFmt = AED_FORMAT
+
+    if (sectionPs > 0) {
+      const psRow = sheet.addRow([
+        '', '', '', '',
+        `Subtotal — ${section.code} P/S`,
+        sectionPs,
+      ])
+      psRow.getCell(5).font = { italic: true }
+      psRow.getCell(6).numFmt = AED_FORMAT
+    }
+
+    const totalRow = sheet.addRow([
+      '', '', '', '',
+      `Section ${section.code} total (priced + P/S)`,
+      sectionTotal,
+    ])
+    totalRow.getCell(5).font = { bold: true }
+    totalRow.getCell(6).font = { bold: true }
+    totalRow.getCell(6).numFmt = AED_FORMAT
   }
 
   // Summary sheet.

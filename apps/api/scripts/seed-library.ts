@@ -157,153 +157,22 @@ const SYSTEMS: SystemSpec[] = [
   },
 
   // ──────────────────────────────────────────────────────────────
-  // Knauf — Standard gypsum ceiling (STUB pricing, estimator to confirm).
-  // ──────────────────────────────────────────────────────────────
-  {
-    brandName: 'Knauf',
-    brandCategory: 'gypsum',
-    brandWebsite: 'https://www.knauf.com',
-    systemName: 'Standard gypsum ceiling',
-    appliesTo: 'CEILING',
-    outputUnit: 'm²',
-    takeoffCategory: 'CEILING',
-    defaultForFinishCodes: ['CL01', 'CL02'],
-    sortOrder: 100,
-    notes:
-      'STUB pricing — estimator to confirm against real Knauf ' +
-      'quotes. Yields ≈ 150 AED/m² which matches the previous ' +
-      'CL03 line rate.',
-    components: [
-      {
-        kind: 'MATERIAL',
-        label: 'Knauf gypsum board 12.5mm',
-        unitPrice: 30,
-        coverage: 2.88, // 1.2m × 2.4m sheet
-        coats: 1,
-        wastagePct: 10,
-      },
-      {
-        kind: 'MATERIAL',
-        label: 'GI suspension framing',
-        unitPrice: 40,
-        coverage: 1,
-        coats: 1,
-        wastagePct: 5,
-      },
-      {
-        kind: 'MATERIAL',
-        label: 'Joint compound + tape',
-        unitPrice: 12,
-        coverage: 1,
-        coats: 1,
-        wastagePct: 0,
-      },
-      {
-        kind: 'LABOR',
-        label: 'Carpenter + finisher labour',
-        unitPrice: 35,
-      },
-      {
-        kind: 'LABOR',
-        label: 'Skim coat',
-        unitPrice: 8,
-      },
-    ],
-  },
-
-  // ──────────────────────────────────────────────────────────────
-  // Generic — Standard sand-cement screed. No brand, system unit ≈ 90 AED/m².
-  // ──────────────────────────────────────────────────────────────
-  {
-    brandName: 'Generic',
-    brandCategory: 'other',
-    systemName: 'Standard sand-cement screed (40mm)',
-    appliesTo: 'FLOOR',
-    outputUnit: 'm²',
-    takeoffCategory: 'SCREED',
-    defaultForFinishCodes: [],
-    sortOrder: 100,
-    notes:
-      '40mm sand-cement screed under interior floor finishes. ' +
-      'Yields ≈ 90 AED/m² to match existing rate-library value.',
-    components: [
-      {
-        kind: 'MATERIAL',
-        label: 'OPC cement (bag, 50kg)',
-        unitPrice: 20,
-        coverage: 5,
-        coats: 1,
-        wastagePct: 5,
-      },
-      {
-        kind: 'MATERIAL',
-        label: 'Washed sand (m³)',
-        unitPrice: 95,
-        coverage: 20,
-        coats: 1,
-        wastagePct: 5,
-      },
-      {
-        kind: 'LABOR',
-        label: 'Mason + helper',
-        unitPrice: 40,
-      },
-      {
-        kind: 'LABOR',
-        label: 'Curing + floating',
-        unitPrice: 10,
-      },
-    ],
-  },
-
-  // ──────────────────────────────────────────────────────────────
-  // Generic — Standard ceramic tile + adhesive (STUB).
-  // ──────────────────────────────────────────────────────────────
-  {
-    brandName: 'Generic',
-    brandCategory: 'tile',
-    systemName: 'Standard ceramic tile + adhesive (600×600)',
-    appliesTo: 'FLOOR',
-    outputUnit: 'm²',
-    takeoffCategory: 'FLOOR_FINISH',
-    defaultForFinishCodes: [],
-    sortOrder: 200, // beaten by branded tile systems when added
-    notes:
-      'STUB pricing — replace with the actual marble / porcelain ' +
-      'systems per finish code (ST01, PR01, etc). 600×600 ' +
-      'ceramic budget rate.',
-    components: [
-      {
-        kind: 'MATERIAL',
-        label: 'Ceramic floor tile (600×600)',
-        unitPrice: 35,
-        coverage: 1,
-        coats: 1,
-        wastagePct: 8,
-      },
-      {
-        kind: 'MATERIAL',
-        label: 'Tile adhesive (bag)',
-        unitPrice: 28,
-        coverage: 5,
-        coats: 1,
-        wastagePct: 10,
-      },
-      {
-        kind: 'MATERIAL',
-        label: 'Grout',
-        unitPrice: 8,
-        coverage: 5,
-        coats: 1,
-        wastagePct: 0,
-      },
-      {
-        kind: 'LABOR',
-        label: 'Tile-setter + helper',
-        unitPrice: 55,
-      },
-    ],
-  },
+  // CEILING / SCREED / FLOOR_FINISH systems INTENTIONALLY ABSENT.
+  //
+  // BUG-1 (2026-06-25) — earlier this file seeded Knauf CEILING,
+  // Generic SCREED, and Generic ceramic tile FLOOR_FINISH "stub"
+  // systems. With defaultForFinishCodes=[] (= org "house default"
+  // for any code), LIB-5's tier-1 routing picked them up FOR EVERY
+  // line in their category — silently overriding the rate-library's
+  // real per-code rates (ST01=200, PR01=210, PR03=150, BATHROOM=195,
+  // SCREED-FLR=90) with a single stubbed rate (100.56 for floor
+  // finishes, 59.19 for screed). User caught it in the XLSX.
+  //
+  // Real per-code Library systems need to come from the estimator
+  // (or the AI market-search feature) with real prices per material
+  // and per finish code. Stubbing them in the seed was the wrong
+  // call. Until those land, the rate-library handles ST01/PR01/etc
+  // correctly — Jotun PAINT remains the only seeded Library system.
 ]
 
 // ──────────────────────────────────────────────────────────────

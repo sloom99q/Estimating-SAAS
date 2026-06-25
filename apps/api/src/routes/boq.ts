@@ -398,6 +398,20 @@ export function registerBoqRoutes(router: Router): void {
               }
               const existingCount = sectionLineCount.get(sectionCode) ?? 0
               // BATCH the insert — single round-trip per section.
+              //
+              // BUG-2 fix (2026-06-25) — the prior version of this map
+              // included `brand: l.brand`, but BoqLine has no `brand`
+              // column (the field lives on Material / Assembly, not on
+              // BoqLine). Prisma's createMany silently corrupted the
+              // insert when given an unknown field — Decimal columns
+              // landed as NULL even when the source values were
+              // populated. That's how 4.0/001 Windows P/S carried
+              // forward with psAmount=NULL on v4, dropping 590k of P/S
+              // from the per-line display. Dropping the bogus `brand`
+              // line restores the correct shape. Decimal fields are
+              // also stringified — safer with createMany on Prisma
+              // 5.x, where Decimal-object inputs occasionally drop to
+              // null mid-batch.
               await tx.boqLine.createMany({
                 data: lines.map((l, i) => {
                   const refIndex = existingCount + i + 1
@@ -411,13 +425,12 @@ export function registerBoqRoutes(router: Router): void {
                     sectionId: sectionId!,
                     itemRef: `${sectionCode}/${refIndex.toString().padStart(3, '0')}`,
                     description: l.description,
-                    brand: l.brand,
                     unit: l.unit,
-                    qty: l.qty,
-                    rate: l.rate,
-                    amount: l.amount,
+                    qty: l.qty?.toString() ?? null,
+                    rate: l.rate?.toString() ?? null,
+                    amount: l.amount?.toString() ?? null,
                     isProvisional: l.isProvisional,
-                    psAmount: l.psAmount,
+                    psAmount: l.psAmount?.toString() ?? null,
                     confidence: l.confidence,
                     // takeoffItemId stays NULL — marks as "manual" so
                     // the NEXT regenerate carries it forward too.
