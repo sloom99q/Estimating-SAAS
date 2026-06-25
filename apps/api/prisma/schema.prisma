@@ -844,6 +844,17 @@ model BoqLine {
   confidence     Int?
   takeoffItemId  String?
   assemblyId     String?
+  /// TR-1 (2026-06-25) — structured provenance payload (see
+  /// apps/api/src/pricing/lineProvenance.ts zod schema). Carries:
+  ///   sourceType: 'MEASURED' | 'DERIVED' | 'ESTIMATED' | 'MANUAL'
+  ///   evidence:   [{kind, ...source pointer}]
+  ///   formula:    derived/measured math string (e.g. 'qty × rate')
+  ///   inputs:     [{name, value, source}] for DERIVED
+  ///   reasoning:  ESTIMATED rationale
+  ///   confidence: snapshotted at write time
+  /// Every write path stamps this; the deterministic auditor reads
+  /// it. A null payload pre-backfill = "unaudited legacy line".
+  provenance     Json?
   sortOrder      Int      @default(0)
   createdAt      DateTime @default(now()) @db.Timestamptz(6)
   updatedAt      DateTime @updatedAt @db.Timestamptz(6)

@@ -4,6 +4,14 @@ import { tenantDb } from '../db/tenantDb'
 import { requireAuth } from '../middleware/auth'
 import { renderBoqXlsx, type XlsxBoq } from '../pricing/exportXlsx'
 import { recomputeBoqTotals } from '../pricing/recomputeBoqTotals'
+import {
+  type Evidence,
+  type LineProvenance,
+  type ProvenanceInput,
+  type SourceType,
+  manual as manualProvenance,
+  parseProvenance,
+} from '../pricing/lineProvenance'
 import { upsertValidationFlag } from '../jobs/validationFlagUpsert'
 import type { Router } from './router'
 import { errorResponse, jsonResponse } from '../utils/json'
@@ -140,6 +148,85 @@ function boqDto(row: {
   }
 }
 
+/**
+ * TR-2 (2026-06-25) — build a LineProvenance for a fresh BoqLine
+ * created from a TakeoffItem. Same inference logic as the
+ * backfill, but applied at generate time so new lines have
+ * provenance from the moment they exist.
+ */
+type TakeoffForProvenance = {
+  id: string
+  tag: string | null
+  description: string
+  category: string
+  basis: string
+  confidence: number
+  sourceNote: string | null
+  meta: unknown
+  sourceSheet: {
+    id: string
+    drawingNo: string | null
+    pageNo: number
+  } | null
+}
+
+function buildAutoLineProvenance(
+  item: TakeoffForProvenance,
+  isProvisional: boolean,
+): LineProvenance {
+  const evidence: Evidence[] = [
+    {
+      kind: 'takeoffItem',
+      takeoffItemId: item.id,
+      tag: item.tag,
+      description: item.description.slice(0, 100),
+      category: item.category,
+    },
+  ]
+  if (item.sourceSheet) {
+    evidence.push({
+      kind: 'sheet',
+      sheetId: item.sourceSheet.id,
+      drawingNo: item.sourceSheet.drawingNo,
+      pageNo: item.sourceSheet.pageNo,
+      label: item.sourceNote ?? undefined,
+    })
+  }
+  let sourceType: SourceType = 'ESTIMATED'
+  switch (item.basis) {
+    case 'MEASURED':
+    case 'VISUAL':
+      sourceType = 'MEASURED'
+      break
+    case 'DERIVED':
+    case 'PARAMETRIC':
+      sourceType = 'DERIVED'
+      break
+    case 'ESTIMATED':
+    case 'PLACEHOLDER':
+      sourceType = 'ESTIMATED'
+      break
+  }
+  const meta = (item.meta ?? {}) as Record<string, unknown>
+  const formula = isProvisional
+    ? `psAmount carried from takeoff ${item.tag ?? item.description.slice(0, 30)}`
+    : 'amount = qty × rate'
+  const reasoning =
+    sourceType === 'ESTIMATED'
+      ? typeof meta.estimationReasoning === 'string'
+        ? (meta.estimationReasoning as string)
+        : item.sourceNote ?? `Estimated from ${item.category} prior`
+      : undefined
+  return {
+    sourceType,
+    evidence,
+    formula,
+    reasoning,
+    confidence: item.confidence ?? undefined,
+    stampedBy: 'generateBoq.auto',
+  }
+}
+
 export function registerBoqRoutes(router: Router): void {
   /**
    * POST /api/projects/:id/boq
@@ -177,6 +264,11 @@ export function registerBoqRoutes(router: Router): void {
       const items = await db.takeoffItem.findMany({
         where: { projectId, deletedAt: null, ...statusFilter },
         orderBy: [{ category: 'asc' }, { tag: 'asc' }, { createdAt: 'asc' }],
+        include: {
+          sourceSheet: {
+            select: { id: true, drawingNo: true, pageNo: true, documentId: true },
+          },
+        },
       })
 
       if (items.length === 0) {
@@ -297,10 +389,14 @@ export function registerBoqRoutes(router: Router): void {
       const priorManualLines = latest
         ? await db.boqLine.findMany({
             where: { boqId: latest.id, takeoffItemId: null },
+            // Default `findMany` already returns all scalar fields
+            // including `provenance` (Json). `include` pulls in the
+            // section title for itemRef numbering carry.
             include: { section: { select: { code: true } } },
             orderBy: { sortOrder: 'asc' },
           })
         : []
+      const priorVersionLabel = latest ? `v${latest.version}` : null
 
       // BOQ-500 fix (2026-06-25) — the carry-forward loop used to
       // do sequential per-line tx.boqLine.create + tx.boqLine.count
@@ -346,20 +442,27 @@ export function registerBoqRoutes(router: Router): void {
             sectionsByCode.set(def.code, section.id)
             sectionLineCount.set(def.code, sectionItems.length)
             await tx.boqLine.createMany({
-              data: sectionItems.map((item, i) => ({
-                organizationId: ctx.organizationId,
-                boqId: boq.id,
-                sectionId: section.id,
-                itemRef: `${def.code}/${(i + 1).toString().padStart(3, '0')}`,
-                description: item.description,
-                unit: item.unit,
-                qty: item.qtyFinal ?? item.qtyAi ?? 0,
-                isProvisional:
-                  item.category === 'STRUCTURE_PROV' || item.category === 'MEP_PROV',
-                confidence: item.confidence,
-                takeoffItemId: item.id,
-                sortOrder: i,
-              })),
+              data: sectionItems.map((item, i) => {
+                const isProvisional =
+                  item.category === 'STRUCTURE_PROV' || item.category === 'MEP_PROV'
+                return {
+                  organizationId: ctx.organizationId,
+                  boqId: boq.id,
+                  sectionId: section.id,
+                  itemRef: `${def.code}/${(i + 1).toString().padStart(3, '0')}`,
+                  description: item.description,
+                  unit: item.unit,
+                  qty: item.qtyFinal ?? item.qtyAi ?? 0,
+                  isProvisional,
+                  confidence: item.confidence,
+                  takeoffItemId: item.id,
+                  // TR-2 — stamp structured provenance on every new
+                  // BoqLine. Backfill handles old rows; this keeps
+                  // new ones audit-clean from the moment they exist.
+                  provenance: buildAutoLineProvenance(item, isProvisional) as object,
+                  sortOrder: i,
+                }
+              }),
             })
           }
 
@@ -420,6 +523,36 @@ export function registerBoqRoutes(router: Router): void {
                   const ps = l.psAmount ? Number(l.psAmount.toString()) : 0
                   carriedTotal += amount
                   carriedProvisional += ps
+                  // TR-2 — carry the prior line's provenance forward,
+                  // appending a "carried from vN" evidence chip so
+                  // the audit trail shows the chain. If the prior
+                  // line lacked provenance (legacy pre-backfill —
+                  // shouldn't happen post-TR-1), build a fresh
+                  // MANUAL stamp.
+                  const priorProv = parseProvenance(l.provenance)
+                  const carriedProv: LineProvenance = priorProv
+                    ? {
+                        ...priorProv,
+                        evidence: [
+                          ...priorProv.evidence,
+                          {
+                            kind: 'legacy',
+                            note: `Carried forward from BOQ ${priorVersionLabel ?? 'prior'} line ${l.itemRef}`,
+                          },
+                        ],
+                        stampedBy: 'generateBoq.carryForward',
+                      }
+                    : {
+                        sourceType: 'MANUAL',
+                        evidence: [
+                          {
+                            kind: 'legacy',
+                            note: `Carried forward from BOQ ${priorVersionLabel ?? 'prior'} (no provenance on source)`,
+                          },
+                        ],
+                        confidence: l.confidence ?? 100,
+                        stampedBy: 'generateBoq.carryForward',
+                      }
                   return {
                     organizationId: ctx.organizationId,
                     boqId: boq.id,
@@ -435,6 +568,7 @@ export function registerBoqRoutes(router: Router): void {
                     confidence: l.confidence,
                     // takeoffItemId stays NULL — marks as "manual" so
                     // the NEXT regenerate carries it forward too.
+                    provenance: carriedProv as object,
                     sortOrder: existingCount + i,
                   }
                 }),
@@ -664,6 +798,16 @@ export function registerBoqRoutes(router: Router): void {
         : body.data.description
       const amount =
         body.data.rate !== undefined ? body.data.rate * body.data.qty : null
+      // TR-2 — MANUAL provenance with user + timestamp stamp.
+      const provenance = manualProvenance({
+        userId: ctx.user.id,
+        at: new Date().toISOString(),
+        note: body.data.isProvisional
+          ? `Manual P/S added: ${body.data.description.slice(0, 100)}`
+          : `Manual priced line added: ${body.data.description.slice(0, 100)}`,
+        confidence: 100,
+        stampedBy: 'addProvisionalBoqLine.route',
+      })
       const created = await db.boqLine.create({
         data: {
           organizationId: ctx.organizationId,
@@ -678,6 +822,7 @@ export function registerBoqRoutes(router: Router): void {
           amount,
           isProvisional: body.data.isProvisional ?? false,
           psAmount: body.data.psAmount ?? null,
+          provenance: provenance as object,
           sortOrder: nextSort,
         },
       })
