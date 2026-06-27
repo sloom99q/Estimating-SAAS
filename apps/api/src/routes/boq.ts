@@ -3,13 +3,28 @@ import { z } from 'zod'
 import { tenantDb } from '../db/tenantDb'
 import { requireAuth } from '../middleware/auth'
 import { renderBoqXlsx, type XlsxBoq } from '../pricing/exportXlsx'
+import { toXlsxLine } from '../pricing/xlsxLineProvenance'
+import {
+  DEFAULT_PROVISIONAL_AED,
+  MEP_CATEGORIES,
+  effectiveEstimability,
+  parseEstimabilityOverrides,
+  type EstimabilityOverrides,
+} from '../pricing/estimability'
+import type { Estimability, TakeoffCategory } from '@prisma/client'
 import { recomputeBoqTotals } from '../pricing/recomputeBoqTotals'
 import {
   type Evidence,
+  type EvidenceStep,
   type LineProvenance,
-  type ProvenanceInput,
-  type SourceType,
+  EvidenceStep as EvidenceStepZ,
+  computeConfidence,
+  derivedByFormula,
+  derivedByRule,
+  estimated as estimatedProvenance,
   manual as manualProvenance,
+  measured as measuredProvenance,
+  normalizeConfidence,
   parseProvenance,
 } from '../pricing/lineProvenance'
 import { upsertValidationFlag } from '../jobs/validationFlagUpsert'
@@ -32,6 +47,10 @@ const SECTIONS: Record<string, SectionDef> = {
   '1.0': { code: '1.0', title: 'General', sortOrder: 10 },
   '2.5': { code: '2.5', title: 'Metal', sortOrder: 25 },
   '2.6': { code: '2.6', title: 'Wood', sortOrder: 26 },
+  '2.7': { code: '2.7', title: 'MEP — HVAC', sortOrder: 27 },
+  '2.71': { code: '2.71', title: 'MEP — Electrical', sortOrder: 271 },
+  '2.72': { code: '2.72', title: 'MEP — Plumbing', sortOrder: 272 },
+  '2.73': { code: '2.73', title: 'MEP — ELV', sortOrder: 273 },
   '2.8': { code: '2.8', title: 'Doors / Windows / Glazing', sortOrder: 28 },
   '2.9': { code: '2.9', title: 'Finishes', sortOrder: 29 },
   '3.1': { code: '3.1', title: 'External', sortOrder: 31 },
@@ -44,6 +63,20 @@ const SECTIONS: Record<string, SectionDef> = {
  * "1.0 General" room-as-line entries that priced as Provisional Sums and
  * confused the export.
  */
+/// CLASSIFIER-2 — human-readable discipline label for collapsed
+/// PROVISIONAL lines. Used as the BoqLine.description prefix.
+const MEP_DISCIPLINE_LABEL: Partial<Record<TakeoffCategory, string>> = {
+  MEP_HVAC: 'HVAC',
+  MEP_ELEC: 'Electrical',
+  MEP_PLUMB: 'Plumbing + Drainage',
+  MEP_ELV: 'ELV / Low-current',
+  JOINERY: 'Joinery',
+  METAL: 'Metal works',
+  GRC: 'GRC',
+  EXTERNAL: 'External / Landscape',
+  SKIRTING: 'Skirting',
+}
+
 const CATEGORY_TO_SECTION: Record<string, string> = {
   OTHER: '1.0',
   METAL: '2.5',
@@ -65,6 +98,14 @@ const CATEGORY_TO_SECTION: Record<string, string> = {
   EXTERNAL: '3.1',
   STRUCTURE_PROV: '4.0',
   MEP_PROV: '4.0',
+  // MEP-5 — rule-engine emissions land in the 2.7 section family
+  // (one section per discipline). MEP_PROV stays as the manual P/S
+  // bucket in 4.0 for one-off allowances the rule engine can't
+  // quantify.
+  MEP_HVAC: '2.7',
+  MEP_ELEC: '2.71',
+  MEP_PLUMB: '2.72',
+  MEP_ELV: '2.73',
 }
 
 /** Categories explicitly excluded from BOQ generation. */
@@ -167,6 +208,11 @@ type TakeoffForProvenance = {
     id: string
     drawingNo: string | null
     pageNo: number
+    // EVIDENCE-1 — title + sheetType + parent document filename so
+    // the evidence chip on the BoqLine self-verifies.
+    title: string | null
+    sheetType: string | null
+    document: { filename: string } | null
   } | null
 }
 
@@ -174,6 +220,18 @@ function buildAutoLineProvenance(
   item: TakeoffForProvenance,
   isProvisional: boolean,
 ): LineProvenance {
+  // Sheet evidence — populate bbox from the takeoff's DXF coords if
+  // the upstream parser stashed them in meta.position. TR-3 ⇒ enables
+  // the viewer to highlight the exact spot on the drawing.
+  const meta = (item.meta ?? {}) as Record<string, unknown>
+  const pos = (meta.position ?? meta.bbox) as
+    | { x?: number; y?: number; w?: number; h?: number; cs?: string }
+    | undefined
+  const extracted =
+    typeof meta.extractedValue === 'string'
+      ? (meta.extractedValue as string)
+      : (item.sourceNote ?? undefined)
+
   const evidence: Evidence[] = [
     {
       kind: 'takeoffItem',
@@ -190,40 +248,171 @@ function buildAutoLineProvenance(
       drawingNo: item.sourceSheet.drawingNo,
       pageNo: item.sourceSheet.pageNo,
       label: item.sourceNote ?? undefined,
+      ...(item.sourceSheet.title ? { sheetTitle: item.sourceSheet.title } : {}),
+      ...(item.sourceSheet.sheetType ? { sheetType: item.sourceSheet.sheetType } : {}),
+      ...(item.sourceSheet.document?.filename
+        ? { sourceDocFilename: item.sourceSheet.document.filename }
+        : {}),
+      ...(pos && typeof pos.x === 'number' && typeof pos.y === 'number'
+        ? {
+            bbox: {
+              cs: (pos.cs as 'dxf-mm' | 'pdf-pt' | 'pdf-pct') ?? 'dxf-mm',
+              x: pos.x,
+              y: pos.y,
+              ...(typeof pos.w === 'number' ? { w: pos.w } : {}),
+              ...(typeof pos.h === 'number' ? { h: pos.h } : {}),
+            },
+          }
+        : {}),
+      ...(extracted ? { extractedValue: extracted } : {}),
     })
   }
-  let sourceType: SourceType = 'ESTIMATED'
-  switch (item.basis) {
-    case 'MEASURED':
-    case 'VISUAL':
-      sourceType = 'MEASURED'
-      break
-    case 'DERIVED':
-    case 'PARAMETRIC':
-      sourceType = 'DERIVED'
-      break
-    case 'ESTIMATED':
-    case 'PLACEHOLDER':
-      sourceType = 'ESTIMATED'
-      break
+  // CONF-3 — pick up the chain QUANTIFY (or the MEP / paint / vanity
+  // emitters) attached on the TakeoffItem's meta. The chain is the
+  // primary truth for confidence; the flat `conf` is a back-compat
+  // mirror computed off the same chain for legacy readers.
+  const rawChain = Array.isArray(meta.evidenceChain) ? meta.evidenceChain : null
+  const parsedChain = rawChain
+    ? rawChain
+        .map((s) => EvidenceStepZ.safeParse(s))
+        .filter((r): r is { success: true; data: EvidenceStep } => r.success)
+        .map((r) => r.data)
+    : []
+  const evidenceChain: EvidenceStep[] | undefined =
+    parsedChain.length > 0 ? parsedChain : undefined
+  const conf =
+    evidenceChain && evidenceChain.length > 0
+      ? computeConfidence(evidenceChain)
+      : normalizeConfidence(item.confidence)
+
+  // MEP-5 — rule-driven MEP lines use derivedByRule. Evidence picks
+  // up the mepRule kind with factorSource + rateSource so the audit
+  // chip shows "factor from engineer-takeoff" / "rate PLACEHOLDER".
+  // The confidence already reflects min(factor,rate) from the rule
+  // (QUANTIFY did the math).
+  if (typeof meta.mepRuleId === 'string') {
+    const mepEvidence: Evidence = {
+      kind: 'mepRule',
+      ruleId: meta.mepRuleId as string,
+      name:
+        typeof meta.mepDiscipline === 'string'
+          ? `${meta.mepDiscipline as string} / ${item.description}`
+          : item.description,
+      ...(typeof meta.mepFactorSource === 'string'
+        ? { factorSource: meta.mepFactorSource as string }
+        : {}),
+      ...(typeof meta.mepRateSource === 'string'
+        ? { rateSource: meta.mepRateSource as string }
+        : {}),
+    }
+    return derivedByRule({
+      evidence: [...evidence, mepEvidence],
+      ruleRef: `mep-rule:${meta.mepRuleId as string}`,
+      reasoning:
+        typeof meta.mepFormulaText === 'string'
+          ? (meta.mepFormulaText as string)
+          : `Derived from MEP rule ${meta.mepRuleId as string}`,
+      confidence: conf,
+      evidenceChain,
+      stampedBy: 'generateBoq.auto.mep',
+    })
   }
-  const meta = (item.meta ?? {}) as Record<string, unknown>
+
+  // Map takeoff basis → line sourceType + derivation. The integrity
+  // auditor enforces:
+  //   MEASURED  → no derivation (qty IS the measurement)
+  //   DERIVED   → derivationType=formula + formula
+  //   ESTIMATED → derivationType=ai_reasoning + reasoning
   const formula = isProvisional
     ? `psAmount carried from takeoff ${item.tag ?? item.description.slice(0, 30)}`
     : 'amount = qty × rate'
-  const reasoning =
-    sourceType === 'ESTIMATED'
-      ? typeof meta.estimationReasoning === 'string'
-        ? (meta.estimationReasoning as string)
-        : item.sourceNote ?? `Estimated from ${item.category} prior`
-      : undefined
+
+  switch (item.basis) {
+    case 'MEASURED':
+    case 'VISUAL':
+      // A pure-measured line — auditor accepts derivationType=null
+      // even when there's a rate, since the *quantity* is what was
+      // measured and pricing is a downstream step, not a derivation.
+      return measuredProvenance({
+        evidence,
+        confidence: conf,
+        evidenceChain,
+        stampedBy: 'generateBoq.auto',
+      })
+    case 'DERIVED':
+    case 'PARAMETRIC':
+      return derivedByFormula({
+        evidence,
+        formula,
+        confidence: conf,
+        evidenceChain,
+        stampedBy: 'generateBoq.auto',
+      })
+    case 'ESTIMATED':
+    case 'PLACEHOLDER': {
+      const reasoning =
+        typeof meta.estimationReasoning === 'string'
+          ? (meta.estimationReasoning as string)
+          : (item.sourceNote ?? `Estimated from ${item.category} prior`)
+      return estimatedProvenance({
+        evidence,
+        reasoning,
+        confidence: conf,
+        evidenceChain,
+        stampedBy: 'generateBoq.auto',
+      })
+    }
+    default:
+      // Unknown basis — fall back to ESTIMATED so the auditor surfaces
+      // it as a review item instead of failing structurally.
+      return estimatedProvenance({
+        evidence,
+        reasoning: `Unknown takeoff basis '${item.basis}' — defaulted to ESTIMATED`,
+        confidence: conf,
+        evidenceChain,
+        stampedBy: 'generateBoq.auto',
+      })
+  }
+}
+
+/**
+ * CLASSIFIER-2 — build provenance for a PROVISIONAL line that
+ * collapses N TakeoffItems into ONE P/S row. The evidence array
+ * lists each rolled-up item so the engineer can drill back into
+ * the originals via the SPA / XLSX evidence chip.
+ */
+function buildCollapsedProvisionalProvenance(
+  items: TakeoffForProvenance[],
+  category: TakeoffCategory,
+  psAmount: number | null | undefined,
+): LineProvenance {
+  const evidence: Evidence[] = items.slice(0, 25).map((it) => ({
+    kind: 'takeoffItem' as const,
+    takeoffItemId: it.id,
+    tag: it.tag,
+    description: it.description.slice(0, 80),
+    category: it.category,
+  }))
+  if (items.length > 25) {
+    evidence.push({
+      kind: 'legacy',
+      note: `+${items.length - 25} more takeoff items rolled up`,
+    })
+  }
+  evidence.push({
+    kind: 'legacy',
+    note: `Contractor-typical P/S allowance for ${category} — ${
+      psAmount != null
+        ? `${psAmount.toLocaleString('en-AE')} AED from engineer-takeoff defaults`
+        : 'allowance pending estimator confirmation'
+    }. Per CLASSIFIER-2: the app deliberately does not estimate this discipline from the drawing; a contractor confirms the number.`,
+  })
   return {
-    sourceType,
+    sourceType: 'MANUAL',
+    derivationType: null,
     evidence,
-    formula,
-    reasoning,
-    confidence: item.confidence ?? undefined,
-    stampedBy: 'generateBoq.auto',
+    confidence: 1,
+    stampedBy: 'generateBoq.provisionalCollapse',
   }
 }
 
@@ -253,9 +442,25 @@ export function registerBoqRoutes(router: Router): void {
       const db = tenantDb(ctx.organizationId)
       const project = await db.project.findFirst({
         where: { id: projectId, deletedAt: null },
-        select: { id: true },
+        select: { id: true, estimabilityOverrides: true },
       })
       if (!project) return errorResponse(404, 'Project not found')
+
+      // CLASSIFIER-2 — load the per-project override map + detect
+      // whether the project has MEP drawings (any sheet classified
+      // discipline='MEP'). Both feed effectiveEstimability so the
+      // collapse-vs-price decision is per-project, not global.
+      const overrides: EstimabilityOverrides = parseEstimabilityOverrides(
+        project.estimabilityOverrides,
+      )
+      const hasMepDrawings =
+        (await db.sheet.count({
+          where: {
+            organizationId: ctx.organizationId,
+            discipline: 'MEP',
+            document: { projectId, deletedAt: null },
+          },
+        })) > 0
 
       const statusFilter: { status?: { in: TakeoffStatus[] } } = onlyApproved
         ? { status: { in: ['APPROVED', 'EDITED'] as TakeoffStatus[] } }
@@ -266,7 +471,18 @@ export function registerBoqRoutes(router: Router): void {
         orderBy: [{ category: 'asc' }, { tag: 'asc' }, { createdAt: 'asc' }],
         include: {
           sourceSheet: {
-            select: { id: true, drawingNo: true, pageNo: true, documentId: true },
+            select: {
+              id: true,
+              drawingNo: true,
+              pageNo: true,
+              documentId: true,
+              // EVIDENCE-1 — propagate title + sheetType + parent
+              // document filename so buildAutoLineProvenance can
+              // stamp a self-verifying sheet evidence chip.
+              title: true,
+              sheetType: true,
+              document: { select: { filename: true } },
+            },
           },
         },
       })
@@ -440,30 +656,125 @@ export function registerBoqRoutes(router: Router): void {
               },
             })
             sectionsByCode.set(def.code, section.id)
-            sectionLineCount.set(def.code, sectionItems.length)
-            await tx.boqLine.createMany({
-              data: sectionItems.map((item, i) => {
-                const isProvisional =
-                  item.category === 'STRUCTURE_PROV' || item.category === 'MEP_PROV'
-                return {
-                  organizationId: ctx.organizationId,
-                  boqId: boq.id,
-                  sectionId: section.id,
-                  itemRef: `${def.code}/${(i + 1).toString().padStart(3, '0')}`,
-                  description: item.description,
-                  unit: item.unit,
-                  qty: item.qtyFinal ?? item.qtyAi ?? 0,
-                  isProvisional,
-                  confidence: item.confidence,
-                  takeoffItemId: item.id,
-                  // TR-2 — stamp structured provenance on every new
-                  // BoqLine. Backfill handles old rows; this keeps
-                  // new ones audit-clean from the moment they exist.
-                  provenance: buildAutoLineProvenance(item, isProvisional) as object,
-                  sortOrder: i,
-                }
-              }),
-            })
+
+            // CLASSIFIER-2 (2026-06-27) — bucket items by their
+            // EFFECTIVE estimability. The pricing decisions:
+            //   MEASURED / DERIVED / MANUAL → emit as today (one
+            //     BoqLine per item, priced).
+            //   PROVISIONAL → COLLAPSE all items of the same category
+            //     into ONE P/S BoqLine carrying the discipline
+            //     allowance (DEFAULT_PROVISIONAL_AED). This is the
+            //     "22 placeholder MEP lines → 4 P/S lines" pivot —
+            //     contractors don't estimate MEP from a floor plan
+            //     and we shouldn't pretend to.
+            //   PLACEHOLDER → SKIP from the main BOQ entirely. They
+            //     stay as TakeoffItems for drill-down, and the
+            //     XLSX-3 draft tab can show them when explicitly
+            //     requested.
+            const priced: typeof sectionItems = []
+            const provByCategory = new Map<TakeoffCategory, typeof sectionItems>()
+            for (const item of sectionItems) {
+              const meta = (item.meta ?? {}) as Record<string, unknown>
+              const est = effectiveEstimability({
+                category: item.category as TakeoffCategory,
+                meta,
+                overrides,
+                hasMepDrawings,
+              })
+              if (est === 'PLACEHOLDER') continue
+              if (est === 'PROVISIONAL') {
+                const cat = item.category as TakeoffCategory
+                const list = provByCategory.get(cat) ?? []
+                list.push(item)
+                provByCategory.set(cat, list)
+                continue
+              }
+              // MEASURED / DERIVED / MANUAL — price normally.
+              priced.push(item)
+            }
+
+            // Pre-compute lineData for one createMany.
+            type LineData = Parameters<typeof tx.boqLine.createMany>[0]['data']
+            const lineData: Exclude<LineData, readonly unknown[]>[] = []
+            let lineIx = 0
+            const nextRef = (): string =>
+              `${def.code}/${(lineIx + 1).toString().padStart(3, '0')}`
+
+            // (a) Priced items — one BoqLine per item.
+            for (const item of priced) {
+              const isProvisional =
+                item.category === 'STRUCTURE_PROV' || item.category === 'MEP_PROV'
+              const meta = (item.meta ?? {}) as Record<string, unknown>
+              const qty = Number(item.qtyFinal ?? item.qtyAi ?? 0)
+              const isMep =
+                typeof meta.mepRuleId === 'string' && typeof meta.mepRate === 'number'
+              const mepRate = isMep ? (meta.mepRate as number) : null
+              const mepRateSource = isMep ? `mep-rule:${meta.mepRuleId as string}` : null
+              const amount = mepRate !== null ? qty * mepRate : null
+              lineData.push({
+                organizationId: ctx.organizationId,
+                boqId: boq.id,
+                sectionId: section.id,
+                itemRef: nextRef(),
+                description: item.description,
+                unit: item.unit,
+                qty,
+                isProvisional,
+                confidence: item.confidence,
+                takeoffItemId: item.id,
+                rate: mepRate !== null ? mepRate.toString() : null,
+                amount: amount !== null ? amount.toString() : null,
+                rateSource: mepRateSource,
+                provenance: buildAutoLineProvenance(item, isProvisional) as object,
+                sortOrder: lineIx,
+              })
+              lineIx += 1
+            }
+
+            // (b) Provisional collapse — one BoqLine per category,
+            // psAmount = DEFAULT_PROVISIONAL_AED (real numbers from
+            // estimability.ts). Provenance lists the rolled-up
+            // TakeoffItems as evidence so the drill-down trail
+            // stays intact.
+            for (const cat of [...provByCategory.keys()].sort()) {
+              const items = provByCategory.get(cat)!
+              const psAmount = DEFAULT_PROVISIONAL_AED[cat]
+              const isMep = MEP_CATEGORIES.has(cat)
+              const disciplineLabel = MEP_DISCIPLINE_LABEL[cat] ?? cat.replace(/_/g, ' ')
+              const psText =
+                psAmount != null
+                  ? ` (P/S ${psAmount.toLocaleString('en-AE')} AED, contractor-typical)`
+                  : ' (P/S, allowance to be confirmed)'
+              const description =
+                `${disciplineLabel} — provisional sum${psText}; rolled up from ${items.length} takeoff item${items.length === 1 ? '' : 's'}` +
+                (isMep && !hasMepDrawings
+                  ? ' (MEP drawings not uploaded — discipline ships P/S until engineer takeoff confirms)'
+                  : '')
+              lineData.push({
+                organizationId: ctx.organizationId,
+                boqId: boq.id,
+                sectionId: section.id,
+                itemRef: nextRef(),
+                description,
+                unit: 'LS',
+                qty: '1',
+                isProvisional: true,
+                psAmount: psAmount != null ? psAmount.toString() : null,
+                confidence: 100,
+                takeoffItemId: null,
+                rate: null,
+                amount: null,
+                rateSource: null,
+                provenance: buildCollapsedProvisionalProvenance(items, cat, psAmount) as object,
+                sortOrder: lineIx,
+              })
+              lineIx += 1
+            }
+
+            sectionLineCount.set(def.code, lineIx)
+            if (lineData.length > 0) {
+              await tx.boqLine.createMany({ data: lineData })
+            }
           }
 
           // Carry forward manual P/S. A prior section we don't have
@@ -544,13 +855,14 @@ export function registerBoqRoutes(router: Router): void {
                       }
                     : {
                         sourceType: 'MANUAL',
+                        derivationType: null,
                         evidence: [
                           {
                             kind: 'legacy',
                             note: `Carried forward from BOQ ${priorVersionLabel ?? 'prior'} (no provenance on source)`,
                           },
                         ],
-                        confidence: l.confidence ?? 100,
+                        confidence: normalizeConfidence(l.confidence ?? 100),
                         stampedBy: 'generateBoq.carryForward',
                       }
                   return {
@@ -650,6 +962,112 @@ export function registerBoqRoutes(router: Router): void {
     }),
   )
 
+  /**
+   * GET /api/boqs/:id/audit
+   *
+   * REVIEW-1 — run the deterministic auditor pipeline over every
+   * BoqLine in the BOQ + persist verificationStatus (VERIFIED /
+   * FLAGGED) per line. Returns a summary + the list of flagged lines
+   * so the SPA review queue can render "X verified, Y need review"
+   * with the row-level reasons without a second round-trip.
+   *
+   * Pure structural verification — no AI, no LLM. Cheap enough to run
+   * on every page-load. Future Engineering + Procurement modules plug
+   * in via auditor.AUDIT_MODULES.
+   */
+  router.get(
+    '/api/boqs/:id/audit',
+    requireAuth(async (_req, ctx) => {
+      const db = tenantDb(ctx.organizationId)
+      const boq = await db.boq.findFirst({
+        where: { id: ctx.params.id, deletedAt: null },
+        select: {
+          id: true,
+          version: true,
+          status: true,
+          project: { select: { id: true, name: true } },
+        },
+      })
+      if (!boq) return errorResponse(404, 'BOQ not found')
+
+      const { auditLineWithModules, summarize, toAuditInput } = await import(
+        '../pricing/auditor'
+      )
+
+      const lines = await db.boqLine.findMany({
+        where: { boqId: boq.id },
+        include: { section: { select: { code: true, title: true } } },
+        orderBy: [{ section: { sortOrder: 'asc' } }, { sortOrder: 'asc' }],
+      })
+
+      const perLine = lines.map((l) => {
+        const input = toAuditInput(l)
+        const result = auditLineWithModules(input)
+        return { input, sectionCode: l.section.code, sectionTitle: l.section.title, result, raw: l }
+      })
+
+      // Persist verificationStatus per line so the SPA list view +
+      // XLSX exporter can render badges without re-running the
+      // pipeline. Writes are pipelined (Promise.all) instead of
+      // serialised inside a transaction — each update is independent
+      // + idempotent (last-write-wins on re-audit), so the transaction
+      // overhead was pure latency. 78 serial Neon round-trips were
+      // tripping Bun.serve's 10s idleTimeout; pipelined they finish
+      // in ~1s.
+      await Promise.all(
+        perLine.map((r) => {
+          // AUDIT-VERDICT — persisted status is still the worst-of
+          // axes for the existing column, but verificationDetail now
+          // carries quantityVerdict + rateVerdict so the SPA + XLSX
+          // can render dual badges.
+          const status = r.result.status === 'verified' ? 'VERIFIED' : 'FLAGGED'
+          return db.boqLine.update({
+            where: { id: r.input.id },
+            data: {
+              verificationStatus: status,
+              verificationDetail: {
+                status: r.result.status,
+                quantityVerdict: r.result.quantityVerdict,
+                rateVerdict: r.result.rateVerdict,
+                modules: r.result.modules.map((m) => ({
+                  module: m.module,
+                  axis: m.axis,
+                  verdict: m.verdict,
+                  reasons: m.reasons,
+                  resolutionSteps: m.resolutionSteps,
+                  tags: m.tags,
+                })),
+              } as object,
+            },
+          })
+        }),
+      )
+
+      const summary = summarize(perLine)
+      const flagged = perLine
+        .filter((r) => r.result.status !== 'verified')
+        .map((r) => ({
+          id: r.input.id,
+          itemRef: r.input.itemRef,
+          sectionCode: r.sectionCode,
+          description: r.input.description,
+          status: r.result.status,
+          sourceType: r.input.provenance?.sourceType ?? null,
+          derivationType: r.input.provenance?.derivationType ?? null,
+          confidence: r.input.provenance?.confidence ?? null,
+          amount: r.raw.amount?.toString() ?? null,
+          psAmount: r.raw.psAmount?.toString() ?? null,
+          modules: r.result.modules,
+        }))
+
+      return jsonResponse({
+        boq: { id: boq.id, version: boq.version, status: boq.status, project: boq.project },
+        summary,
+        flagged,
+      })
+    }),
+  )
+
   /** Enqueue a PRICE job for the BOQ. Returns 202 + jobId. */
   router.post(
     '/api/boqs/:id/price',
@@ -682,6 +1100,13 @@ export function registerBoqRoutes(router: Router): void {
     '/api/boqs/:id/export.xlsx',
     requireAuth(async (_req, ctx) => {
       const includeInternal = ctx.query.get('internal') === '1'
+      // XLSX-3 — caller picks how placeholder-MEP lines are handled.
+      // Default 'tab' (own "DRAFT MEP" sheet, not in GRAND TOTAL).
+      const placeholderRaw = ctx.query.get('placeholderMep')
+      const placeholderMep: 'tab' | 'exclude' | 'inline' =
+        placeholderRaw === 'exclude' || placeholderRaw === 'inline'
+          ? placeholderRaw
+          : 'tab'
       const db = tenantDb(ctx.organizationId)
       const boq = await db.boq.findFirst({
         where: { id: ctx.params.id, deletedAt: null },
@@ -695,33 +1120,74 @@ export function registerBoqRoutes(router: Router): void {
       })
       if (!boq) return errorResponse(404, 'BOQ not found')
 
+      // XLSX-1 (2026-06-27) — run the deterministic auditor inline
+      // + persist verificationStatus before rendering, so the export
+      // is always self-consistent. No-op if the persisted state is
+      // already fresh; either way the renderer reads what's in the
+      // row. The pipeline is pure structural + confidence math,
+      // ~1-2s for ~100 lines.
+      const { auditLineWithModules, toAuditInput } = await import('../pricing/auditor')
+      const allLines = boq.sections.flatMap((s) => s.lines)
+      const results = allLines.map((l) => ({
+        line: l,
+        result: auditLineWithModules(toAuditInput(l)),
+      }))
+      await Promise.all(
+        results.map(({ line, result }) => {
+          const status = result.status === 'verified' ? 'VERIFIED' : 'FLAGGED'
+          const detail = {
+            status: result.status,
+            quantityVerdict: result.quantityVerdict,
+            rateVerdict: result.rateVerdict,
+            modules: result.modules.map((m) => ({
+              module: m.module,
+              axis: m.axis,
+              verdict: m.verdict,
+              reasons: m.reasons,
+              resolutionSteps: m.resolutionSteps,
+              tags: m.tags,
+            })),
+          }
+          return db.boqLine.update({
+            where: { id: line.id },
+            data: { verificationStatus: status, verificationDetail: detail as object },
+          })
+        }),
+      )
+
+      // Re-read with the freshly persisted audit fields. Cheap — same
+      // result set, just one more round-trip.
+      const audited = await db.boq.findFirst({
+        where: { id: ctx.params.id, deletedAt: null },
+        include: {
+          project: { select: { name: true } },
+          sections: {
+            include: { lines: { orderBy: { sortOrder: 'asc' } } },
+            orderBy: { sortOrder: 'asc' },
+          },
+        },
+      })
+      if (!audited) return errorResponse(404, 'BOQ not found')
+
       const xlsxModel: XlsxBoq = {
-        projectName: boq.project.name,
-        version: boq.version,
-        currency: boq.currency,
-        subtotal: boq.subtotal === null ? null : boq.subtotal.toString(),
+        projectName: audited.project.name,
+        version: audited.version,
+        currency: audited.currency,
+        subtotal: audited.subtotal === null ? null : audited.subtotal.toString(),
         totalProvisional:
-          boq.totalProvisional === null ? null : boq.totalProvisional.toString(),
-        sections: boq.sections.map((s) => ({
+          audited.totalProvisional === null ? null : audited.totalProvisional.toString(),
+        auditedAt: new Date().toISOString(),
+        sections: audited.sections.map((s) => ({
           code: s.code,
           title: s.title,
           subtotal: s.subtotal === null ? null : s.subtotal.toString(),
-          lines: s.lines.map((l) => ({
-            itemRef: l.itemRef,
-            description: l.description,
-            unit: l.unit,
-            qty: l.qty === null ? null : l.qty.toString(),
-            rate: l.rate === null ? null : l.rate.toString(),
-            rateSource: l.rateSource,
-            amount: l.amount === null ? null : l.amount.toString(),
-            isProvisional: l.isProvisional,
-            psAmount: l.psAmount === null ? null : l.psAmount.toString(),
-            confidence: l.confidence,
-          })),
+          lines: s.lines.map(toXlsxLine),
         })),
       }
-      const buffer = await renderBoqXlsx(xlsxModel, { includeInternal })
-      const filename = `boq-${boq.project.name.replace(/[^a-zA-Z0-9]+/g, '_')}-v${boq.version}${includeInternal ? '-internal' : ''}.xlsx`
+      const buffer = await renderBoqXlsx(xlsxModel, { includeInternal, placeholderMep })
+      const placeholderTag =
+        placeholderMep === 'inline' ? '-with-draft-mep' : placeholderMep === 'exclude' ? '-no-draft-mep' : ''
+      const filename = `boq-${audited.project.name.replace(/[^a-zA-Z0-9]+/g, '_')}-v${audited.version}${includeInternal ? '-internal' : ''}${placeholderTag}.xlsx`
       return new Response(buffer, {
         status: 200,
         headers: {
@@ -805,7 +1271,7 @@ export function registerBoqRoutes(router: Router): void {
         note: body.data.isProvisional
           ? `Manual P/S added: ${body.data.description.slice(0, 100)}`
           : `Manual priced line added: ${body.data.description.slice(0, 100)}`,
-        confidence: 100,
+        confidence: 1,
         stampedBy: 'addProvisionalBoqLine.route',
       })
       const created = await db.boqLine.create({

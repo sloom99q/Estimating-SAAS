@@ -420,6 +420,64 @@ export async function priceBoq(boqId: string): Promise<PriceResult> {
 }
 
 /**
+ * REVIEW-1 — run the deterministic auditor pipeline on a BOQ. The
+ * server persists verificationStatus per line and returns a summary
+ * plus the flagged-line list so the review queue can render
+ * "X verified, Y need review" without a second fetch.
+ *
+ * Pure structural check — no AI. Cheap enough to call on page-load.
+ */
+export interface AuditModuleResult {
+  module: string
+  verdict: 'verified' | 'review' | 'failed'
+  reasons: string[]
+  /** CONF-2 — actionable step per reason (1:1 by index). */
+  resolutionSteps?: string[]
+  /** CONF-2 — semantic tags (LOW_CONF, MISSING_EVIDENCE, etc.). */
+  tags?: string[]
+}
+
+export interface AuditSummary {
+  total: number
+  verified: number
+  review: number
+  failed: number
+  bySourceType: Record<string, { verified: number; review: number; failed: number }>
+  byDerivationType: Record<string, { verified: number; review: number; failed: number }>
+  bySection: Record<string, { verified: number; review: number; failed: number }>
+  topReasons: Array<{ reason: string; module: string; count: number }>
+}
+
+export interface FlaggedLine {
+  id: string
+  itemRef: string
+  sectionCode: string
+  description: string
+  status: 'verified' | 'review' | 'failed'
+  sourceType: string | null
+  derivationType: string | null
+  confidence: number | null
+  amount: string | null
+  psAmount: string | null
+  modules: AuditModuleResult[]
+}
+
+export interface BoqAuditResult {
+  boq: {
+    id: string
+    version: number
+    status: string
+    project: { id: string; name: string }
+  }
+  summary: AuditSummary
+  flagged: FlaggedLine[]
+}
+
+export async function fetchBoqAudit(boqId: string): Promise<BoqAuditResult> {
+  return withAuth<BoqAuditResult>(`/api/boqs/${boqId}/audit`)
+}
+
+/**
  * Sprint-10 S10-3 — Add a MANUAL BoqLine into a chosen section.
  * EITHER {rate} or {isProvisional, psAmount} per the API contract.
  */

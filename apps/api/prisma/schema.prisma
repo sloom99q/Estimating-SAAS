@@ -66,6 +66,33 @@ enum DocumentStatus {
 // Brief lists "WIGHT" between DOOR and FLOOR_FINISH — that's a typo for
 // WINDOW (the only plausible counterpart to DOOR in a fit-out catalogue).
 // Using WINDOW; flag for architect review at sprint close.
+/// CLASSIFIER-1 (2026-06-27) — every TakeoffItem gets one of these
+/// labels at creation time, and the BOQ generator routes accordingly:
+///
+///   MEASURED     read directly from the drawing (floor area, door
+///                count). Price normally.
+///   DERIVED      math on measured facts (paint, screed). Price,
+///                show formula.
+///   PROVISIONAL  the app should NOT pretend to estimate this
+///                category. Emit as a P/S line with a sensible
+///                allowance + a "contractor-typical P/S — not
+///                estimated from drawing" note. Defaults: joinery,
+///                stone cladding, façade, home automation, and
+///                MEP-without-engineer-drawings. Matches how a UAE
+///                contractor's quote actually marks ~40-50% of
+///                villa scope.
+///   PLACEHOLDER  pure guesses the app should NEVER show to an
+///                engineer (sockets = rooms × 6, etc.). Routed to a
+///                "DRAFT — not for pricing" tab; never in GRAND TOTAL.
+///   MANUAL       human-typed line. Trust the user.
+enum Estimability {
+  MEASURED
+  DERIVED
+  PROVISIONAL
+  PLACEHOLDER
+  MANUAL
+}
+
 enum TakeoffCategory {
   ROOM
   /// Sprint-9 S9-0: building-level totals ("Proposed Villa 972 m²",
@@ -94,7 +121,17 @@ enum TakeoffCategory {
   SANITARY
   EXTERNAL
   STRUCTURE_PROV
+  /// MEP_PROV stays as the manual P/S catch-all for one-off MEP
+  /// allowances the estimator types in outside the rule engine.
   MEP_PROV
+  /// MEP-2 — disciplines emitted by the MepRule engine. Each rule
+  /// produces TakeoffItems with one of these categories; QUANTIFY
+  /// stamps basis=DERIVED + meta.mepRuleId; BOQ routes them to the
+  /// 2.7 section family with derivedByRule provenance.
+  MEP_HVAC
+  MEP_ELEC
+  MEP_PLUMB
+  MEP_ELV
   OTHER
 }
 
@@ -187,6 +224,8 @@ model Organization {
   // LIB-1 — material library navigator.
   brands                 Brand[]
   boqReviewNotes         BoqReviewNote[]
+  // MEP-2 — rule engine for HVAC / Elec / Plumb / ELV scope.
+  mepRules               MepRule[]
 
   @@map("organizations")
 }
@@ -231,6 +270,13 @@ model Project {
   /// layer holds rooms, doors, etc. After confirmation, PARSE_DXF uses
   /// this map for every subsequent DXF in the same project.
   layerMap       Json?
+  /// CLASSIFIER-2 (2026-06-27) — per-project override on the default
+  /// estimability table (apps/api/src/pricing/estimability.ts). Map
+  /// shape: `Record<TakeoffCategory, Estimability>`. Lets the user
+  /// force-keep a discipline as PROVISIONAL even when the auto-promote
+  /// rule would flip it to DERIVED (contractor's choice to quote P/S
+  /// despite having drawings). Empty / null means "use defaults".
+  estimabilityOverrides Json?
   createdAt      DateTime  @default(now()) @db.Timestamptz(6)
   updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
   deletedAt      DateTime? @db.Timestamptz(6)
@@ -561,6 +607,11 @@ model TakeoffItem {
   qtyAi          Decimal?        @db.Decimal(14, 4)
   qtyFinal       Decimal?        @db.Decimal(14, 4)
   basis          TakeoffBasis
+  /// CLASSIFIER-1 — how the BOQ generator should treat this item:
+  /// price it, derive it, route it to P/S, or hide it from the
+  /// engineer export. Defaulted per-category by classifyEstimability
+  /// at creation time; reviewer can override per line.
+  estimability   Estimability?   @default(MEASURED)
   confidence     Int             @default(0)
   sourceSheetId  String?
   sourceNote     String?
@@ -844,17 +895,37 @@ model BoqLine {
   confidence     Int?
   takeoffItemId  String?
   assemblyId     String?
-  /// TR-1 (2026-06-25) — structured provenance payload (see
-  /// apps/api/src/pricing/lineProvenance.ts zod schema). Carries:
-  ///   sourceType: 'MEASURED' | 'DERIVED' | 'ESTIMATED' | 'MANUAL'
-  ///   evidence:   [{kind, ...source pointer}]
-  ///   formula:    derived/measured math string (e.g. 'qty × rate')
-  ///   inputs:     [{name, value, source}] for DERIVED
-  ///   reasoning:  ESTIMATED rationale
-  ///   confidence: snapshotted at write time
+  /// TR-1 / TR-3 (2026-06-25) — structured lineage payload. See
+  /// apps/api/src/pricing/lineProvenance.ts for the zod schema.
+  /// Carries:
+  ///   sourceType:      'MEASURED' | 'DERIVED' | 'ESTIMATED' |
+  ///                    'MANUAL' | 'IMPORTED'
+  ///   derivationType:  'formula' | 'rule' | 'ai_reasoning' | null
+  ///   evidence:        [{kind, ...source pointer, optional bbox,
+  ///                      optional extractedValue}]
+  ///   formula:         math string (when derivationType=formula)
+  ///   ruleRef:         pointer to the rule (when derivationType=rule)
+  ///   reasoning:       narrative (when derivationType=ai_reasoning
+  ///                    or for ESTIMATED rationale)
+  ///   inputs:          [{name, value, source}] for derived/rule lines
+  ///   confidence:      0-1 scale (TR-3 rescale; legacy 0-100 still
+  ///                    lives on BoqLine.confidence Int)
+  ///   stampedBy:       authoring code-path tag
   /// Every write path stamps this; the deterministic auditor reads
   /// it. A null payload pre-backfill = "unaudited legacy line".
   provenance     Json?
+  /// TR-3 — current verification verdict, written by the auditor
+  /// pipeline (apps/api/src/pricing/auditor.ts). Values:
+  ///   PENDING   never audited (or stale after a regenerate)
+  ///   VERIFIED  passed every module (Integrity now; Engineering +
+  ///             Procurement plug in later)
+  ///   FLAGGED   one or more modules raised a concern
+  /// The SPA review queue surfaces only FLAGGED so the estimator
+  /// touches only the lines that need them.
+  verificationStatus String? @default("PENDING")
+  /// TR-3 — joined to the audit-modules output for the per-line
+  /// chip. Module names → severity strings.
+  verificationDetail Json?
   sortOrder      Int      @default(0)
   createdAt      DateTime @default(now()) @db.Timestamptz(6)
   updatedAt      DateTime @updatedAt @db.Timestamptz(6)
@@ -896,4 +967,77 @@ model Quotation {
   @@unique([organizationId, ref])
   @@index([organizationId, projectId])
   @@map("quotations")
+}
+
+/// MEP-RULE — atomic conversion from a drawing-measurable driver
+/// to a priced MEP scope line. The driver value comes from the
+/// project's takeoff at QUANTIFY time; factor × rate are the
+/// engineer-derived UAE norms (per-org overridable). Every emitted
+/// BoqLine carries provenance.derivedByRule pointing back at the
+/// rule id, with the mepRule Evidence kind preserving factorSource
+/// + rateSource. Audit confidence = min(factorConfidence,
+/// rateConfidence) so any PLACEHOLDER factor / rate routes the
+/// emitted line straight into the SPA review queue.
+model MepRule {
+  id             String    @id @default(cuid())
+  organizationId String
+
+  /// 'HVAC' | 'ELECTRICAL' | 'PLUMBING' | 'ELV'
+  discipline     String
+
+  /// Human label that becomes the BoqLine description.
+  name           String
+
+  /// Which drawing-measurable quantity drives this rule. See design
+  /// doc §3 for the full enum (AREA_FT2 / AREA_M2 / ROOM_COUNT /
+  /// BATHROOM_COUNT / KITCHEN_COUNT / BEDROOM_COUNT / FIXED).
+  driver         String
+
+  /// Optional regex for ROOM_COUNT scoping. e.g. driver='ROOM_COUNT'
+  /// + driverFilter='BEDROOM' counts only bedrooms.
+  driverFilter   String?
+
+  /// Multiplier on the driver value to produce the output quantity.
+  factor         Decimal   @db.Decimal(14, 6)
+
+  /// Where this factor came from — surfaces in the audit chip on
+  /// each BoqLine (e.g. 'industry norm 135 ft²/TR per ASHRAE Table
+  /// 6-5', 'engineer takeoff Lami villa 2026-04', or 'PLACEHOLDER').
+  factorSource   String?
+
+  /// 0..1. Drives provenance.confidence on emitted lines. Set to
+  /// 0.4 (below review threshold) for PLACEHOLDER factors so the
+  /// auditor surfaces them; 0.85+ once estimator-confirmed.
+  factorConfidence Decimal? @db.Decimal(4, 3)
+
+  /// Output unit string. 'TR' / 'No' / 'm' / 'pt' / 'm²' / 'LS'.
+  outputUnit     String
+
+  /// Rate in AED per outputUnit.
+  rate           Decimal   @db.Decimal(14, 2)
+
+  /// Source of this rate — same audit purpose as factorSource.
+  rateSource     String?
+
+  /// 0..1. Audit confidence for the rate.
+  rateConfidence Decimal? @db.Decimal(4, 3)
+
+  /// 'MEP_HVAC' | 'MEP_ELEC' | 'MEP_PLUMB' | 'MEP_ELV' — maps to
+  /// the BOQ section in CATEGORY_TO_SECTION (2.7 family).
+  takeoffCategory String
+
+  sortOrder      Int       @default(100)
+  notes          String?
+  active         Boolean   @default(true)
+
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime? @db.Timestamptz(6)
+
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@unique([organizationId, discipline, name])
+  @@index([organizationId, discipline, active])
+  @@index([organizationId, takeoffCategory])
+  @@map("mep_rules")
 }

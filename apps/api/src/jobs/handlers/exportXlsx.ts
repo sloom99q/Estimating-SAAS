@@ -11,11 +11,15 @@ import { getBlobStore } from '../../blob/fs'
 import { documentKey } from '../../blob/types'
 import { prisma } from '../../db'
 import { renderBoqXlsx, type XlsxBoq } from '../../pricing/exportXlsx'
+import { toXlsxLine } from '../../pricing/xlsxLineProvenance'
+import { auditLineWithModules, toAuditInput } from '../../pricing/auditor'
 import type { JobHandler, JobRecord } from '../types'
 
 interface ExportPayload {
   boqId: string
   includeInternal?: boolean
+  /** XLSX-3 — see XlsxOptions.placeholderMep. Default 'tab'. */
+  placeholderMep?: 'tab' | 'exclude' | 'inline'
 }
 
 function decimalString(v: unknown): string | null {
@@ -44,33 +48,66 @@ export const exportXlsxHandler: JobHandler = async (job: JobRecord) => {
   })
   if (!boq) throw new Error(`EXPORT_XLSX: boq ${payload.boqId} not found`)
 
+  // XLSX-1 — run the deterministic auditor inline + persist so the
+  // export carries fresh verificationStatus per line. Same pattern as
+  // the inline GET /export.xlsx route.
+  const allLines = boq.sections.flatMap((s) => s.lines)
+  const results = allLines.map((l) => ({
+    line: l,
+    result: auditLineWithModules(toAuditInput(l)),
+  }))
+  await Promise.all(
+    results.map(({ line, result }) => {
+      const status = result.status === 'verified' ? 'VERIFIED' : 'FLAGGED'
+      const detail = {
+        status: result.status,
+        quantityVerdict: result.quantityVerdict,
+        rateVerdict: result.rateVerdict,
+        modules: result.modules.map((m) => ({
+          module: m.module,
+          axis: m.axis,
+          verdict: m.verdict,
+          reasons: m.reasons,
+          resolutionSteps: m.resolutionSteps,
+          tags: m.tags,
+        })),
+      }
+      return prisma.boqLine.update({
+        where: { id: line.id },
+        data: { verificationStatus: status, verificationDetail: detail as object },
+      })
+    }),
+  )
+  const audited = await prisma.boq.findFirst({
+    where: { id: payload.boqId, organizationId: job.organizationId, deletedAt: null },
+    include: {
+      project: { select: { id: true, name: true } },
+      sections: {
+        include: { lines: { orderBy: { sortOrder: 'asc' } } },
+        orderBy: { sortOrder: 'asc' },
+      },
+    },
+  })
+  if (!audited) throw new Error(`EXPORT_XLSX: boq ${payload.boqId} disappeared mid-render`)
+
   const xlsxModel: XlsxBoq = {
-    projectName: boq.project.name,
-    version: boq.version,
-    currency: boq.currency,
-    subtotal: decimalString(boq.subtotal),
-    totalProvisional: decimalString(boq.totalProvisional),
-    sections: boq.sections.map((s) => ({
+    projectName: audited.project.name,
+    version: audited.version,
+    currency: audited.currency,
+    subtotal: decimalString(audited.subtotal),
+    totalProvisional: decimalString(audited.totalProvisional),
+    auditedAt: new Date().toISOString(),
+    sections: audited.sections.map((s) => ({
       code: s.code,
       title: s.title,
       subtotal: decimalString(s.subtotal),
-      lines: s.lines.map((l) => ({
-        itemRef: l.itemRef,
-        description: l.description,
-        unit: l.unit,
-        qty: decimalString(l.qty),
-        rate: decimalString(l.rate),
-        rateSource: l.rateSource,
-        amount: decimalString(l.amount),
-        isProvisional: l.isProvisional,
-        psAmount: decimalString(l.psAmount),
-        confidence: l.confidence,
-      })),
+      lines: s.lines.map(toXlsxLine),
     })),
   }
 
   const buffer = await renderBoqXlsx(xlsxModel, {
     includeInternal: payload.includeInternal === true,
+    placeholderMep: payload.placeholderMep ?? 'tab',
   })
   const key = documentKey(
     job.organizationId,

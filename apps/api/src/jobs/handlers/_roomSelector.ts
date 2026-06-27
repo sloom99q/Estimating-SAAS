@@ -102,6 +102,20 @@ const NOT_A_ROOM_PATTERNS: RegExp[] = [
   /^\s*(pedestrian|vehicular|driver['’]?s)\s+entrance\b/i,
   /\baccessway\b/i, // "DINING/LIVING/ACCESSWAY POOL" composite
   /\bsliding\s+door\s+future\s+lift\b/i, // "CORRIDOR SLIDING DOOR FUTURE LIFT" note
+  // ROOM-CLEANUP (2026-06-27) — structural voids + projections that
+  // vision occasionally tags as rooms but never get a finish / MEP
+  // load. Caught when BATHROOM_COUNT inflated because a slab cut-out
+  // labelled "VOID" matched the catch-all room regex.
+  /^\s*void\b/i,
+  /\b(stair|lift|shaft)\s*void\b/i,
+  /^\s*(roof|floor)?\s*projection\b/i,
+  /^\s*overhang\b/i,
+  /^\s*canopy\b/i,
+  /^\s*cantilever\b/i,
+  /^\s*planter\b/i,
+  /^\s*pergola\b/i,
+  /^\s*duct\s*(shaft|riser)?\b/i,
+  /^\s*ahu\s*(room)?\s*$/i, // empty/labelled-only AHU rooms with no measurable area
 ]
 
 /**

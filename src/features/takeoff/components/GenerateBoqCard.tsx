@@ -14,6 +14,7 @@ import {
 } from '../api/takeoff.api'
 import { TAKEOFF_KEYS } from '../api/useTakeoff'
 import { AddProvisionalLineCard } from './AddProvisionalLineCard'
+import { BoqReviewQueueCard } from './BoqReviewQueueCard'
 
 interface DuplicateTakeoffDetails {
   kind: 'duplicate_takeoff_rows'
@@ -265,7 +266,10 @@ export function GenerateBoqCard({
           </Text>
         ) : null}
         {boq && phase === 'ready' ? (
-          <AddProvisionalLineCard boqId={boq.id} projectId={projectId} />
+          <>
+            <BoqReviewQueueCard boqId={boq.id} />
+            <AddProvisionalLineCard boqId={boq.id} projectId={projectId} />
+          </>
         ) : null}
       </Stack>
     </Card>

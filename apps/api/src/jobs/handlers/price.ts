@@ -245,6 +245,30 @@ export const priceHandler: JobHandler = async (job: JobRecord) => {
   for (const section of boq.sections) {
     let sectionSubtotal = new Prisma.Decimal(0)
     for (const line of section.lines) {
+      // MEP-6 — rule-driven MEP lines (rateSource='mep-rule:<id>')
+      // already carry their rate + amount from BOQ generation. The
+      // 6-tier waterfall has nothing to add; preserve the existing
+      // values and accumulate into section + grand totals. Lines like
+      // these are NEVER provisional (the rule has a rate) and never
+      // get the PS sentinel.
+      if (line.rateSource && line.rateSource.startsWith('mep-rule:')) {
+        const existingRate = line.rate ?? new Prisma.Decimal(0)
+        const qty = line.qty ?? new Prisma.Decimal(0)
+        const amount = qty.times(existingRate)
+        pending.push({
+          id: line.id,
+          sectionId: section.id,
+          rate: existingRate,
+          rateSource: line.rateSource,
+          amount,
+          isProvisional: false,
+          psAmount: null,
+        })
+        pricedLines += 1
+        sectionSubtotal = sectionSubtotal.plus(amount)
+        continue
+      }
+
       const category = line.takeoffItemId
         ? categoryByTakeoffId.get(line.takeoffItemId) ?? 'OTHER'
         : 'OTHER'

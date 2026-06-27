@@ -1,42 +1,61 @@
 /**
- * TR-1 backfill — stamp provenance on every existing BoqLine by
- * reverse-engineering from existing denormalised fields.
+ * TR-3 backfill — stamp / re-stamp provenance on every existing
+ * BoqLine using the post-TR-3 schema (IMPORTED added, derivationType,
+ * confidence 0-1, bbox coords where the upstream has them).
  *
- *   takeoffItemId NULL + isProvisional=true   → MANUAL
- *                                                 (user typed via AddProvisionalLineCard;
- *                                                  evidence = legacy note, no user link
- *                                                  available for backfilled rows)
+ * Mapping rules:
  *
- *   takeoffItemId NULL + isProvisional=false  → MANUAL
- *                                                 (priced manual additions — same
- *                                                  category as above)
+ *   takeoffItemId NULL                             → MANUAL
+ *                                                    derivationType=null
+ *                                                    evidence kind=legacy
+ *                                                    (the human typed it
+ *                                                     pre-TR-1; no user
+ *                                                     link recoverable)
  *
- *   takeoffItemId NOT NULL                    → derived from the TakeoffItem's basis:
- *     basis=MEASURED                            → MEASURED
- *     basis=DERIVED / PARAMETRIC                → DERIVED (formula = takeoff sourceNote
- *                                                 if it reads like one, else fallback)
- *     basis=ESTIMATED / PLACEHOLDER             → ESTIMATED (reasoning from sourceNote)
- *     basis=VISUAL                              → MEASURED (vision is still measurement)
+ *   takeoffItemId NOT NULL, basis MEASURED|VISUAL  → MEASURED
+ *                                                    derivationType=null
  *
- *   rateSource starts with 'assembly:<id>'    → add Assembly evidence
- *   rateSource starts with 'rate-library:'    → add RateLibrary evidence
- *   rateSource starts with 'provisional-sum'  → no extra rate evidence
+ *   takeoffItemId NOT NULL, basis DERIVED|PARAMETRIC
+ *                                                  → DERIVED
+ *                                                    derivationType=formula
+ *                                                    formula='amount = qty × rate'
+ *                                                    OR (P/S) 'psAmount carried
+ *                                                    from takeoff <tag>'
  *
- * Idempotent: skip lines that already have provenance set unless
+ *   takeoffItemId NOT NULL, basis ESTIMATED|PLACEHOLDER
+ *                                                  → ESTIMATED
+ *                                                    derivationType=ai_reasoning
+ *                                                    reasoning from sourceNote
+ *                                                    or meta.estimationReasoning
+ *
+ * Sheet evidence gets a `bbox` populated from `takeoff.meta.position`
+ * (the DXF MTEXT parser leaves modelspace coords there) and an
+ * `extractedValue` from sourceNote where available.
+ *
+ * Rate evidence:
+ *   rateSource 'assembly:<id>'   → add Assembly evidence
+ *   rateSource 'rate-library:…'  → add RateLibrary evidence
+ *
+ * Idempotent — skip lines that already have provenance set unless
  * --force is passed. Dry-run by default.
  *
- * Usage:
- *   bun apps/api/scripts/backfill-line-provenance.ts                # dry-run
- *   bun apps/api/scripts/backfill-line-provenance.ts --apply        # commit
- *   bun apps/api/scripts/backfill-line-provenance.ts --apply --force  # overwrite existing
+ *   bun apps/api/scripts/backfill-line-provenance.ts            # dry-run
+ *   bun apps/api/scripts/backfill-line-provenance.ts --apply
+ *   bun apps/api/scripts/backfill-line-provenance.ts --apply --force
  */
 import { Prisma } from '@prisma/client'
 import { prisma } from '../src/db'
 import {
   type Evidence,
+  type EvidenceStep,
   type LineProvenance,
-  type ProvenanceInput,
-  type SourceType,
+  computeConfidence,
+  derivedByFormula,
+  estimated as estimatedProvenance,
+  manual as manualProvenance,
+  measured as measuredProvenance,
+  normalizeConfidence,
+  step,
 } from '../src/pricing/lineProvenance'
 
 const apply = process.argv.includes('--apply')
@@ -44,7 +63,6 @@ const force = process.argv.includes('--force')
 
 console.log('[backfill-provenance] mode:', apply ? 'APPLY' : 'dry-run', force ? '(--force)' : '')
 
-// Prisma Json-null filter: DbNull = column actually null in Postgres.
 const where = force ? {} : { provenance: { equals: Prisma.DbNull } }
 const lines = await prisma.boqLine.findMany({
   where,
@@ -67,10 +85,8 @@ const lines = await prisma.boqLine.findMany({
 })
 console.log(`[backfill-provenance] ${lines.length} BoqLines to consider`)
 
-// Pre-load the TakeoffItems we'll need in one query, then look up by id.
-const takeoffIds = [
-  ...new Set(lines.filter((l) => l.takeoffItemId).map((l) => l.takeoffItemId!)),
-]
+// Pre-load takeoffs in one query.
+const takeoffIds = [...new Set(lines.filter((l) => l.takeoffItemId).map((l) => l.takeoffItemId!))]
 const takeoffs = takeoffIds.length
   ? await prisma.takeoffItem.findMany({
       where: { id: { in: takeoffIds } },
@@ -85,7 +101,15 @@ const takeoffs = takeoffIds.length
         sourceNote: true,
         meta: true,
         sourceSheet: {
-          select: { id: true, drawingNo: true, pageNo: true, documentId: true },
+          select: {
+            id: true,
+            drawingNo: true,
+            pageNo: true,
+            documentId: true,
+            title: true,
+            sheetType: true,
+            document: { select: { filename: true } },
+          },
         },
       },
     })
@@ -94,9 +118,7 @@ const takeoffById = new Map(takeoffs.map((t) => [t.id, t]))
 
 const assemblyIds = [
   ...new Set(
-    lines
-      .map((l) => parseAssemblyId(l.rateSource))
-      .filter((x): x is string => x !== null),
+    lines.map((l) => parseAssemblyId(l.rateSource)).filter((x): x is string => x !== null),
   ),
 ]
 const assemblies = assemblyIds.length
@@ -117,37 +139,74 @@ function parseRateLibraryEvidence(rs: string | null): Evidence | null {
   if (!rs) return null
   const m = rs.match(/^rate-library:(org|global):(.+)$/)
   if (!m) return null
-  return {
-    kind: 'rateLibrary',
-    code: m[2]!,
-    scope: m[1]! as 'org' | 'global',
-    rate: '', // we'd need a join to find the actual rate; '-' is sufficient for backfill
+  return { kind: 'rateLibrary', code: m[2]!, scope: m[1]! as 'org' | 'global', rate: '' }
+}
+
+function buildSheetEvidence(t: NonNullable<ReturnType<typeof takeoffById.get>>): Evidence | null {
+  if (!t.sourceSheet) return null
+  const meta = (t.meta ?? {}) as Record<string, unknown>
+  const pos = (meta.position ?? meta.bbox) as
+    | { x?: number; y?: number; w?: number; h?: number; cs?: string }
+    | undefined
+  const ev: Evidence = {
+    kind: 'sheet',
+    sheetId: t.sourceSheet.id,
+    drawingNo: t.sourceSheet.drawingNo,
+    pageNo: t.sourceSheet.pageNo,
+    label: t.sourceNote ?? undefined,
+    ...(t.sourceSheet.title ? { sheetTitle: t.sourceSheet.title } : {}),
+    ...(t.sourceSheet.sheetType ? { sheetType: t.sourceSheet.sheetType } : {}),
+    ...(t.sourceSheet.document?.filename
+      ? { sourceDocFilename: t.sourceSheet.document.filename }
+      : {}),
+    ...(pos && typeof pos.x === 'number' && typeof pos.y === 'number'
+      ? {
+          bbox: {
+            cs: (pos.cs as 'dxf-mm' | 'pdf-pt' | 'pdf-pct') ?? 'dxf-mm',
+            x: pos.x,
+            y: pos.y,
+            ...(typeof pos.w === 'number' ? { w: pos.w } : {}),
+            ...(typeof pos.h === 'number' ? { h: pos.h } : {}),
+          },
+        }
+      : {}),
+    ...(t.sourceNote ? { extractedValue: t.sourceNote.slice(0, 200) } : {}),
   }
+  return ev
+}
+
+function buildRateEvidence(rateSource: string | null): Evidence | null {
+  if (!rateSource) return null
+  const asmId = parseAssemblyId(rateSource)
+  if (asmId) {
+    const a = assemblyById.get(asmId)
+    return {
+      kind: 'assembly',
+      assemblyId: asmId,
+      name: a?.name,
+      brandName: a?.brand?.name ?? null,
+    }
+  }
+  return parseRateLibraryEvidence(rateSource)
 }
 
 function buildForLine(l: (typeof lines)[number]): LineProvenance {
-  // ─── Manual P/S or manual priced add ──────────────────────────
+  // ─── Manual P/S or manual priced add ─────────────────────────
   if (l.takeoffItemId === null) {
-    const evidence: Evidence[] = [
-      {
-        kind: 'legacy',
-        note: l.isProvisional
-          ? 'Manual P/S line added via SPA (backfilled — no user/timestamp recorded pre-TR-1)'
-          : 'Manual priced line added via SPA (backfilled — no user/timestamp recorded pre-TR-1)',
-      },
-    ]
-    return {
-      sourceType: 'MANUAL',
-      evidence,
-      confidence: l.confidence ?? 100,
-      stampedBy: 'backfill.v1',
-    }
+    return manualProvenance({
+      userId: 'legacy-backfill',
+      at: new Date(0).toISOString(),
+      note: l.isProvisional
+        ? 'Manual P/S line added via SPA (backfilled — no user/timestamp recorded pre-TR-1)'
+        : 'Manual priced line added via SPA (backfilled — no user/timestamp recorded pre-TR-1)',
+      confidence: 1,
+      stampedBy: 'backfill.v2',
+    })
   }
 
-  // ─── Derived from a TakeoffItem ───────────────────────────────
+  // ─── Derived from a TakeoffItem ──────────────────────────────
   const t = takeoffById.get(l.takeoffItemId)
   const evidence: Evidence[] = []
-  const inputs: ProvenanceInput[] = []
 
   if (t) {
     evidence.push({
@@ -157,93 +216,13 @@ function buildForLine(l: (typeof lines)[number]): LineProvenance {
       description: t.description.slice(0, 100),
       category: t.category,
     })
-    if (t.sourceSheet) {
-      evidence.push({
-        kind: 'sheet',
-        sheetId: t.sourceSheet.id,
-        drawingNo: t.sourceSheet.drawingNo,
-        pageNo: t.sourceSheet.pageNo,
-        label: t.sourceNote ?? undefined,
-      })
-    }
-    inputs.push({
-      name: 'qty',
-      value: l.qty?.toString() ?? '0',
-      unit: undefined,
-      source: {
-        kind: 'takeoffItem',
-        takeoffItemId: t.id,
-        tag: t.tag,
-        description: t.description.slice(0, 80),
-      },
-    })
+    const sheetEv = buildSheetEvidence(t)
+    if (sheetEv) evidence.push(sheetEv)
   }
+  const rateEv = buildRateEvidence(l.rateSource)
+  if (rateEv) evidence.push(rateEv)
 
-  // Rate evidence — rate-library or assembly.
-  if (l.rateSource) {
-    const asmId = parseAssemblyId(l.rateSource)
-    if (asmId) {
-      const a = assemblyById.get(asmId)
-      evidence.push({
-        kind: 'assembly',
-        assemblyId: asmId,
-        name: a?.name,
-        brandName: a?.brand?.name ?? null,
-      })
-    } else {
-      const rl = parseRateLibraryEvidence(l.rateSource)
-      if (rl) evidence.push(rl)
-    }
-  }
-
-  // Rate input (only for priced lines).
-  if (!l.isProvisional && l.rate !== null) {
-    inputs.push({ name: 'rate', value: l.rate.toString(), unit: 'AED', source: undefined })
-  }
-
-  // ─── Pick the sourceType from TakeoffItem.basis ───────────────
-  let sourceType: SourceType = 'ESTIMATED'
-  if (t) {
-    switch (t.basis) {
-      case 'MEASURED':
-      case 'VISUAL':
-        sourceType = 'MEASURED'
-        break
-      case 'DERIVED':
-      case 'PARAMETRIC':
-        sourceType = 'DERIVED'
-        break
-      case 'ESTIMATED':
-      case 'PLACEHOLDER':
-        sourceType = 'ESTIMATED'
-        break
-      default:
-        sourceType = 'ESTIMATED'
-    }
-  }
-
-  // Formula is required for non-MANUAL. Use the best signal we
-  // have. For priced lines: amount = qty × rate. For P/S derived
-  // from takeoff: psAmount = (line carry).
-  let formula: string | undefined
-  if (!l.isProvisional) {
-    formula = 'amount = qty × rate'
-  } else if (l.isProvisional && t) {
-    formula = `psAmount carried from takeoff ${t.tag ?? t.description.slice(0, 30)}`
-  }
-
-  // Reasoning — for ESTIMATED rows, pull from sourceNote or meta.
-  let reasoning: string | undefined
-  if (sourceType === 'ESTIMATED' && t) {
-    const meta = (t.meta ?? {}) as Record<string, unknown>
-    reasoning =
-      typeof meta.estimationReasoning === 'string'
-        ? meta.estimationReasoning
-        : t.sourceNote ?? `Estimated from ${t.category} prior`
-  }
-
-  // Fallback evidence (no takeoff resolvable — shouldn't happen but
-  // keep auditor happy with at least one evidence entry).
+  // Fallback evidence so the auditor never sees an empty array.
   if (evidence.length === 0) {
     evidence.push({
       kind: 'legacy',
@@ -251,18 +230,83 @@ function buildForLine(l: (typeof lines)[number]): LineProvenance {
     })
   }
 
-  return {
-    sourceType,
-    evidence,
-    formula,
-    inputs: inputs.length > 0 ? inputs : undefined,
-    reasoning,
-    confidence: l.confidence ?? undefined,
-    stampedBy: 'backfill.v1',
+  const meta = (t?.meta ?? {}) as Record<string, unknown>
+  const formula = l.isProvisional
+    ? `psAmount carried from takeoff ${t?.tag ?? t?.description.slice(0, 30) ?? '?'}`
+    : 'amount = qty × rate'
+
+  // CONF-4 — default evidence chain inferred from basis. The QUANTIFY
+  // emitters now write a real chain into meta.evidenceChain; this
+  // backfill only fires for lines whose takeoff doesn't have one.
+  // Defaults are intentionally conservative — they should be
+  // overwritten by a re-quantify, not lived with.
+  function chainFromBasis(basis: string | undefined): EvidenceStep[] {
+    switch (basis) {
+      case 'MEASURED':
+      case 'VISUAL':
+        return [step({ id: 'bf.extract', type: 'EXTRACTION', confidence: 0.95, label: 'Backfill default — measured value from drawing/document' })]
+      case 'DERIVED':
+      case 'PARAMETRIC':
+        return [
+          step({ id: 'bf.extract', type: 'EXTRACTION', confidence: 0.95, label: 'Backfill default — input value extracted' }),
+          step({ id: 'bf.derive', type: 'DERIVATION', confidence: 0.90, label: 'Backfill default — derived via formula' }),
+        ]
+      case 'ESTIMATED':
+      case 'PLACEHOLDER':
+        return [
+          step({ id: 'bf.extract', type: 'EXTRACTION', confidence: 0.90, label: 'Backfill default — input signals extracted' }),
+          step({ id: 'bf.prior', type: 'PRIOR', confidence: 0.75, label: 'Backfill default — estimated via prior' }),
+          step({ id: 'bf.assume', type: 'ASSUMPTION', confidence: 0.75, label: 'Backfill default — assumption baked into estimate' }),
+        ]
+      default:
+        return [step({ id: 'bf.unknown', type: 'ASSUMPTION', confidence: 0.5, label: 'Backfill default — unknown basis, full assumption' })]
+    }
+  }
+
+  // Prefer the chain that QUANTIFY stamped on meta (the real
+  // evidence chain). Fall back to the basis-derived default.
+  const rawChain = Array.isArray(meta.evidenceChain) ? (meta.evidenceChain as EvidenceStep[]) : null
+  const evidenceChain = rawChain && rawChain.length > 0 ? rawChain : chainFromBasis(t?.basis)
+  const conf = computeConfidence(evidenceChain)
+
+  if (!t) {
+    // No takeoff resolvable — keep auditor happy by stamping as
+    // ESTIMATED with legacy reasoning. Surfaces in review queue.
+    return estimatedProvenance({
+      evidence,
+      reasoning: `Legacy line with takeoffItemId=${l.takeoffItemId} unresolved at backfill time`,
+      confidence: conf,
+      evidenceChain,
+      stampedBy: 'backfill.v3',
+    })
+  }
+
+  switch (t.basis) {
+    case 'MEASURED':
+    case 'VISUAL':
+      return measuredProvenance({ evidence, confidence: conf, evidenceChain, stampedBy: 'backfill.v3' })
+    case 'DERIVED':
+    case 'PARAMETRIC':
+      return derivedByFormula({ evidence, formula, confidence: conf, evidenceChain, stampedBy: 'backfill.v3' })
+    case 'ESTIMATED':
+    case 'PLACEHOLDER': {
+      const reasoning =
+        typeof meta.estimationReasoning === 'string'
+          ? (meta.estimationReasoning as string)
+          : (t.sourceNote ?? `Estimated from ${t.category} prior`)
+      return estimatedProvenance({ evidence, reasoning, confidence: conf, evidenceChain, stampedBy: 'backfill.v3' })
+    }
+    default:
+      return estimatedProvenance({
+        evidence,
+        reasoning: `Unknown takeoff basis '${t.basis}' — defaulted to ESTIMATED at backfill`,
+        confidence: conf,
+        evidenceChain,
+        stampedBy: 'backfill.v3',
+      })
   }
 }
 
-// ─── Apply ─────────────────────────────────────────────────────
 let manualCount = 0
 let measuredCount = 0
 let derivedCount = 0
@@ -301,9 +345,6 @@ console.log(`  DERIVED   : ${derivedCount}`)
 console.log(`  ESTIMATED : ${estimatedCount}`)
 console.log(`  MANUAL    : ${manualCount}`)
 console.log(`  TOTAL     : ${lines.length}`)
-if (apply) {
-  console.log(`  updated   : ${updated}`)
-} else {
-  console.log('Re-run with --apply to commit.')
-}
+if (apply) console.log(`  updated   : ${updated}`)
+else console.log('Re-run with --apply to commit.')
 process.exit(0)

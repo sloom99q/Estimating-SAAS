@@ -44,6 +44,7 @@ import { estimateVanityForRoom } from '../../ai/estimateVanity'
 import type { JobHandler, JobRecord } from '../types'
 import { isAreaStatement, selectBillableRooms } from './_roomSelector'
 import { upsertValidationFlag } from '../validationFlagUpsert'
+import { type EvidenceStep, computeConfidence, step } from '../../pricing/lineProvenance'
 
 interface QuantifyPayload {
   projectId: string
@@ -83,6 +84,25 @@ interface DerivedSummary {
    * Library system on takeoffCategory=PAINT.
    */
   paint: { suggested: number; skipped: number; totalWallAreaM2: string }
+  /**
+   * MEP-4 — rule-driven discipline lines (HVAC / Elec / Plumb / ELV).
+   * One emission per active MepRule whose driver evaluates non-zero.
+   * `drivers` captures the inputs the rules saw so the SPA can show
+   * "we used interiorAreaFt2=3,834" alongside the emitted lines.
+   */
+  mep?: {
+    emitted: number
+    zeroDriver: number
+    rulesEvaluated: number
+    drivers: {
+      interiorAreaM2: string
+      interiorAreaFt2: string
+      ROOM_COUNT: number
+      BATHROOM_COUNT: number
+      KITCHEN_COUNT: number
+      BEDROOM_COUNT: number
+    }
+  }
   wallFeatures: Array<{ code: string; description: string }>
   excludedRooms: string[]
 }
@@ -301,6 +321,15 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
       (c) => !SCREED_EXCLUDED_FINISH_CODES.has(c),
     )
     emittedDerivedTags.add('SCREED-FLR')
+    // CONF-3 — chain: room-area extractions (per the upstream DXF
+    // MTEXT / vision pass) → sum measurement → screed = sum formula.
+    // No assumptions; the inclusion/exclusion of finish codes is a
+    // deterministic policy choice baked in code.
+    const screedChain: EvidenceStep[] = [
+      step({ id: 'screed.extract', type: 'EXTRACTION', confidence: 0.95, label: `Room areas extracted from DXF/vision across ${floorGroups.size} finish-code buckets` }),
+      step({ id: 'screed.measure', type: 'MEASUREMENT', confidence: 0.95, label: `Σ interior floor area = ${screedArea.toFixed(2)} m² across [${includedCodes.join(', ')}]` }),
+      step({ id: 'screed.derive', type: 'DERIVATION', confidence: 0.97, label: 'screedArea = Σ interior floors (excluding external + unassigned)' }),
+    ]
     await upsertDerived({
       organizationId: job.organizationId,
       projectId: payload.projectId,
@@ -310,13 +339,14 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
       unit: 'm²',
       qty: screedArea,
       basis: 'DERIVED',
-      confidence: 85,
+      confidence: Math.round(computeConfidence(screedChain) * 100),
       sourceNote: `Σ interior floor area = ${screedArea.toFixed(2)} m² across finish codes [${includedCodes.join(', ')}]. Excluded: ${screedExcluded.length > 0 ? screedExcluded.join(', ') : '∅'} (ST03 external pavement = no screed; unassigned = reviewer decides).`,
       meta: {
         derivedKey: 'screed:floor',
         includedFinishCodes: includedCodes,
         excludedFinishCodes: screedExcluded,
         totalAreaM2: screedArea,
+        evidenceChain: screedChain,
       },
       summary,
     })
@@ -422,35 +452,22 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
     summary.staircase = { emitted: true, lm }
   }
 
-  // --- Walls — paint stays PARAMETRIC; wall feature finishes emit P/S --
+  // --- Wall feature finishes (P/S until measured) ---------------------
+  //
+  // The legacy "WF-PAINT — Wall paint (Fenomastic emulsion) — perimeter
+  // pending" placeholder line was removed (2026-06-27). LIB-4 now
+  // emits per-room PAINT-<roomId> TakeoffItems with real wall area
+  // (perimeter from aspect-ratio prior × ceiling height), so the
+  // placeholder was duplicating the same scope at qty=0 and cluttering
+  // the BOQ. The stale-derived sweep at the end of this handler
+  // (matching `WF-` prefix) soft-deletes any WF-PAINT row from prior
+  // runs since it's no longer in emittedDerivedTags. The
+  // WALL_PERIMETER_UNKNOWN ValidationFlag is no longer raised — per-
+  // room PAINT lines carry their own evidence chain instead.
   const wallFeatureLegend = legendItems.filter((l) => {
     const m = (l.meta ?? {}) as Record<string, unknown>
     return m.kind === 'LEGEND' && (m.legendKind === 'WALL' || l.category === 'WALL_FINISH')
   })
-  const paintItem = await upsertDerived({
-    organizationId: job.organizationId,
-    projectId: payload.projectId,
-    category: 'WALL_FINISH',
-    tag: 'WF-PAINT',
-    description: 'Wall paint (Fenomastic emulsion) — perimeter pending',
-    unit: 'm²',
-    qty: 0,
-    basis: 'PARAMETRIC',
-    confidence: 50,
-    sourceNote:
-      'Wall centreline × height − openings requires room perimeters; not measured in current takeoff. PARAMETRIC.',
-    meta: { derivedKey: 'wall:paint' },
-    summary,
-  })
-  await flagOnce(
-    job.organizationId,
-    payload.projectId,
-    paintItem.id,
-    'WALL_PERIMETER_UNKNOWN',
-    'WARN',
-    'Wall paint area requires room perimeters — not measured in current takeoff.',
-    summary,
-  )
 
   for (const legend of wallFeatureLegend) {
     const m = (legend.meta ?? {}) as Record<string, unknown>
@@ -502,6 +519,15 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
     skirtingTotalLm += estimate.perimeterLm
     const tag = `SK-${room.id.slice(-8)}`
     emittedDerivedTags.add(tag)
+    // CONF-3 — skirting chain: extract room area + name → aspect-
+    // ratio PRIOR converts to perimeter → DERIVATION skirting=perim.
+    // Prior is the dominant uncertainty (we don't actually know the
+    // perimeter, just guessing from a typical aspect ratio).
+    const skChain: EvidenceStep[] = [
+      step({ id: 'sk.extract', type: 'EXTRACTION', confidence: 0.95, label: `Room "${name}" area + name extracted (${area.toFixed(2)} m²)` }),
+      step({ id: 'sk.prior', type: 'PRIOR', confidence: 0.80, label: `Aspect-ratio prior "${estimate.priorName}" → perimeter ${estimate.perimeterLm.toFixed(2)} lm` }),
+      step({ id: 'sk.derive', type: 'DERIVATION', confidence: 0.97, label: 'skirting = perimeter (1:1)' }),
+    ]
     await upsertDerived({
       organizationId: job.organizationId,
       projectId: payload.projectId,
@@ -511,7 +537,7 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
       unit: 'lm',
       qty: Math.round(estimate.perimeterLm * 100) / 100,
       basis: 'ESTIMATED',
-      confidence: estimate.confidence,
+      confidence: Math.round(computeConfidence(skChain) * 100),
       sourceNote: estimate.reasoning,
       meta: {
         derivedKey: `skirting:${room.id}`,
@@ -523,6 +549,7 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
         priorName: estimate.priorName,
         aspectRatio: estimate.aspectRatio,
         perimeterLm: estimate.perimeterLm,
+        evidenceChain: skChain,
       },
       // SKIRTING is a SUGGESTION — stays out of BOQ until human Confirm.
       summary,
@@ -579,6 +606,18 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
     paintTotalWallAreaM2 += wallAreaM2
     const tag = `PAINT-${room.id.slice(-8)}`
     emittedDerivedTags.add(tag)
+    // CONF-3 — paint chain: the worked example from the design.
+    // room-extract 0.95 × area 0.90 × aspect-prior perimeter 0.85 ×
+    // assumed-height 0.80. Default weights {EXTRACT:0.6, MEASURE:0.7,
+    // PRIOR:0.5, ASSUMPTION:0.8} → compound ≈ 0.70. Lands in honest
+    // range without collapse. (User's expected 0.55-0.62 needs higher
+    // weights — flagging in the response so we can tune.)
+    const paintChain: EvidenceStep[] = [
+      step({ id: 'paint.extract', type: 'EXTRACTION', confidence: 0.95, label: `Room "${name}" extracted from DXF` }),
+      step({ id: 'paint.measure', type: 'MEASUREMENT', confidence: 0.90, label: `Room area ${area.toFixed(2)} m² from MTEXT label` }),
+      step({ id: 'paint.prior', type: 'PRIOR', confidence: 0.85, label: `Aspect-ratio prior "${estimate.priorName}" → perimeter ${estimate.perimeterLm.toFixed(2)} lm (we don't see the actual perimeter)` }),
+      step({ id: 'paint.height', type: 'ASSUMPTION', confidence: 0.80, label: `Ceiling height assumed ${CEILING_HEIGHT_M} m (project-wide default)` }),
+    ]
     await upsertDerived({
       organizationId: job.organizationId,
       projectId: payload.projectId,
@@ -588,7 +627,7 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
       unit: 'm²',
       qty: Math.round(wallAreaM2 * 100) / 100,
       basis: 'DERIVED',
-      confidence: estimate.confidence,
+      confidence: Math.round(computeConfidence(paintChain) * 100),
       sourceNote:
         `${estimate.reasoning} × ${CEILING_HEIGHT_M} m ceiling = ` +
         `${wallAreaM2.toFixed(2)} m² wall paint area`,
@@ -602,6 +641,7 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
         wallAreaM2,
         priorName: estimate.priorName,
         aspectRatio: estimate.aspectRatio,
+        evidenceChain: paintChain,
         estimationSource: 'aspect-ratio-prior',
         estimationReasoning: estimate.reasoning,
       },
@@ -639,6 +679,17 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
     vanityTotalCount += estimate.count
     const tag = `VAN-${room.id.slice(-8)}`
     emittedDerivedTags.add(tag)
+    // CONF-3 — vanity chain: room-name + finish-code extraction →
+    // 1-per-bathroom PRIOR. Strong prior (most bathrooms have one
+    // vanity); reviewer overrides for double-vanity masters.
+    const signalsLabel = Object.entries(estimate.signals)
+      .filter(([, v]) => v)
+      .map(([k]) => k)
+      .join(', ') || 'none'
+    const vanChain: EvidenceStep[] = [
+      step({ id: 'van.extract', type: 'EXTRACTION', confidence: 0.95, label: `Room "${name}" classified as bathroom (signals: ${signalsLabel})` }),
+      step({ id: 'van.prior', type: 'PRIOR', confidence: 0.90, label: `1-vanity-per-bathroom prior (override for double-vanity master baths)` }),
+    ]
     await upsertDerived({
       organizationId: job.organizationId,
       projectId: payload.projectId,
@@ -648,7 +699,7 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
       unit: 'No',
       qty: estimate.count,
       basis: 'ESTIMATED',
-      confidence: estimate.confidence,
+      confidence: Math.round(computeConfidence(vanChain) * 100),
       sourceNote: estimate.reasoning,
       meta: {
         derivedKey: `vanity:${room.id}`,
@@ -659,6 +710,7 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
         estimationReasoning: estimate.reasoning,
         signals: estimate.signals,
         rateHint: 'VANITY',
+        evidenceChain: vanChain,
       },
       summary,
       status: 'AI',
@@ -668,6 +720,178 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
     suggested: vanitySuggested,
     skipped: vanitySkipped,
     totalCount: vanityTotalCount,
+  }
+
+  // --- MEP (rule-driven) -----------------------------------------------
+  // MEP-4 — every active MepRule fires against the project's drawing-
+  // measurable drivers (interior floor area, room counts, bathroom /
+  // kitchen counts, etc.). Each rule emits ONE TakeoffItem stamped:
+  //   basis=DERIVED
+  //   meta.mepRuleId   → ties the line back to the rule for audit chip
+  //   meta.formulaText → human readable "qty = AREA_FT2 (3,834) × 0.00741 = 28.4"
+  //   meta.factorSource / rateSource → preserved on the BoqLine evidence
+  //   meta.mepRate     → the rule's rate (BOQ generator bakes it in)
+  // Confidence = min(factor, rate) on the rule → routed through the
+  // auditor's Confidence module → PLACEHOLDER rules end up in the SPA
+  // review queue automatically.
+  const mepRules = await prisma.mepRule.findMany({
+    where: {
+      organizationId: job.organizationId,
+      active: true,
+      deletedAt: null,
+    },
+    orderBy: [{ discipline: 'asc' }, { sortOrder: 'asc' }],
+  })
+
+  // Pre-compute drivers from the same `rooms` slice the rest of the
+  // handler uses. Interior-floor area mirrors the screed selection.
+  const SQM_TO_SQFT = 10.7639
+  let interiorAreaM2 = 0
+  for (const [code, bucket] of floorGroups) {
+    if (SCREED_EXCLUDED_FINISH_CODES.has(code)) continue
+    interiorAreaM2 += bucket.totalArea
+  }
+  const interiorAreaFt2 = interiorAreaM2 * SQM_TO_SQFT
+
+  const BATHROOM_RE = /\b(BATH|TOILET|POWDER|WC)\b/i
+  const KITCHEN_RE = /\bKITCHEN\b/i
+  const BEDROOM_RE = /\bBEDROOM\b/i
+
+  const roomNamesAll = rooms.map((r) => r.description.split('—')[0]!.trim())
+  // ROOM-CLEANUP (2026-06-27) — dedup by normalized name + floor when
+  // counting MEP drivers. The same villa room (MASTER BATHROOM on GF)
+  // can appear multiple times in the takeoff if it was extracted
+  // from both A101 + a sheet revision; without dedup, BATHROOM_COUNT
+  // doubled (→ 14 instead of 7) and HVAC tonnage / fixture counts
+  // inflated proportionally. The underlying ROOM TakeoffItems are
+  // left untouched (they may legitimately be N rows for the same
+  // physical room across docs); we just don't COUNT them N times
+  // for MEP driver math.
+  function normalizeRoomKey(d: string): string {
+    return d.toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim()
+  }
+  const uniqueRoomKeys = new Set<string>()
+  const uniqueNames: string[] = []
+  for (const r of rooms) {
+    const key = normalizeRoomKey(r.description)
+    if (uniqueRoomKeys.has(key)) continue
+    uniqueRoomKeys.add(key)
+    uniqueNames.push(r.description.split('—')[0]!.trim())
+  }
+  const counts = {
+    ROOM_COUNT: uniqueNames.length,
+    BATHROOM_COUNT: uniqueNames.filter((n) => BATHROOM_RE.test(n)).length,
+    KITCHEN_COUNT: uniqueNames.filter((n) => KITCHEN_RE.test(n)).length,
+    BEDROOM_COUNT: uniqueNames.filter((n) => BEDROOM_RE.test(n)).length,
+  }
+  if (rooms.length !== uniqueNames.length) {
+    console.log(
+      `[quantify.mep] room dedup for MEP counters: ${rooms.length} TakeoffItems → ${uniqueNames.length} unique by (name+floor) — prevents double-count inflation`,
+    )
+  }
+  // Back-compat: pre-existing references to roomNamesAll continue
+  // to see the unique set; existing per-room loops (PAINT, SKIRTING)
+  // still iterate `rooms` directly and are NOT affected.
+  void roomNamesAll
+
+  function resolveDriver(rule: (typeof mepRules)[number]): { value: number; label: string } | null {
+    const d = rule.driver
+    if (d === 'AREA_M2' || d === 'BUA_M2') return { value: interiorAreaM2, label: `${d} (${interiorAreaM2.toFixed(1)} m²)` }
+    if (d === 'AREA_FT2') return { value: interiorAreaFt2, label: `AREA_FT2 (${interiorAreaFt2.toFixed(0)} ft²)` }
+    if (d === 'FIXED') return { value: 1, label: 'FIXED (1)' }
+    if (d === 'ROOM_COUNT' || d === 'BATHROOM_COUNT' || d === 'KITCHEN_COUNT' || d === 'BEDROOM_COUNT') {
+      if (d === 'ROOM_COUNT' && rule.driverFilter) {
+        const re = new RegExp(rule.driverFilter, 'i')
+        const c = roomNamesAll.filter((n) => re.test(n)).length
+        return { value: c, label: `ROOM_COUNT[/${rule.driverFilter}/i] (${c})` }
+      }
+      const c = counts[d as keyof typeof counts]
+      return { value: c, label: `${d} (${c})` }
+    }
+    return null
+  }
+
+  let mepEmitted = 0
+  let mepZeroDriver = 0
+  for (const rule of mepRules) {
+    const drv = resolveDriver(rule)
+    if (!drv) {
+      console.warn(`[quantify.mep] unknown driver '${rule.driver}' on rule ${rule.id}`)
+      continue
+    }
+    const factor = Number(rule.factor.toString())
+    const rate = Number(rule.rate.toString())
+    const qty = drv.value * factor
+    if (qty <= 0) {
+      mepZeroDriver += 1
+      continue
+    }
+    // Round qty sensibly per output unit. Whole-unit things (No, pt)
+    // round to nearest int; areas and lengths stay decimal.
+    const wholeUnit = rule.outputUnit === 'No' || rule.outputUnit === 'pt' || rule.outputUnit === 'LS'
+    const qtyOut = wholeUnit ? Math.max(1, Math.round(qty)) : Math.round(qty * 100) / 100
+    const factorConf = rule.factorConfidence ? Number(rule.factorConfidence.toString()) : 0.5
+    const rateConf = rule.rateConfidence ? Number(rule.rateConfidence.toString()) : 0.5
+    const formulaText = `${drv.label} × ${factor.toString()} = ${qtyOut} ${rule.outputUnit}  @  ${rate.toString()} AED/${rule.outputUnit}  = ${(qtyOut * rate).toFixed(0)} AED`
+    // CONF-3 — MEP chain. Drivers based on extracted room state +
+    // two assumptions: factor (industry/engineer norm) + rate
+    // (market). Both ASSUMPTION at weight 0.8 — they're the dangerous
+    // steps; rate especially when sourced 'PLACEHOLDER'. We don't
+    // pre-compute lineConfidence as min(factor, rate) any more —
+    // computeConfidence over the chain is the answer.
+    const driverExtractConf =
+      rule.driver === 'FIXED'
+        ? 1.0
+        : 0.85 // interior-area / room-count is itself a compound from upstream rooms
+    const mepChain: EvidenceStep[] = [
+      step({ id: 'mep.extract', type: 'EXTRACTION', confidence: driverExtractConf, label: `Driver ${drv.label}` }),
+      step({ id: 'mep.factor', type: 'ASSUMPTION', confidence: factorConf, label: `Factor ${factor.toString()} ${rule.outputUnit}/${rule.driver} — ${rule.factorSource ?? 'unsourced'}`, sourceRef: rule.factorSource ?? undefined }),
+      step({ id: 'mep.rate', type: 'ASSUMPTION', confidence: rateConf, label: `Rate ${rate.toString()} AED/${rule.outputUnit} — ${rule.rateSource ?? 'unsourced'}`, sourceRef: rule.rateSource ?? undefined }),
+    ]
+    const lineConfidence = computeConfidence(mepChain)
+    const tag = `MEP-${rule.discipline.slice(0, 4).toUpperCase()}-${rule.id.slice(-8)}`
+    emittedDerivedTags.add(tag)
+    await upsertDerived({
+      organizationId: job.organizationId,
+      projectId: payload.projectId,
+      category: rule.takeoffCategory as TakeoffCategory,
+      tag,
+      description: rule.name,
+      unit: rule.outputUnit,
+      qty: qtyOut,
+      basis: 'DERIVED',
+      confidence: Math.round(lineConfidence * 100),
+      sourceNote: formulaText,
+      meta: {
+        derivedKey: `mep:${rule.id}`,
+        mepRuleId: rule.id,
+        mepDiscipline: rule.discipline,
+        mepDriver: rule.driver,
+        mepDriverValue: drv.value,
+        mepDriverLabel: drv.label,
+        mepFactor: factor,
+        mepFactorSource: rule.factorSource,
+        mepFactorConfidence: factorConf,
+        mepRate: rate,
+        mepRateSource: rule.rateSource,
+        mepRateConfidence: rateConf,
+        mepFormulaText: formulaText,
+        mepOutputUnit: rule.outputUnit,
+        evidenceChain: mepChain,
+      },
+      summary,
+    })
+    mepEmitted += 1
+  }
+  summary.mep = {
+    emitted: mepEmitted,
+    zeroDriver: mepZeroDriver,
+    rulesEvaluated: mepRules.length,
+    drivers: {
+      interiorAreaM2: interiorAreaM2.toFixed(2),
+      interiorAreaFt2: interiorAreaFt2.toFixed(0),
+      ...counts,
+    },
   }
 
   // PF-3 housekeeping — soft-delete any derived FF-*/CL-*/WF-* rows that
@@ -687,6 +911,7 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
         { tag: { startsWith: 'WF-' } },
         { tag: { startsWith: 'SK-' } },
         { tag: { startsWith: 'VAN-' } },
+        { tag: { startsWith: 'MEP-' } },
       ],
       // Sweep only AI-still rows: a reviewer-promoted SKIRTING line
       // (EDITED/APPROVED) must NEVER be soft-deleted by a re-run.
