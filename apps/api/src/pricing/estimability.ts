@@ -103,6 +103,13 @@ export const DEFAULT_ESTIMABILITY: Record<TakeoffCategory, Estimability> = {
   MEP_PLUMB: 'PROVISIONAL_SUM',
   MEP_ELV: 'PROVISIONAL_SUM',
 
+  // SPRINT-1.3 — contractor-typical P/S categories. All collapse via
+  // CLASSIFIER-2 into a single PROVISIONAL_SUM row per category, with
+  // psAmount=null until the user sets an allowance.
+  STONE_CLADDING: 'PROVISIONAL_SUM',
+  FACADE_SCREEN: 'PROVISIONAL_SUM',
+  HOME_AUTOMATION: 'PROVISIONAL_SUM',
+
   OTHER: 'PROVISIONAL_SUM',
 }
 

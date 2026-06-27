@@ -11,6 +11,11 @@ import {
   parseEstimabilityOverrides,
   type EstimabilityOverrides,
 } from '../pricing/estimability'
+import {
+  isBoqEligible,
+  loadRateLibrarySnapshot,
+  type EligibilityVerdict,
+} from '../pricing/boqEligibility'
 import type { Estimability, TakeoffCategory } from '@prisma/client'
 import { recomputeBoqTotals } from '../pricing/recomputeBoqTotals'
 import {
@@ -75,6 +80,9 @@ const MEP_DISCIPLINE_LABEL: Partial<Record<TakeoffCategory, string>> = {
   GRC: 'GRC',
   EXTERNAL: 'External / Landscape',
   SKIRTING: 'Skirting',
+  STONE_CLADDING: 'Stone cladding',
+  FACADE_SCREEN: 'Façade feature screen',
+  HOME_AUTOMATION: 'Home automation',
 }
 
 const CATEGORY_TO_SECTION: Record<string, string> = {
@@ -106,6 +114,12 @@ const CATEGORY_TO_SECTION: Record<string, string> = {
   MEP_ELEC: '2.71',
   MEP_PLUMB: '2.72',
   MEP_ELV: '2.73',
+  // SPRINT-1.3 — three new P/S categories land in section 4.0
+  // (matches how UAE contractors structure quotes — these all
+  // live in the Provisional Sums bill).
+  STONE_CLADDING: '4.0',
+  FACADE_SCREEN: '4.0',
+  HOME_AUTOMATION: '4.0',
 }
 
 /** Categories explicitly excluded from BOQ generation. */
@@ -467,9 +481,18 @@ export function registerBoqRoutes(router: Router): void {
           },
         })) > 0
 
+      // SPRINT-1.2 — BoqEligibilityGate. Always include AI items
+      // in the initial fetch; the gate decides per-item whether
+      // they reach the BOQ based on whether a rate-library slot
+      // exists. Replaces the per-category auto-promote logic.
+      // `onlyApproved` is now a no-op for the AI tier — AI items
+      // pass when they have a populated slot OR ship as P/S "rate
+      // pending" when the slot exists but the rate is null/0.
       const statusFilter: { status?: { in: TakeoffStatus[] } } = onlyApproved
-        ? { status: { in: ['APPROVED', 'EDITED'] as TakeoffStatus[] } }
+        ? { status: { in: ['APPROVED', 'EDITED', 'AI'] as TakeoffStatus[] } }
         : {}
+
+      const rateLibSnapshot = await loadRateLibrarySnapshot(db, ctx.organizationId)
 
       const items = await db.takeoffItem.findMany({
         where: { projectId, deletedAt: null, ...statusFilter },
@@ -549,8 +572,14 @@ export function registerBoqRoutes(router: Router): void {
       // DEFINITIONS that the EXTRACT_FINISH_LEGEND stage planted as
       // reference rows; they have null qty and would pollute the BOQ.
       const sectionBuckets = new Map<string, typeof items>()
+      // SPRINT-1.2 — verdicts keyed by takeoffItem.id so the
+      // downstream per-section loop can route AI items per the
+      // gate's `isPriced` signal (populated slot → priced; empty
+      // slot → PROVISIONAL_SUM with "rate pending" reasoning).
+      const eligibilityById = new Map<string, EligibilityVerdict>()
       let skippedRoomItems = 0
       let skippedLegendItems = 0
+      let skippedAiByGate = 0
       for (const item of items) {
         if (NEVER_BOQ.has(item.category)) {
           skippedRoomItems += 1
@@ -561,10 +590,26 @@ export function registerBoqRoutes(router: Router): void {
           skippedLegendItems += 1
           continue
         }
+        // BoqEligibilityGate applies only to AI-status items (others
+        // bypass — already promoted upstream). Items denied stay out
+        // of the BOQ entirely; the SPA review queue surfaces them
+        // separately so the operator can either populate a rate or
+        // dismiss the AI suggestion.
+        const verdict = isBoqEligible(item, rateLibSnapshot)
+        if (!verdict.eligible) {
+          skippedAiByGate += 1
+          continue
+        }
+        eligibilityById.set(item.id, verdict)
         const sectionCode = CATEGORY_TO_SECTION[item.category] ?? '1.0'
         const bucket = sectionBuckets.get(sectionCode)
         if (bucket) bucket.push(item)
         else sectionBuckets.set(sectionCode, [item])
+      }
+      if (skippedAiByGate > 0) {
+        console.log(
+          `[boq.gate] ${skippedAiByGate} AI-status item(s) kept out of BOQ — no rate-library slot. Add rates or dismiss the suggestions to remove the queue entry.`,
+        )
       }
       if (sectionBuckets.size === 0) {
         return errorResponse(
@@ -706,7 +751,20 @@ export function registerBoqRoutes(router: Router): void {
                 lumpByCategory.set(cat, list)
                 continue
               }
-              // MEASURED / DERIVED / MANUAL — price normally.
+              // MEASURED / DERIVED / MANUAL — price normally, UNLESS
+              // the eligibility gate found a slot but reports
+              // isPriced=false (slot exists but rate is null/0).
+              // In that case route to PROVISIONAL_SUM so the line
+              // is VISIBLE as "rate pending" instead of being
+              // silently priced × 0. SPRINT-1.2 visibility rule.
+              const verdict = eligibilityById.get(item.id)
+              if (verdict && !verdict.isPriced) {
+                const cat = item.category as TakeoffCategory
+                const list = provByCategory.get(cat) ?? []
+                list.push(item)
+                provByCategory.set(cat, list)
+                continue
+              }
               priced.push(item)
             }
 

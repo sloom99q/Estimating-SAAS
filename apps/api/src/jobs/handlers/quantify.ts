@@ -45,6 +45,12 @@ import type { JobHandler, JobRecord } from '../types'
 import { isAreaStatement, selectBillableRooms } from './_roomSelector'
 import { upsertValidationFlag } from '../validationFlagUpsert'
 import { type EvidenceStep, computeConfidence, step } from '../../pricing/lineProvenance'
+import {
+  SPRINT_1_RULES,
+  runDerivedQuantityRules,
+  type DoorCtx,
+  type StaircaseCtx,
+} from './derivedQuantityRules'
 
 interface QuantifyPayload {
   projectId: string
@@ -412,48 +418,106 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
   }
 
   // --- Stairs (lm — Plot 4357 standing rule) ---------------------------
-  const staircase = rooms.find((r) => isStaircaseRoom(r.description.split('—')[0]!))
-  if (staircase) {
-    const meta = (staircase.meta ?? {}) as Record<string, unknown>
-    const risers = typeof meta.risers === 'number' ? meta.risers : null
-    const stairWidth = typeof meta.stairWidth_m === 'number' ? meta.stairWidth_m : null
-    let lm: number | null = null
-    if (risers && stairWidth) lm = risers * stairWidth
-    const item = await upsertDerived({
+  // --- DerivedQuantityRule engine (SPRINT-1.1) -------------------------
+  // The engine replaces the per-emitter blocks for STAIR-* and door-
+  // derived lines (THRESHOLD, IRONMONGERY). All five rules in
+  // SPRINT_1_RULES consume the contexts built here. Adding a 6th rule
+  // is a single push to the seed array — no new code in this handler.
+  const staircaseRooms = rooms.filter((r) => isStaircaseRoom(r.description.split('—')[0]!))
+  const staircaseCtx: StaircaseCtx = {
+    source: 'STAIRCASE',
+    staircases: staircaseRooms.map((s) => {
+      const meta = (s.meta ?? {}) as Record<string, unknown>
+      const risers = typeof meta.risers === 'number' ? meta.risers : null
+      const stairWidth = typeof meta.stairWidth_m === 'number' ? meta.stairWidth_m : null
+      const treadDepth = typeof meta.treadDepth_m === 'number' ? meta.treadDepth_m : null
+      const landingArea = typeof meta.landingArea_m2 === 'number' ? meta.landingArea_m2 : null
+      // totalLm: prefer risers × treadDepth (the architect's
+      // intended run-length); fall back to risers × width for legacy
+      // data (Plot-4357 convention, preserves prior Sprint-10
+      // behaviour). null when geometry isn't measurable.
+      const totalLm =
+        risers != null && treadDepth != null ? risers * treadDepth
+        : risers != null && stairWidth != null ? risers * stairWidth
+        : null
+      return {
+        roomId: s.id,
+        risers,
+        treadDepth_m: treadDepth,
+        stairWidth_m: stairWidth,
+        landingArea_m2: landingArea,
+        totalLm,
+      }
+    }),
+  }
+
+  // DOOR context: load DOOR TakeoffItems for this project + roll
+  // up to (totalCount, totalWidth_lm, byTag).
+  const doorItems = await prisma.takeoffItem.findMany({
+    where: {
       organizationId: job.organizationId,
       projectId: payload.projectId,
-      category: 'OTHER',
-      tag: 'STAIR-TREAD',
-      description:
-        lm === null
-          ? // Sprint-10 F1: spell the standing-rule reference into the
-            // line description so a reader of the BOQ knows the rate the
-            // line will book against once lm is measured.
-            `Grainy marble tread/riser — lm pending (ref STAIR-TREAD 800/lm + STAIR-LAND 550/m²)`
-          : `Stair tread + riser — ${lm.toFixed(2)} lm`,
-      unit: 'lm',
-      qty: lm ?? 0,
-      basis: lm === null ? 'PARAMETRIC' : 'DERIVED',
-      confidence: lm === null ? 50 : 85,
-      sourceNote: lm === null
-        ? `STAIRCASE room ${staircase.description.split('—')[0]!.trim()} present but risers × width not measured.`
-        : `STAIRCASE: ${risers} risers × ${stairWidth} m = ${lm.toFixed(2)} lm. Plot 4357 rule: stairs are lm, NEVER plan-m².`,
-      meta: { stairRoomId: staircase.id, risers, stairWidth_m: stairWidth, derivedKey: 'stairs' },
-      summary,
-    })
-    if (lm === null) {
-      await flagOnce(
-        job.organizationId,
-        payload.projectId,
-        item.id,
-        'STAIR_RISERS_UNKNOWN',
-        'WARN',
-        `STAIRCASE present but tread/riser geometry not captured. Line stays PARAMETRIC — never silently use plan-m².`,
-        summary,
-      )
-    }
-    summary.staircase = { emitted: true, lm }
+      deletedAt: null,
+      category: 'DOOR',
+    },
+    select: { tag: true, qtyAi: true, qtyFinal: true, meta: true },
+  })
+  let totalDoorCount = 0
+  let totalDoorWidthLm = 0
+  const doorByTag: DoorCtx['byTag'] = []
+  for (const d of doorItems) {
+    const count = Number(d.qtyFinal?.toString() ?? d.qtyAi?.toString() ?? 0)
+    if (count <= 0) continue
+    const meta = (d.meta ?? {}) as Record<string, unknown>
+    const widthMm = typeof meta.width_mm === 'number' ? meta.width_mm : null
+    totalDoorCount += count
+    if (widthMm != null) totalDoorWidthLm += (widthMm / 1000) * count
+    doorByTag.push({ tag: d.tag ?? '?', count, width_mm: widthMm })
   }
+  const doorCtx: DoorCtx = {
+    source: 'DOOR',
+    totalCount: totalDoorCount,
+    totalWidth_lm: totalDoorWidthLm,
+    byTag: doorByTag,
+  }
+
+  const ruleEmissions = runDerivedQuantityRules(SPRINT_1_RULES, {
+    staircase: staircaseCtx.staircases.length > 0 ? staircaseCtx : undefined,
+    door: doorCtx.totalCount > 0 ? doorCtx : undefined,
+  })
+  for (const emission of ruleEmissions) {
+    emittedDerivedTags.add(emission.tag)
+    // status='AI' — the BoqEligibilityGate decides admission to
+    // the BOQ based on whether a rate-library slot exists. Items
+    // stay out until the user populates a rate; populated-but-empty
+    // slots route to PROVISIONAL_SUM (rate pending).
+    await upsertDerived({
+      organizationId: job.organizationId,
+      projectId: payload.projectId,
+      category: emission.category,
+      tag: emission.tag,
+      description: emission.description,
+      unit: emission.unit,
+      qty: emission.qty,
+      basis: 'DERIVED',
+      confidence: 85,
+      sourceNote: emission.reasoning,
+      meta: {
+        derivedKey: `rule:${emission.ruleId}`,
+        derivedRuleId: emission.ruleId,
+        rateLibraryCode: emission.rateLibraryCode,
+      },
+      summary,
+      status: 'AI',
+    })
+  }
+  summary.staircase = {
+    emitted: staircaseCtx.staircases.length > 0,
+    lm: staircaseCtx.staircases.reduce((s, st) => s + (st.totalLm ?? 0), 0) || null,
+  }
+  console.log(
+    `[quantify.rules] DerivedQuantityRule engine: ${ruleEmissions.length} emission(s) from ${SPRINT_1_RULES.length} rule(s) — staircases=${staircaseCtx.staircases.length}, doors=${doorCtx.totalCount}`,
+  )
 
   // --- Wall feature finishes (P/S until measured) ---------------------
   //
@@ -959,6 +1023,12 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
         { tag: { startsWith: 'SK-' } },
         { tag: { startsWith: 'VAN-' } },
         { tag: { startsWith: 'MEP-' } },
+        // SPRINT-1.1 — derived-rule emissions
+        { tag: 'STAIR-TREAD' },
+        { tag: 'STAIR-LAND' },
+        { tag: 'STAIR-HANDRAIL' },
+        { tag: 'THRESHOLD' },
+        { tag: 'IRONMONGERY' },
       ],
       // Sweep only AI-still rows: a reviewer-promoted SKIRTING line
       // (EDITED/APPROVED) must NEVER be soft-deleted by a re-run.

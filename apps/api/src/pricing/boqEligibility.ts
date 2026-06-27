@@ -18,26 +18,64 @@
  * Status: DESIGN STUB. Not yet imported by the BOQ route — waiting
  * for design sign-off before wiring.
  */
-import type { TakeoffStatus, TakeoffCategory } from '@prisma/client'
+import type { Prisma, PrismaClient, TakeoffStatus, TakeoffCategory } from '@prisma/client'
 
 // ─────────────────────────────────────────────────────────────────
 // Rate-library snapshot
 //
 // Pre-loaded once per BOQ-gen so the predicate is a pure hash
-// lookup. Two signals — either is enough to count as "we can price
-// this":
+// lookup. Two signals:
 //
-//   codes      — RateLibraryItem.code values (org-scope + global)
+//   rates      — code → rate value. Map carries BOTH populated
+//                slots (value > 0) AND empty slots (value = 0 /
+//                null) so the gate can distinguish "slot exists
+//                AND priced" from "slot exists BUT unpopulated".
+//                Empty slots make the line visible in the BOQ as
+//                "rate pending", not silently priced × 0.
 //   assemblies — TakeoffCategory values that have at least one
-//                Assembly routed via takeoffCategory
-//
-// Plus the meta-driven fallbacks below. Anything that PRICE's
-// waterfall could resolve = passes the gate.
+//                Assembly routed via takeoffCategory. Assemblies
+//                compose components → always priced when present.
 // ─────────────────────────────────────────────────────────────────
 
 export interface RateLibrarySnapshot {
-  codes: ReadonlySet<string>
+  rates: ReadonlyMap<string, number>
   assemblies: ReadonlySet<TakeoffCategory>
+}
+
+/**
+ * Pre-load the snapshot from the DB. Cheap — one indexed read per
+ * source. The result is read-only; safe to reuse across many items
+ * in a single BOQ generation.
+ */
+export async function loadRateLibrarySnapshot(
+  client: PrismaClient | { rateLibraryItem: PrismaClient['rateLibraryItem']; assembly: PrismaClient['assembly'] },
+  organizationId: string,
+): Promise<RateLibrarySnapshot> {
+  const [items, assemblies] = await Promise.all([
+    client.rateLibraryItem.findMany({
+      where: {
+        OR: [{ organizationId }, { organizationId: null }], // org + global
+        deletedAt: null,
+      },
+      select: { code: true, rate: true },
+    }),
+    client.assembly.findMany({
+      where: { organizationId, deletedAt: null, takeoffCategory: { not: null } },
+      select: { takeoffCategory: true },
+    }),
+  ])
+  const rates = new Map<string, number>()
+  for (const it of items) {
+    const v = Number(it.rate.toString())
+    // Store ALL slots — empty ones too (value=0 means unpopulated;
+    // the gate decides what to do).
+    rates.set(it.code, Number.isFinite(v) ? v : 0)
+  }
+  const asmSet = new Set<TakeoffCategory>()
+  for (const a of assemblies) {
+    if (a.takeoffCategory) asmSet.add(a.takeoffCategory as TakeoffCategory)
+  }
+  return { rates, assemblies: asmSet }
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -68,6 +106,16 @@ export interface EligibilityVerdict {
    *  the BOQ-generation summary so the operator can debug "why isn't
    *  my SK line in the BOQ?". */
   reason: string
+  /** Which rate-library code matched (null when matched via
+   *  Assembly-by-category or when ineligible). */
+  matchedCode: string | null
+  /** True when the matched slot/Assembly has a non-zero rate that
+   *  will produce a real price. False = slot exists but unpopulated;
+   *  the BOQ generator routes this line as PROVISIONAL_SUM with
+   *  reasoning="rate pending" so it's visible to the engineer
+   *  instead of being silently priced × 0.
+   *  Only meaningful when eligible=true. */
+  isPriced: boolean
 }
 
 /**
@@ -80,69 +128,105 @@ export function isBoqEligible(
 ): EligibilityVerdict {
   // Items already promoted upstream skip the gate.
   if (item.status !== 'AI') {
-    return { eligible: true, reason: `status=${item.status} (promoted upstream)` }
+    return {
+      eligible: true,
+      reason: `status=${item.status} (promoted upstream)`,
+      matchedCode: null,
+      isPriced: true, // upstream filter trusts their pricing
+    }
   }
 
   const qty = num(item.qtyFinal ?? item.qtyAi)
   if (qty <= 0) {
-    return { eligible: false, reason: 'qty=0 — nothing to price' }
+    return { eligible: false, reason: 'qty=0 — nothing to price', matchedCode: null, isPriced: false }
   }
 
-  if (!hasRateLibrarySlot(item, rateLib)) {
+  const slot = findRateLibrarySlot(item, rateLib)
+  if (!slot) {
     return {
       eligible: false,
       reason: `no rate-library slot for category=${item.category}${item.tag ? ` tag=${item.tag}` : ''} — add a RateLibraryItem or Assembly that covers it`,
+      matchedCode: null,
+      isPriced: false,
     }
   }
 
-  return { eligible: true, reason: 'AI suggestion with qty + matching rate slot' }
+  return {
+    eligible: true,
+    reason: slot.isPriced
+      ? `AI suggestion with qty + populated rate slot ${slot.code ?? '[Assembly]'}`
+      : `AI suggestion with qty + UNPOPULATED rate slot ${slot.code ?? '[Assembly]'} — visible in BOQ as "rate pending"`,
+    matchedCode: slot.code,
+    isPriced: slot.isPriced,
+  }
 }
 
 /**
- * Does the rate library have an entry that could price this item?
- * Cheapest possible check — pure hash lookup against the snapshot.
+ * Find the rate-library slot that would price this item — and
+ * report whether it's populated. Pure — hash lookups only.
  *
  * Signals tried in order:
- *   1. meta.rateLibraryCode in codes      (derivedQuantityRules path)
- *   2. meta.rateHint in codes              (legacy emitter path)
- *   3. category in assemblies              (Assembly routes by category)
- *   4. category-derived code in codes      (FF-{finishCode}, SK-{finishCode})
+ *   1. meta.rateLibraryCode in rates       (derivedQuantityRules path)
+ *   2. meta.rateHint in rates              (legacy emitter path)
+ *   3. category in assemblies              (Assembly routes by category;
+ *                                           Assembly is always priced
+ *                                           via component composition)
+ *   4. category-derived code in rates      (FF-{finishCode}, SK-*, CL-*)
  *
- * No DB query. No PRICE-waterfall re-implementation. If the user
- * adds a rate-library entry, this returns true on the next BOQ-gen.
+ * Returns null when no slot matches (gate denies admission).
+ * Returns {code, isPriced} when a slot exists — isPriced=false means
+ * the slot is in the library but rate is 0 / unpopulated; the BOQ
+ * generator routes that line as PROVISIONAL_SUM (rate pending) so it
+ * stays visible to the engineer.
  */
-function hasRateLibrarySlot(item: EligibilityItem, rateLib: RateLibrarySnapshot): boolean {
+interface SlotMatch {
+  /** RateLibraryItem.code that matched, or null for Assembly-by-category. */
+  code: string | null
+  isPriced: boolean
+}
+
+function findRateLibrarySlot(item: EligibilityItem, rateLib: RateLibrarySnapshot): SlotMatch | null {
   const meta = (item.meta ?? {}) as Record<string, unknown>
 
+  const tryCode = (code: string): SlotMatch | null => {
+    if (!rateLib.rates.has(code)) return null
+    const rate = rateLib.rates.get(code) ?? 0
+    return { code, isPriced: rate > 0 }
+  }
+
   // (1) Explicit code from derivedQuantityRules.
-  if (typeof meta.rateLibraryCode === 'string' && rateLib.codes.has(meta.rateLibraryCode)) {
-    return true
+  if (typeof meta.rateLibraryCode === 'string') {
+    const m = tryCode(meta.rateLibraryCode)
+    if (m) return m
   }
-
-  // (2) Legacy rate-hint (KITCHEN-* / VAN-* emissions stamp these).
-  if (typeof meta.rateHint === 'string' && rateLib.codes.has(meta.rateHint)) {
-    return true
+  // (2) Legacy rate-hint.
+  if (typeof meta.rateHint === 'string') {
+    const m = tryCode(meta.rateHint)
+    if (m) return m
   }
-
-  // (3) Any Assembly routed for this category.
+  // (3) Assembly-by-category (Assembly composes components → always
+  //     produces a non-zero rate when present).
   if (rateLib.assemblies.has(item.category)) {
-    return true
+    return { code: null, isPriced: true }
   }
-
-  // (4) Category-derived rate codes — only the patterns the existing
-  // PRICE waterfall would try.
+  // (4) Category-derived codes.
   if (item.category === 'FLOOR_FINISH' && typeof meta.floorFinishCode === 'string') {
-    if (rateLib.codes.has(`FF-${meta.floorFinishCode}`)) return true
+    const m = tryCode(`FF-${meta.floorFinishCode}`)
+    if (m) return m
   }
-  if (item.category === 'SKIRTING' && typeof meta.floorFinishCode === 'string') {
-    if (rateLib.codes.has(`SK-${meta.floorFinishCode}`)) return true
-    if (rateLib.codes.has('SKIRTING-LM')) return true
+  if (item.category === 'SKIRTING') {
+    if (typeof meta.floorFinishCode === 'string') {
+      const m = tryCode(`SK-${meta.floorFinishCode}`)
+      if (m) return m
+    }
+    const m = tryCode('SKIRTING-LM')
+    if (m) return m
   }
   if (item.category === 'CEILING' && typeof meta.ceilingCode === 'string') {
-    if (rateLib.codes.has(`CL-${meta.ceilingCode}`)) return true
+    const m = tryCode(`CL-${meta.ceilingCode}`)
+    if (m) return m
   }
-
-  return false
+  return null
 }
 
 function num(d: { toString(): string } | null | undefined): number {

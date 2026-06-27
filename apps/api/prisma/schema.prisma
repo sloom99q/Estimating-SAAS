@@ -143,6 +143,13 @@ enum TakeoffCategory {
   MEP_ELEC
   MEP_PLUMB
   MEP_ELV
+  /// SPRINT-1.3 (2026-06-27) — three contractor-typical P/S
+  /// categories surfaced by the coverage matrix. All default to
+  /// Estimability=PROVISIONAL_SUM via DEFAULT_ESTIMABILITY; CLASSIFIER-2
+  /// collapses them into single P/S lines per category.
+  STONE_CLADDING
+  FACADE_SCREEN
+  HOME_AUTOMATION
   OTHER
 }
 
