@@ -100,27 +100,48 @@ export interface EligibilityItem {
 // The predicate
 // ─────────────────────────────────────────────────────────────────
 
+/// SPRINT-1.2 (refined) — the warning tells the estimator WHICH
+/// action clears the line:
+///   RATE_MISSING       — the rate-library slot exists, populate it
+///   RATE_SLOT_MISSING  — no slot exists, create the entry suggested
+/// null = no warning (line is fully priced).
+export type GateWarning = 'RATE_MISSING' | 'RATE_SLOT_MISSING' | null
+
 export interface EligibilityVerdict {
   eligible: boolean
-  /** Short reason for the gate's decision — shown in QUANTIFY logs +
-   *  the BOQ-generation summary so the operator can debug "why isn't
-   *  my SK line in the BOQ?". */
+  /** Short reason for the gate's decision — surfaced on the BoqLine
+   *  description so the engineer knows why a line is rate-pending. */
   reason: string
-  /** Which rate-library code matched (null when matched via
-   *  Assembly-by-category or when ineligible). */
+  /** Which rate-library code matched (null when no slot or matched
+   *  via Assembly-by-category). */
   matchedCode: string | null
-  /** True when the matched slot/Assembly has a non-zero rate that
-   *  will produce a real price. False = slot exists but unpopulated;
-   *  the BOQ generator routes this line as PROVISIONAL_SUM with
-   *  reasoning="rate pending" so it's visible to the engineer
-   *  instead of being silently priced × 0.
-   *  Only meaningful when eligible=true. */
+  /** When no slot matches OR an empty slot was found: the code the
+   *  estimator needs to populate (or create). */
+  suggestedCode: string | null
+  /** True when a slot exists AND rate>0 → line ships PRICED. False
+   *  otherwise → line ships VISIBLE as UNPRICED so the detected
+   *  quantity is never silenced. Only meaningful when eligible=true. */
   isPriced: boolean
+  /** Categorical reason a non-priced line is unpriced. Drives the
+   *  audit chip + the visible "RATE MISSING" / "RATE SLOT MISSING"
+   *  badge in the XLSX export. */
+  warning: GateWarning
 }
 
 /**
  * The ONE rule. Pure — no DB access, no side effects. The caller
  * pre-loads the RateLibrarySnapshot once + applies this per item.
+ *
+ * Behaviour (post-Sprint-1.2 refinement):
+ *   qty=0                            → INELIGIBLE (nothing to show)
+ *   qty>0 + populated slot           → eligible + isPriced=true (PRICED)
+ *   qty>0 + slot exists, rate=0      → eligible + isPriced=false (rate pending)
+ *   qty>0 + NO slot                   → eligible + isPriced=false (rate pending,
+ *                                       suggestedCode tells user what to add)
+ *
+ * The gate NEVER suppresses a real detected quantity. A line with a
+ * known qty but unknown rate stays visible so the estimator can see
+ * what was found AND what they need to populate to price it.
  */
 export function isBoqEligible(
   item: EligibilityItem,
@@ -132,33 +153,87 @@ export function isBoqEligible(
       eligible: true,
       reason: `status=${item.status} (promoted upstream)`,
       matchedCode: null,
-      isPriced: true, // upstream filter trusts their pricing
+      suggestedCode: null,
+      isPriced: true,
+      warning: null,
     }
   }
 
+  // The gate's ONLY suppression rule: qty must be > 0. Everything
+  // else (missing rate, missing slot) flows through as visible
+  // UNPRICED. Detection and pricing are independent concerns —
+  // never let pricing gaps silence detected scope.
   const qty = num(item.qtyFinal ?? item.qtyAi)
   if (qty <= 0) {
-    return { eligible: false, reason: 'qty=0 — nothing to price', matchedCode: null, isPriced: false }
+    return {
+      eligible: false,
+      reason: 'qty=0 — nothing to show',
+      matchedCode: null,
+      suggestedCode: null,
+      isPriced: false,
+      warning: null,
+    }
   }
 
   const slot = findRateLibrarySlot(item, rateLib)
   if (!slot) {
+    // No slot at all — the line ships VISIBLE as UNPRICED. Estimator
+    // sees the detected qty + the exact code they need to create.
+    const suggested = suggestRateLibraryCode(item)
     return {
-      eligible: false,
-      reason: `no rate-library slot for category=${item.category}${item.tag ? ` tag=${item.tag}` : ''} — add a RateLibraryItem or Assembly that covers it`,
+      eligible: true,
+      reason: suggested
+        ? `RATE SLOT MISSING — create rate-library entry '${suggested}' to price this line`
+        : `RATE SLOT MISSING — no slot exists for category=${item.category}${item.tag ? ` tag=${item.tag}` : ''}; create a RateLibraryItem or Assembly that covers it`,
       matchedCode: null,
+      suggestedCode: suggested,
       isPriced: false,
+      warning: 'RATE_SLOT_MISSING',
     }
   }
-
+  if (!slot.isPriced) {
+    // Slot exists but rate=0. Estimator just needs to populate the
+    // value on the existing slot.
+    return {
+      eligible: true,
+      reason: `RATE MISSING — slot '${slot.code ?? '[Assembly]'}' exists but rate is 0; populate the value to price this line`,
+      matchedCode: slot.code,
+      suggestedCode: slot.code,
+      isPriced: false,
+      warning: 'RATE_MISSING',
+    }
+  }
   return {
     eligible: true,
-    reason: slot.isPriced
-      ? `AI suggestion with qty + populated rate slot ${slot.code ?? '[Assembly]'}`
-      : `AI suggestion with qty + UNPOPULATED rate slot ${slot.code ?? '[Assembly]'} — visible in BOQ as "rate pending"`,
+    reason: `priced via rate slot ${slot.code ?? '[Assembly]'}`,
     matchedCode: slot.code,
-    isPriced: slot.isPriced,
+    suggestedCode: null,
+    isPriced: true,
+    warning: null,
   }
+}
+
+/**
+ * What rate-library code SHOULD exist for this item? Used to populate
+ * `suggestedCode` on the gate verdict when no slot matches. Mirrors
+ * the lookup order in findRateLibrarySlot so the suggestion is the
+ * same code the gate would have tried.
+ */
+function suggestRateLibraryCode(item: EligibilityItem): string | null {
+  const meta = (item.meta ?? {}) as Record<string, unknown>
+  if (typeof meta.rateLibraryCode === 'string') return meta.rateLibraryCode
+  if (typeof meta.rateHint === 'string') return meta.rateHint
+  if (item.category === 'FLOOR_FINISH' && typeof meta.floorFinishCode === 'string') {
+    return `FF-${meta.floorFinishCode}`
+  }
+  if (item.category === 'SKIRTING') {
+    if (typeof meta.floorFinishCode === 'string') return `SK-${meta.floorFinishCode}`
+    return 'SKIRTING-LM'
+  }
+  if (item.category === 'CEILING' && typeof meta.ceilingCode === 'string') {
+    return `CL-${meta.ceilingCode}`
+  }
+  return null
 }
 
 /**

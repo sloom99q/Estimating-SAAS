@@ -435,6 +435,36 @@ function buildCollapsedCollapseProvenance(
   }
 }
 
+/**
+ * SPRINT-1.2 — provenance for an UNPRICED rate-pending line. Quantity
+ * still has its full evidence chain (paint / skirting / derived-rule
+ * etc.); the rate side carries an explicit "RATE MISSING" /
+ * "RATE SLOT MISSING" note so the audit chip is honest.
+ */
+function buildUnpricedLineProvenance(
+  item: TakeoffForProvenance,
+  verdict: EligibilityVerdict | undefined,
+): LineProvenance {
+  // Reuse the standard auto-provenance builder for the quantity
+  // side (preserves the evidence chain), then layer a rate-side
+  // warning evidence on top.
+  const baseProv = buildAutoLineProvenance(item, false)
+  const warningText =
+    verdict?.warning === 'RATE_SLOT_MISSING'
+      ? `RATE SLOT MISSING — ${verdict?.suggestedCode ? `create rate-library entry '${verdict.suggestedCode}'` : 'no rate slot found'} to price this line.`
+      : verdict?.warning === 'RATE_MISSING'
+        ? `RATE MISSING — slot '${verdict?.suggestedCode ?? '?'}' exists but rate is 0; populate the value to price this line.`
+        : 'UNPRICED — rate unavailable.'
+  return {
+    ...baseProv,
+    evidence: [
+      ...baseProv.evidence,
+      { kind: 'legacy', note: warningText },
+    ],
+    stampedBy: 'generateBoq.unpriced',
+  }
+}
+
 export function registerBoqRoutes(router: Router): void {
   /**
    * POST /api/projects/:id/boq
@@ -590,11 +620,10 @@ export function registerBoqRoutes(router: Router): void {
           skippedLegendItems += 1
           continue
         }
-        // BoqEligibilityGate applies only to AI-status items (others
-        // bypass — already promoted upstream). Items denied stay out
-        // of the BOQ entirely; the SPA review queue surfaces them
-        // separately so the operator can either populate a rate or
-        // dismiss the AI suggestion.
+        // BoqEligibilityGate. Only suppresses qty=0 items now —
+        // any detected qty>0 line is admitted, with isPriced=false
+        // for rate-pending lines so the engineer sees the qty
+        // alongside "add {suggestedCode} to rate library".
         const verdict = isBoqEligible(item, rateLibSnapshot)
         if (!verdict.eligible) {
           skippedAiByGate += 1
@@ -608,7 +637,7 @@ export function registerBoqRoutes(router: Router): void {
       }
       if (skippedAiByGate > 0) {
         console.log(
-          `[boq.gate] ${skippedAiByGate} AI-status item(s) kept out of BOQ — no rate-library slot. Add rates or dismiss the suggestions to remove the queue entry.`,
+          `[boq.gate] ${skippedAiByGate} AI item(s) had qty=0 — nothing to show.`,
         )
       }
       if (sectionBuckets.size === 0) {
@@ -721,11 +750,16 @@ export function registerBoqRoutes(router: Router): void {
             //     stay as TakeoffItems for drill-down, and the
             //     XLSX-3 draft tab can show them when explicitly
             //     requested.
+            // Single classification pass → 4 buckets:
+            //   priced       — MEASURED/DERIVED/MANUAL with isPriced=true
+            //                  (priced × rate as today)
+            //   ratePending  — AI items the gate let through with
+            //                  isPriced=false (UNPRICED — visible per-item
+            //                  with RATE_MISSING / RATE_SLOT_MISSING badge)
+            //   provByCategory — Estimability=PROVISIONAL_SUM (collapse)
+            //   lumpByCategory — Estimability=LUMP_SUM        (collapse)
             const priced: typeof sectionItems = []
-            // CLASSIFIER-5 — separate P/S vs LS buckets so the
-            // collapsed line stamps the correct SourceType in
-            // provenance. Both still collapse 1-line-per-category,
-            // both flow into the section as isProvisional=true.
+            const ratePending: typeof sectionItems = []
             const provByCategory = new Map<TakeoffCategory, typeof sectionItems>()
             const lumpByCategory = new Map<TakeoffCategory, typeof sectionItems>()
             for (const item of sectionItems) {
@@ -751,21 +785,16 @@ export function registerBoqRoutes(router: Router): void {
                 lumpByCategory.set(cat, list)
                 continue
               }
-              // MEASURED / DERIVED / MANUAL — price normally, UNLESS
-              // the eligibility gate found a slot but reports
-              // isPriced=false (slot exists but rate is null/0).
-              // In that case route to PROVISIONAL_SUM so the line
-              // is VISIBLE as "rate pending" instead of being
-              // silently priced × 0. SPRINT-1.2 visibility rule.
+              // MEASURED / DERIVED / MANUAL. AI-tier items with
+              // isPriced=false ship as VISIBLE-UNPRICED at per-item
+              // granularity (not collapsed). Estimator sees each
+              // detected qty + the rate slot they need to fix.
               const verdict = eligibilityById.get(item.id)
-              if (verdict && !verdict.isPriced) {
-                const cat = item.category as TakeoffCategory
-                const list = provByCategory.get(cat) ?? []
-                list.push(item)
-                provByCategory.set(cat, list)
-                continue
+              if (verdict && verdict.eligible && !verdict.isPriced) {
+                ratePending.push(item)
+              } else {
+                priced.push(item)
               }
-              priced.push(item)
             }
 
             // Pre-compute lineData for one createMany.
@@ -871,6 +900,43 @@ export function registerBoqRoutes(router: Router): void {
                 amount: null,
                 rateSource: null,
                 provenance: buildCollapsedCollapseProvenance(items, cat, psAmount, 'LUMP_SUM') as object,
+                sortOrder: lineIx,
+              })
+              lineIx += 1
+            }
+
+            // (d) UNPRICED rate-pending items — per-item BoqLines,
+            // NOT collapsed. rate=null, amount=null, isProvisional=
+            // false (this is a measured line awaiting a rate, not a
+            // deliberate P/S allowance). The description is prefixed
+            // with the warning so the engineer reads at-a-glance.
+            // Sprint-1.2 visibility rule: detected quantity NEVER
+            // silenced by a missing rate.
+            for (const item of ratePending) {
+              const verdict = eligibilityById.get(item.id)
+              const warning = verdict?.warning ?? 'RATE_MISSING'
+              const suggested = verdict?.suggestedCode ?? null
+              const prefix =
+                warning === 'RATE_SLOT_MISSING'
+                  ? `[RATE SLOT MISSING${suggested ? ` — add ${suggested}` : ''}]`
+                  : `[RATE MISSING${suggested ? ` — populate ${suggested}` : ''}]`
+              const qty = Number(item.qtyFinal ?? item.qtyAi ?? 0)
+              lineData.push({
+                organizationId: ctx.organizationId,
+                boqId: boq.id,
+                sectionId: section.id,
+                itemRef: nextRef(),
+                description: `${prefix} ${item.description}`,
+                unit: item.unit,
+                qty,
+                isProvisional: false,
+                rate: null,
+                amount: null,
+                rateSource: null,
+                confidence: item.confidence,
+                takeoffItemId: item.id,
+                psAmount: null,
+                provenance: buildUnpricedLineProvenance(item, verdict) as object,
                 sortOrder: lineIx,
               })
               lineIx += 1
