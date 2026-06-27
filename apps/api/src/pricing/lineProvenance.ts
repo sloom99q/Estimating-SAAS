@@ -292,12 +292,31 @@ export type ProvenanceInput = z.infer<typeof ProvenanceInput>
 // The payload.
 // ─────────────────────────────────────────────────────────────────
 
+/// CLASSIFIER-5 (2026-06-27) — added PROVISIONAL_SUM + LUMP_SUM as
+/// first-class statuses so the audit chip on a BOQ line is honest
+/// instead of forcing every non-priced line through MANUAL:
+///
+///   PROVISIONAL_SUM (P/S) — allowance set aside pending supplier
+///     quote / scope confirmation. Stone cladding, façade, home
+///     automation, windows. Estimator-set figure, NOT computed
+///     from the drawing.
+///   LUMP_SUM (LS) — supplier quote already in hand, contractor
+///     has confirmed the whole-scope number. Joinery is the
+///     canonical case. Has a fixed price; the BOQ doesn't break
+///     it into qty × rate.
+///
 /// TR-3 — added IMPORTED for supplier quotes / consultant BOQ /
 /// vendor catalogs. Different from MANUAL: the human didn't compose
-/// the line, they pulled it from an external source. Audit treats
-/// it like MANUAL (no derivation required) but evidence kind=import
-/// records the provenance separately.
-export const SourceType = z.enum(['MEASURED', 'DERIVED', 'ESTIMATED', 'MANUAL', 'IMPORTED'])
+/// the line, they pulled it from an external source.
+export const SourceType = z.enum([
+  'MEASURED',
+  'DERIVED',
+  'ESTIMATED',
+  'MANUAL',
+  'IMPORTED',
+  'PROVISIONAL_SUM',
+  'LUMP_SUM',
+])
 export type SourceType = z.infer<typeof SourceType>
 
 /// TR-3 — how the line's value was produced.
@@ -440,6 +459,44 @@ export function manual(args: {
     ],
     confidence: args.confidence ?? 1,
     evidenceChain: args.evidenceChain,
+    stampedBy: args.stampedBy,
+  }
+}
+
+/// CLASSIFIER-5 — collapsed P/S line. Allowance pending supplier
+/// quote / scope confirmation; estimator-set figure.
+export function provisionalSum(args: {
+  evidence: Evidence[]
+  reasoning?: string
+  evidenceChain?: EvidenceStep[]
+  stampedBy: string
+}): LineProvenance {
+  return {
+    sourceType: 'PROVISIONAL_SUM',
+    derivationType: null,
+    evidence: args.evidence,
+    reasoning: args.reasoning,
+    evidenceChain: args.evidenceChain,
+    confidence: 1,
+    stampedBy: args.stampedBy,
+  }
+}
+
+/// CLASSIFIER-5 — collapsed LS line. Supplier quote already in
+/// hand; fixed price for the whole scope (joinery, kitchens).
+export function lumpSum(args: {
+  evidence: Evidence[]
+  reasoning?: string
+  evidenceChain?: EvidenceStep[]
+  stampedBy: string
+}): LineProvenance {
+  return {
+    sourceType: 'LUMP_SUM',
+    derivationType: null,
+    evidence: args.evidence,
+    reasoning: args.reasoning,
+    evidenceChain: args.evidenceChain,
+    confidence: 1,
     stampedBy: args.stampedBy,
   }
 }

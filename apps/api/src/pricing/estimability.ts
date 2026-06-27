@@ -61,8 +61,12 @@ import type { Estimability, TakeoffCategory } from '@prisma/client'
 export const DEFAULT_ESTIMABILITY: Record<TakeoffCategory, Estimability> = {
   ROOM: 'MEASURED',
   AREA_STATEMENT: 'MEASURED',
-  DOOR: 'MEASURED',
-  WINDOW: 'MEASURED',
+  DOOR: 'MEASURED', // rate-cardable (variance is bounded); price normally
+  // CLASSIFIER-5 — windows ship as P/S even though we measure the
+  // count. Glazing-spec cost variance (curtain wall systems) makes
+  // count × default-rate misleading; estimator promotes to MEASURED
+  // when a real glazing-spec quote arrives.
+  WINDOW: 'PROVISIONAL_SUM',
 
   FLOOR_FINISH: 'DERIVED',
   WALL_FINISH: 'DERIVED',
@@ -74,21 +78,32 @@ export const DEFAULT_ESTIMABILITY: Record<TakeoffCategory, Estimability> = {
   WATERPROOFING: 'DERIVED',
   SANITARY: 'DERIVED',
 
-  // Contractor-typical P/S — the categories real UAE quotes mark
-  // as provisional + supplier-quoted.
-  SKIRTING: 'PROVISIONAL',
-  JOINERY: 'PROVISIONAL',
-  METAL: 'PROVISIONAL',
-  GRC: 'PROVISIONAL',
-  EXTERNAL: 'PROVISIONAL',
-  STRUCTURE_PROV: 'PROVISIONAL',
-  MEP_PROV: 'PROVISIONAL',
-  MEP_HVAC: 'PROVISIONAL',
-  MEP_ELEC: 'PROVISIONAL',
-  MEP_PLUMB: 'PROVISIONAL',
-  MEP_ELV: 'PROVISIONAL',
+  // CLASSIFIER-5 — LUMP_SUM (supplier-quoted whole-scope) for the
+  // canonical contractor-LS categories.
+  JOINERY: 'LUMP_SUM',
 
-  OTHER: 'PROVISIONAL',
+  // CLASSIFIER-5 — PROVISIONAL_SUM (allowance pending) for the
+  // categories real UAE quotes mark as P/S until supplier quote /
+  // scope confirmation.
+  SKIRTING: 'PROVISIONAL_SUM',
+  METAL: 'PROVISIONAL_SUM',
+  GRC: 'PROVISIONAL_SUM',
+  EXTERNAL: 'PROVISIONAL_SUM',
+  STRUCTURE_PROV: 'PROVISIONAL_SUM',
+  MEP_PROV: 'PROVISIONAL_SUM',
+
+  // MEP rule-engine categories — these only EXIST when QUANTIFY
+  // emits TakeoffItems for them, which (per CLASSIFIER-4
+  // PRECONDITION RULE) only happens when the project has real
+  // MEP-discipline sheets. When present, hasMepDrawings is true,
+  // so effectiveEstimability auto-promotes PROVISIONAL_SUM →
+  // DERIVED for these.
+  MEP_HVAC: 'PROVISIONAL_SUM',
+  MEP_ELEC: 'PROVISIONAL_SUM',
+  MEP_PLUMB: 'PROVISIONAL_SUM',
+  MEP_ELV: 'PROVISIONAL_SUM',
+
+  OTHER: 'PROVISIONAL_SUM',
 }
 
 /// Pure — no DB. Returns the default estimability for a category.
@@ -164,11 +179,17 @@ export function effectiveEstimability(args: {
   if (overrideValue) return overrideValue
 
   const base = classifyEstimability(args.category, args.meta)
-  // Auto-promote: MEP categories flip PROVISIONAL → DERIVED when
+  // Auto-promote: MEP categories flip PROVISIONAL_SUM → DERIVED when
   // the project has any MEP-discipline drawing sheets. PLACEHOLDER
   // stays PLACEHOLDER even with drawings (rate guess doesn't
-  // become credible just because we have the floor plan).
-  if (args.hasMepDrawings && base === 'PROVISIONAL' && MEP_CATEGORIES.has(args.category)) {
+  // become credible just because we have the floor plan). LUMP_SUM
+  // stays LUMP_SUM (the contractor already has a fixed quote, not
+  // promoting that to DERIVED just because we got plans).
+  if (
+    args.hasMepDrawings &&
+    base === 'PROVISIONAL_SUM' &&
+    MEP_CATEGORIES.has(args.category)
+  ) {
     return 'DERIVED'
   }
   return base

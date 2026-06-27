@@ -85,10 +85,21 @@ enum DocumentStatus {
 ///                engineer (sockets = rooms × 6, etc.). Routed to a
 ///                "DRAFT — not for pricing" tab; never in GRAND TOTAL.
 ///   MANUAL       human-typed line. Trust the user.
+/// CLASSIFIER-5 (2026-06-27) — PROVISIONAL split into two honest
+/// first-class statuses matching how UAE contractors actually
+/// quote:
+///   PROVISIONAL_SUM (P/S) — allowance pending supplier quote /
+///     scope confirmation. Stone cladding, façade, home automation,
+///     windows. The number is an estimator-set allowance, not a
+///     priced computation.
+///   LUMP_SUM (LS) — the contractor has a confirmed supplier quote
+///     for the whole scope. Joinery is the canonical case. Has a
+///     fixed price; the BOQ doesn't try to break it into qty × rate.
 enum Estimability {
   MEASURED
   DERIVED
-  PROVISIONAL
+  PROVISIONAL_SUM
+  LUMP_SUM
   PLACEHOLDER
   MANUAL
 }
@@ -611,7 +622,11 @@ model TakeoffItem {
   /// price it, derive it, route it to P/S, or hide it from the
   /// engineer export. Defaulted per-category by classifyEstimability
   /// at creation time; reviewer can override per line.
-  estimability   Estimability?   @default(MEASURED)
+  /// Defaults to PROVISIONAL_SUM — the safest fallback. The
+  /// per-category map in apps/api/src/pricing/estimability.ts
+  /// overrides during insertion + the BOQ generator routes
+  /// accordingly.
+  estimability   Estimability?   @default(PROVISIONAL_SUM)
   confidence     Int             @default(0)
   sourceSheetId  String?
   sourceNote     String?

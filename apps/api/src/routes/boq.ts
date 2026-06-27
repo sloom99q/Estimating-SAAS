@@ -376,15 +376,19 @@ function buildAutoLineProvenance(
 }
 
 /**
- * CLASSIFIER-2 — build provenance for a PROVISIONAL line that
- * collapses N TakeoffItems into ONE P/S row. The evidence array
- * lists each rolled-up item so the engineer can drill back into
- * the originals via the SPA / XLSX evidence chip.
+ * CLASSIFIER-2/5 — build provenance for a collapsed BoqLine that
+ * rolls N TakeoffItems into ONE P/S or LS row. The kind ('P/S' or
+ * 'LS') sets the sourceType so the audit chip stays honest:
+ *   PROVISIONAL_SUM — allowance pending (estimator-set)
+ *   LUMP_SUM        — supplier-quoted whole-scope (contractor-set)
+ * The evidence array lists each rolled-up item so the engineer can
+ * drill back into the originals via the SPA / XLSX evidence chip.
  */
-function buildCollapsedProvisionalProvenance(
+function buildCollapsedCollapseProvenance(
   items: TakeoffForProvenance[],
   category: TakeoffCategory,
   psAmount: number | null | undefined,
+  kind: 'PROVISIONAL_SUM' | 'LUMP_SUM',
 ): LineProvenance {
   const evidence: Evidence[] = items.slice(0, 25).map((it) => ({
     kind: 'takeoffItem' as const,
@@ -399,20 +403,21 @@ function buildCollapsedProvisionalProvenance(
       note: `+${items.length - 25} more takeoff items rolled up`,
     })
   }
+  const kindLabel = kind === 'PROVISIONAL_SUM' ? 'P/S allowance' : 'LS supplier-quote allowance'
   evidence.push({
     kind: 'legacy',
-    note: `Contractor-typical P/S allowance for ${category} — ${
+    note: `Contractor-typical ${kindLabel} for ${category} — ${
       psAmount != null
         ? `${psAmount.toLocaleString('en-AE')} AED from engineer-takeoff defaults`
         : 'allowance pending estimator confirmation'
-    }. Per CLASSIFIER-2: the app deliberately does not estimate this discipline from the drawing; a contractor confirms the number.`,
+    }. The app deliberately does not estimate this discipline from the drawing; a contractor / supplier confirms the number.`,
   })
   return {
-    sourceType: 'MANUAL',
+    sourceType: kind,
     derivationType: null,
     evidence,
     confidence: 1,
-    stampedBy: 'generateBoq.provisionalCollapse',
+    stampedBy: kind === 'PROVISIONAL_SUM' ? 'generateBoq.provisionalCollapse' : 'generateBoq.lumpSumCollapse',
   }
 }
 
@@ -672,7 +677,12 @@ export function registerBoqRoutes(router: Router): void {
             //     XLSX-3 draft tab can show them when explicitly
             //     requested.
             const priced: typeof sectionItems = []
+            // CLASSIFIER-5 — separate P/S vs LS buckets so the
+            // collapsed line stamps the correct SourceType in
+            // provenance. Both still collapse 1-line-per-category,
+            // both flow into the section as isProvisional=true.
             const provByCategory = new Map<TakeoffCategory, typeof sectionItems>()
+            const lumpByCategory = new Map<TakeoffCategory, typeof sectionItems>()
             for (const item of sectionItems) {
               const meta = (item.meta ?? {}) as Record<string, unknown>
               const est = effectiveEstimability({
@@ -682,11 +692,18 @@ export function registerBoqRoutes(router: Router): void {
                 hasMepDrawings,
               })
               if (est === 'PLACEHOLDER') continue
-              if (est === 'PROVISIONAL') {
+              if (est === 'PROVISIONAL_SUM') {
                 const cat = item.category as TakeoffCategory
                 const list = provByCategory.get(cat) ?? []
                 list.push(item)
                 provByCategory.set(cat, list)
+                continue
+              }
+              if (est === 'LUMP_SUM') {
+                const cat = item.category as TakeoffCategory
+                const list = lumpByCategory.get(cat) ?? []
+                list.push(item)
+                lumpByCategory.set(cat, list)
                 continue
               }
               // MEASURED / DERIVED / MANUAL — price normally.
@@ -731,25 +748,20 @@ export function registerBoqRoutes(router: Router): void {
               lineIx += 1
             }
 
-            // (b) Provisional collapse — one BoqLine per category,
-            // psAmount = DEFAULT_PROVISIONAL_AED (real numbers from
-            // estimability.ts). Provenance lists the rolled-up
-            // TakeoffItems as evidence so the drill-down trail
-            // stays intact.
+            // (b) PROVISIONAL_SUM collapse — one BoqLine per category,
+            // psAmount = DEFAULT_PROVISIONAL_AED (when the discipline
+            // has a contractor-confirmed allowance). Provenance lists
+            // rolled-up TakeoffItems as evidence; sourceType=PROVISIONAL_SUM.
             for (const cat of [...provByCategory.keys()].sort()) {
               const items = provByCategory.get(cat)!
               const psAmount = DEFAULT_PROVISIONAL_AED[cat]
-              const isMep = MEP_CATEGORIES.has(cat)
               const disciplineLabel = MEP_DISCIPLINE_LABEL[cat] ?? cat.replace(/_/g, ' ')
               const psText =
                 psAmount != null
-                  ? ` (P/S ${psAmount.toLocaleString('en-AE')} AED, contractor-typical)`
+                  ? ` (P/S ${psAmount.toLocaleString('en-AE')} AED, contractor-typical allowance)`
                   : ' (P/S, allowance to be confirmed)'
               const description =
-                `${disciplineLabel} — provisional sum${psText}; rolled up from ${items.length} takeoff item${items.length === 1 ? '' : 's'}` +
-                (isMep && !hasMepDrawings
-                  ? ' (MEP drawings not uploaded — discipline ships P/S until engineer takeoff confirms)'
-                  : '')
+                `${disciplineLabel} — provisional sum${psText}; rolled up from ${items.length} takeoff item${items.length === 1 ? '' : 's'}`
               lineData.push({
                 organizationId: ctx.organizationId,
                 boqId: boq.id,
@@ -765,7 +777,42 @@ export function registerBoqRoutes(router: Router): void {
                 rate: null,
                 amount: null,
                 rateSource: null,
-                provenance: buildCollapsedProvisionalProvenance(items, cat, psAmount) as object,
+                provenance: buildCollapsedCollapseProvenance(items, cat, psAmount, 'PROVISIONAL_SUM') as object,
+                sortOrder: lineIx,
+              })
+              lineIx += 1
+            }
+
+            // (c) LUMP_SUM collapse — one BoqLine per category. Same
+            // shape as P/S but stamped sourceType=LUMP_SUM in the
+            // provenance so the audit chip reads "LS — supplier quote
+            // pending" rather than "P/S allowance".
+            for (const cat of [...lumpByCategory.keys()].sort()) {
+              const items = lumpByCategory.get(cat)!
+              const psAmount = DEFAULT_PROVISIONAL_AED[cat]
+              const disciplineLabel = MEP_DISCIPLINE_LABEL[cat] ?? cat.replace(/_/g, ' ')
+              const lsText =
+                psAmount != null
+                  ? ` (LS ${psAmount.toLocaleString('en-AE')} AED, supplier-quote allowance)`
+                  : ' (LS, supplier quote pending)'
+              const description =
+                `${disciplineLabel} — lump sum${lsText}; rolled up from ${items.length} takeoff item${items.length === 1 ? '' : 's'}`
+              lineData.push({
+                organizationId: ctx.organizationId,
+                boqId: boq.id,
+                sectionId: section.id,
+                itemRef: nextRef(),
+                description,
+                unit: 'LS',
+                qty: '1',
+                isProvisional: true,
+                psAmount: psAmount != null ? psAmount.toString() : null,
+                confidence: 100,
+                takeoffItemId: null,
+                rate: null,
+                amount: null,
+                rateSource: null,
+                provenance: buildCollapsedCollapseProvenance(items, cat, psAmount, 'LUMP_SUM') as object,
                 sortOrder: lineIx,
               })
               lineIx += 1

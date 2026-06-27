@@ -94,6 +94,9 @@ interface DerivedSummary {
     emitted: number
     zeroDriver: number
     rulesEvaluated: number
+    /// CLASSIFIER-4 — true when the project has no MEP-discipline
+    /// sheets, in which case the rule engine is gated off entirely.
+    preconditionFailed?: boolean
     drivers: {
       interiorAreaM2: string
       interiorAreaFt2: string
@@ -723,25 +726,69 @@ export const quantifyHandler: JobHandler = async (job: JobRecord) => {
   }
 
   // --- MEP (rule-driven) -----------------------------------------------
-  // MEP-4 — every active MepRule fires against the project's drawing-
-  // measurable drivers (interior floor area, room counts, bathroom /
-  // kitchen counts, etc.). Each rule emits ONE TakeoffItem stamped:
-  //   basis=DERIVED
-  //   meta.mepRuleId   → ties the line back to the rule for audit chip
-  //   meta.formulaText → human readable "qty = AREA_FT2 (3,834) × 0.00741 = 28.4"
-  //   meta.factorSource / rateSource → preserved on the BoqLine evidence
-  //   meta.mepRate     → the rule's rate (BOQ generator bakes it in)
-  // Confidence = min(factor, rate) on the rule → routed through the
-  // auditor's Confidence module → PLACEHOLDER rules end up in the SPA
-  // review queue automatically.
-  const mepRules = await prisma.mepRule.findMany({
+  // CLASSIFIER-4 PRECONDITION RULE (2026-06-27) — the MEP rule engine
+  // ONLY fires when the project has real MEP-discipline drawing
+  // sheets. Without engineer drawings, "sockets = rooms × 6" is a
+  // contractor's nightmare — not an estimate. We refuse to pretend.
+  //
+  // No MEP sheets → emit zero MEP TakeoffItems → no MEP BoqLines →
+  // no MEP section in the BOQ → engineer numbers in estimability.ts
+  // (HVAC 252k, Elec 190k, Plumb 235k, ELV 114k) stay dormant until
+  // they're actually load-bearing for a real DERIVED line.
+  //
+  // The check matches the BOQ generator's hasMepDrawings exactly so
+  // QUANTIFY and BOQ stay in sync.
+  const mepSheetCount = await prisma.sheet.count({
     where: {
       organizationId: job.organizationId,
-      active: true,
-      deletedAt: null,
+      discipline: 'MEP',
+      document: { projectId: payload.projectId, deletedAt: null },
     },
-    orderBy: [{ discipline: 'asc' }, { sortOrder: 'asc' }],
   })
+  if (mepSheetCount === 0) {
+    console.log(
+      `[quantify.mep] PRECONDITION-FAIL: no MEP-discipline sheets in project ${payload.projectId} — MEP rule engine skipped entirely. Upload MEP drawings to enable.`,
+    )
+    summary.mep = {
+      emitted: 0,
+      zeroDriver: 0,
+      rulesEvaluated: 0,
+      preconditionFailed: true,
+      drivers: {
+        interiorAreaM2: '0',
+        interiorAreaFt2: '0',
+        ROOM_COUNT: 0,
+        BATHROOM_COUNT: 0,
+        KITCHEN_COUNT: 0,
+        BEDROOM_COUNT: 0,
+      },
+    }
+    // Soft-delete any MEP TakeoffItems that previous runs created
+    // before the precondition gate existed. Same stale-sweep idiom
+    // as the FF/CL/WF/SK/VAN tags below.
+    const staleMep = await prisma.takeoffItem.updateMany({
+      where: {
+        organizationId: job.organizationId,
+        projectId: payload.projectId,
+        deletedAt: null,
+        category: { in: ['MEP_HVAC', 'MEP_ELEC', 'MEP_PLUMB', 'MEP_ELV'] },
+      },
+      data: { deletedAt: new Date() },
+    })
+    if (staleMep.count > 0) {
+      console.log(`[quantify.mep] swept ${staleMep.count} stale MEP TakeoffItems from prior runs.`)
+    }
+  }
+  const mepRules = mepSheetCount === 0
+    ? []
+    : await prisma.mepRule.findMany({
+        where: {
+          organizationId: job.organizationId,
+          active: true,
+          deletedAt: null,
+        },
+        orderBy: [{ discipline: 'asc' }, { sortOrder: 'asc' }],
+      })
 
   // Pre-compute drivers from the same `rooms` slice the rest of the
   // handler uses. Interior-floor area mirrors the screed selection.

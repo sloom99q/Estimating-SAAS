@@ -220,12 +220,16 @@ const integrityModule: AuditModule = {
       }
     }
     if (
-      (p.sourceType === 'MEASURED' || p.sourceType === 'MANUAL' || p.sourceType === 'IMPORTED') &&
+      (p.sourceType === 'MEASURED' ||
+        p.sourceType === 'MANUAL' ||
+        p.sourceType === 'IMPORTED' ||
+        p.sourceType === 'PROVISIONAL_SUM' ||
+        p.sourceType === 'LUMP_SUM') &&
       p.derivationType != null
     ) {
       addFinding(
         bag,
-        `${p.sourceType} should have derivationType=null (got '${p.derivationType}'); a measured/typed/imported line has no derivation step`,
+        `${p.sourceType} should have derivationType=null (got '${p.derivationType}'); a measured/typed/imported/P-S/LS line has no derivation step`,
         `Clear derivationType (set to null) — or change sourceType to DERIVED if there really is a derivation step.`,
         'BAD_DERIVATION',
       )
@@ -290,7 +294,16 @@ const rateEvidenceModule: AuditModule = {
   name: 'RateEvidence',
   applies: (line) => {
     const st = line.provenance?.sourceType
-    return !line.isProvisional && st !== 'MANUAL' && st !== 'IMPORTED'
+    // P/S + LS are estimator/contractor-set; they have no underlying
+    // unit-rate the Library could match. Skip the rate-evidence
+    // check for them — it would always REVIEW noisily.
+    return (
+      !line.isProvisional &&
+      st !== 'MANUAL' &&
+      st !== 'IMPORTED' &&
+      st !== 'PROVISIONAL_SUM' &&
+      st !== 'LUMP_SUM'
+    )
   },
   check(line) {
     const p = line.provenance
@@ -334,10 +347,17 @@ const rateEvidenceModule: AuditModule = {
 
 const confidenceModule: AuditModule = {
   name: 'Confidence',
-  // MANUAL + IMPORTED are 1.0 by default — skip noisy threshold check.
+  // MANUAL / IMPORTED / PROVISIONAL_SUM / LUMP_SUM are 1.0 by
+  // default — they're estimator/contractor-set figures, not
+  // computed values, so the confidence threshold is noise.
   applies: (line) => {
     const st = line.provenance?.sourceType
-    return st !== 'MANUAL' && st !== 'IMPORTED'
+    return (
+      st !== 'MANUAL' &&
+      st !== 'IMPORTED' &&
+      st !== 'PROVISIONAL_SUM' &&
+      st !== 'LUMP_SUM'
+    )
   },
   check(line) {
     const p = line.provenance
