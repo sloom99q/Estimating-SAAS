@@ -12,10 +12,10 @@ import {
   type EstimabilityOverrides,
 } from '../pricing/estimability'
 import {
-  isBoqEligible,
+  classifyLine,
   loadRateLibrarySnapshot,
-  type EligibilityVerdict,
-} from '../pricing/boqEligibility'
+  type LineClassification,
+} from '../pricing/lineClassifier'
 import type { Estimability, TakeoffCategory } from '@prisma/client'
 import { recomputeBoqTotals } from '../pricing/recomputeBoqTotals'
 import {
@@ -443,7 +443,7 @@ function buildCollapsedCollapseProvenance(
  */
 function buildUnpricedLineProvenance(
   item: TakeoffForProvenance,
-  verdict: EligibilityVerdict | undefined,
+  verdict: LineClassification | undefined,
 ): LineProvenance {
   // Reuse the standard auto-provenance builder for the quantity
   // side (preserves the evidence chain), then layer a rate-side
@@ -606,7 +606,7 @@ export function registerBoqRoutes(router: Router): void {
       // downstream per-section loop can route AI items per the
       // gate's `isPriced` signal (populated slot → priced; empty
       // slot → PROVISIONAL_SUM with "rate pending" reasoning).
-      const eligibilityById = new Map<string, EligibilityVerdict>()
+      const classifiedById = new Map<string, LineClassification>()
       let skippedRoomItems = 0
       let skippedLegendItems = 0
       let skippedAiByGate = 0
@@ -620,16 +620,17 @@ export function registerBoqRoutes(router: Router): void {
           skippedLegendItems += 1
           continue
         }
-        // BoqEligibilityGate. Only suppresses qty=0 items now —
-        // any detected qty>0 line is admitted, with isPriced=false
-        // for rate-pending lines so the engineer sees the qty
-        // alongside "add {suggestedCode} to rate library".
-        const verdict = isBoqEligible(item, rateLibSnapshot)
-        if (!verdict.eligible) {
+        // Axis 1 (LineState) — classifier decides if the line
+        // appears at all. Only qty<=0 suppresses today; missing
+        // rates / missing slots do NOT silence detection.
+        // Axis 2 (pricing — isPriced / warning / suggestedCode)
+        // is consumed in the per-section loop below.
+        const verdict = classifyLine(item, rateLibSnapshot)
+        if (verdict.state === 'SUPPRESSED') {
           skippedAiByGate += 1
           continue
         }
-        eligibilityById.set(item.id, verdict)
+        classifiedById.set(item.id, verdict)
         const sectionCode = CATEGORY_TO_SECTION[item.category] ?? '1.0'
         const bucket = sectionBuckets.get(sectionCode)
         if (bucket) bucket.push(item)
@@ -789,8 +790,8 @@ export function registerBoqRoutes(router: Router): void {
               // isPriced=false ship as VISIBLE-UNPRICED at per-item
               // granularity (not collapsed). Estimator sees each
               // detected qty + the rate slot they need to fix.
-              const verdict = eligibilityById.get(item.id)
-              if (verdict && verdict.eligible && !verdict.isPriced) {
+              const verdict = classifiedById.get(item.id)
+              if (verdict && verdict.state === 'ACTIVE' && !verdict.isPriced) {
                 ratePending.push(item)
               } else {
                 priced.push(item)
@@ -913,7 +914,7 @@ export function registerBoqRoutes(router: Router): void {
             // Sprint-1.2 visibility rule: detected quantity NEVER
             // silenced by a missing rate.
             for (const item of ratePending) {
-              const verdict = eligibilityById.get(item.id)
+              const verdict = classifiedById.get(item.id)
               const warning = verdict?.warning ?? 'RATE_MISSING'
               const suggested = verdict?.suggestedCode ?? null
               const prefix =
